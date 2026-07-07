@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litkg"
+version = "0.1.0"
+description = "Unified literature knowledge base and knowledge graph builder."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = []
+
+[project.scripts]
+litkg = "litkg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
