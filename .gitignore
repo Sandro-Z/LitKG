@@ -1,1 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# LitKG runtime outputs
 data/
+*.sqlite
+*.sqlite3
+*.db
+*.graphml
+*.jsonl.tmp
