@@ -55,7 +55,7 @@ services:
       - postgres
       - redis
       - grobid
-    command: celery -A app.celery_app worker -Q parse --concurrency=4 --prefetch-multiplier=1 --loglevel=INFO
+    command: celery -A app.celery_app worker -Q parse --concurrency=${PARSE_WORKER_CONCURRENCY:-4} --prefetch-multiplier=1 --loglevel=INFO
 
   worker_extract:
     build:
@@ -69,7 +69,7 @@ services:
     depends_on:
       - postgres
       - redis
-    command: celery -A app.celery_app worker -Q extract --concurrency=1 --prefetch-multiplier=1 --loglevel=INFO
+    command: celery -A app.celery_app worker -Q extract --concurrency=${EXTRACT_WORKER_CONCURRENCY:-2} --prefetch-multiplier=1 --loglevel=INFO
 
   frontend:
     build:

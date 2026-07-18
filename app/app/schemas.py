@@ -28,3 +28,8 @@ class Claim(BaseModel):
 
 class ClaimBundle(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
+
+
+class KnowledgeBaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)

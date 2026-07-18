@@ -1,5 +1,4 @@
 import os
-import tempfile
 
 import pandas as pd
 import requests
@@ -11,13 +10,11 @@ from streamlit_autorefresh import st_autorefresh
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8080")
 
-
 st.set_page_config(
-    page_title="LitKG 文献知识抽取系统",
+    page_title="LitKG 统一文献知识库",
     page_icon="🧬",
     layout="wide",
 )
-
 
 ENTITY_COLORS = {
     "Compound": "#F97316",
@@ -35,63 +32,66 @@ ENTITY_COLORS = {
 
 
 def api_get(path: str, params: dict | None = None):
-    url = f"{API_BASE_URL}{path}"
-    resp = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    response = requests.get(
+        f"{API_BASE_URL}{path}",
+        params=params,
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
-def api_upload_pdf(file):
-    url = f"{API_BASE_URL}/documents"
-    files = {
-        "file": (file.name, file.getvalue(), "application/pdf")
-    }
-    resp = requests.post(url, files=files, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
+def api_post_json(path: str, payload: dict):
+    response = requests.post(
+        f"{API_BASE_URL}{path}",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
-def normalize_chunk_stats(chunk_stats):
-    stats = {
-        "queued": 0,
-        "extracting": 0,
-        "done": 0,
-        "failed": 0,
-        "parsing": 0,
-    }
-
-    for row in chunk_stats:
-        stats[row["status"]] = row["count"]
-
-    total = sum(stats.values())
-    done = stats.get("done", 0)
-    failed = stats.get("failed", 0)
-
-    if total == 0:
-        progress = 0.0
-    else:
-        progress = (done + failed) / total
-
-    return stats, total, progress
+def api_upload_batch(
+    knowledge_base_id: int,
+    uploaded_files,
+    batch_name: str,
+    force_reprocess: bool,
+):
+    files = [
+        (
+            "files",
+            (file.name, file.getvalue(), "application/pdf"),
+        )
+        for file in uploaded_files
+    ]
+    response = requests.post(
+        f"{API_BASE_URL}/knowledge-bases/{knowledge_base_id}/documents",
+        files=files,
+        data={
+            "batch_name": batch_name,
+            "force_reprocess": str(force_reprocess).lower(),
+        },
+        timeout=300,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def render_graph(graph_data):
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
-
     if not nodes or not edges:
-        st.info("当前文献还没有可展示的图谱关系。")
+        st.info("当前筛选范围还没有可展示的关系。")
         return
 
-    net = Network(
-        height="720px",
+    network = Network(
+        height="760px",
         width="100%",
         directed=True,
         bgcolor="#ffffff",
         font_color="#111827",
     )
-
-    net.barnes_hut(
+    network.barnes_hut(
         gravity=-30000,
         central_gravity=0.3,
         spring_length=180,
@@ -101,20 +101,36 @@ def render_graph(graph_data):
 
     for node in nodes:
         node_type = node.get("type") or "Other"
-        color = ENTITY_COLORS.get(node_type, ENTITY_COLORS["Other"])
-
-        net.add_node(
+        normalized_id = node.get("normalized_id") or "未规范化"
+        network.add_node(
             node["id"],
-            label=node.get("label", node["id"]),
-            title=f"{node_type}: {node.get('label', node['id'])}",
-            color=color,
+            label=node.get("label") or str(node["id"]),
+            title=(
+                f"类型: {node_type}<br>"
+                f"名称: {node.get('label')}<br>"
+                f"规范化 ID: {normalized_id}"
+            ),
+            color=ENTITY_COLORS.get(
+                node_type,
+                ENTITY_COLORS["Other"],
+            ),
             shape="dot",
-            size=22,
+            size=24,
         )
 
     for edge in edges:
         confidence = edge.get("confidence")
-        confidence_text = "NA" if confidence is None else f"{confidence:.2f}"
+        confidence_text = (
+            "NA" if confidence is None else f"{confidence:.2f}"
+        )
+        samples = edge.get("evidence_samples") or []
+        evidence_html = "<br><br>".join(
+            (
+                f"[{sample.get('filename')}] "
+                f"{sample.get('sentence')}"
+            )
+            for sample in samples
+        )
 
         edge_color = "#64748B"
         if edge.get("negated"):
@@ -122,46 +138,33 @@ def render_graph(graph_data):
         elif edge.get("speculative"):
             edge_color = "#D97706"
 
-        title = (
-            f"关系: {edge.get('label')}\n"
-            f"置信度: {confidence_text}\n"
-            f"否定: {edge.get('negated')}\n"
-            f"推测: {edge.get('speculative')}\n\n"
-            f"证据: {edge.get('evidence')}"
-        )
-
-        net.add_edge(
+        network.add_edge(
             edge["source"],
             edge["target"],
             label=edge.get("label", ""),
-            title=title,
+            title=(
+                f"关系: {edge.get('label')}<br>"
+                f"平均置信度: {confidence_text}<br>"
+                f"支持文献: {edge.get('document_count', 0)}<br>"
+                f"证据数: {edge.get('evidence_count', 0)}<br><br>"
+                f"{evidence_html}"
+            ),
             color=edge_color,
             arrows="to",
+            width=min(8, 1 + edge.get("document_count", 1)),
         )
 
-    net.set_options(
+    network.set_options(
         """
         const options = {
-          "nodes": {
-            "font": {
-              "size": 16,
-              "face": "Arial"
-            }
-          },
+          "nodes": {"font": {"size": 16, "face": "Arial"}},
           "edges": {
-            "font": {
-              "size": 12,
-              "align": "middle"
-            },
-            "smooth": {
-              "type": "dynamic"
-            }
+            "font": {"size": 12, "align": "middle"},
+            "smooth": {"type": "dynamic"}
           },
           "physics": {
             "enabled": true,
-            "stabilization": {
-              "iterations": 200
-            }
+            "stabilization": {"iterations": 200}
           },
           "interaction": {
             "hover": true,
@@ -171,222 +174,297 @@ def render_graph(graph_data):
         }
         """
     )
+    components.html(network.generate_html(), height=800, scrolling=True)
 
-    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:
-        net.save_graph(f.name)
-        html = open(f.name, "r", encoding="utf-8").read()
 
-    components.html(html, height=760, scrolling=True)
+def load_knowledge_bases():
+    return api_get("/knowledge-bases", params={"limit": 500}).get(
+        "knowledge_bases",
+        [],
+    )
 
 
 def main():
-    st.title("🧬 LitKG 文献知识抽取系统")
-    st.caption("PDF 文献上传、后台处理进度监控、结构化 claims 与图谱示意图展示")
+    st.title("🧬 LitKG 统一文献知识库")
+    st.caption(
+        "批量摄取 PDF，跨文献合并实体与关系，并保留逐篇、逐句证据来源"
+    )
+
+    try:
+        knowledge_bases = load_knowledge_bases()
+    except Exception as exc:
+        st.error(f"无法连接 API：{exc}")
+        st.stop()
 
     with st.sidebar:
-        st.header("系统配置")
-        st.write("API 后端：")
-        st.code(API_BASE_URL)
+        st.header("知识库")
+        if not knowledge_bases:
+            st.warning("当前没有知识库，请先创建。")
+            selected_knowledge_base_id = None
+        else:
+            labels = {
+                item["id"]: (
+                    f"{item['name']} · {item['document_count']} 篇文献"
+                )
+                for item in knowledge_bases
+            }
+            selected_knowledge_base_id = st.selectbox(
+                "当前知识库",
+                options=list(labels),
+                format_func=lambda item_id: labels[item_id],
+            )
 
+        with st.expander("新建知识库"):
+            with st.form("create_knowledge_base"):
+                new_name = st.text_input("名称")
+                new_description = st.text_area("说明")
+                create_clicked = st.form_submit_button("创建")
+            if create_clicked:
+                try:
+                    api_post_json(
+                        "/knowledge-bases",
+                        {
+                            "name": new_name,
+                            "description": new_description or None,
+                        },
+                    )
+                    st.success("知识库已创建。")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"创建失败：{exc}")
+
+        st.divider()
         auto_refresh = st.checkbox("自动刷新", value=True)
         refresh_interval = st.slider(
-            "刷新间隔，秒",
+            "刷新间隔（秒）",
             min_value=3,
             max_value=60,
             value=10,
-            step=1,
         )
-
         if auto_refresh:
             st_autorefresh(
                 interval=refresh_interval * 1000,
                 key="litkg_autorefresh",
             )
+        st.caption(f"API：{API_BASE_URL}")
 
-        if st.button("手动刷新"):
-            st.rerun()
+    if selected_knowledge_base_id is None:
+        st.stop()
 
-    tabs = st.tabs(["📤 文献上传", "📚 文献列表", "📈 处理进度", "🧾 Claims", "🕸️ 图谱示意图"])
+    tabs = st.tabs(
+        [
+            "📤 批量导入",
+            "🧰 批次进度",
+            "📚 文献",
+            "🧾 Claims",
+            "🕸️ 统一图谱",
+        ]
+    )
 
     with tabs[0]:
-        st.subheader("上传 PDF 文献")
-
-        uploaded_file = st.file_uploader(
-            "选择一篇 PDF 文献",
+        st.subheader("批量导入 PDF")
+        uploaded_files = st.file_uploader(
+            "选择一批 PDF 文献",
             type=["pdf"],
-            accept_multiple_files=False,
+            accept_multiple_files=True,
+        )
+        batch_name = st.text_input("批次名称（可选）")
+        force_reprocess = st.checkbox(
+            "重新处理知识库中已有的相同 PDF",
+            value=False,
+            help="默认按 SHA-256 去重，已处理文献会直接复用。",
         )
 
-        if uploaded_file is not None:
-            st.write("文件名：", uploaded_file.name)
-            st.write("文件大小：", f"{len(uploaded_file.getvalue()) / 1024 / 1024:.2f} MB")
+        if uploaded_files:
+            total_size = sum(len(file.getvalue()) for file in uploaded_files)
+            col1, col2 = st.columns(2)
+            col1.metric("文献数量", len(uploaded_files))
+            col2.metric("总大小", f"{total_size / 1024 / 1024:.1f} MB")
 
-            if st.button("上传并开始处理", type="primary"):
+            if st.button("上传并开始批量处理", type="primary"):
                 try:
-                    result = api_upload_pdf(uploaded_file)
-                    st.success("上传成功，已加入后台处理队列。")
-                    st.json(result)
-                except Exception as e:
-                    st.error(f"上传失败：{e}")
+                    result = api_upload_batch(
+                        selected_knowledge_base_id,
+                        uploaded_files,
+                        batch_name,
+                        force_reprocess,
+                    )
+                    st.session_state["last_batch_id"] = result["id"]
+                    st.success(
+                        f"批次 {result['id']} 已建立，"
+                        f"接收 {result['accepted_count']} / "
+                        f"{result['submitted_count']} 个文件。"
+                    )
+                    st.dataframe(
+                        pd.DataFrame(result["items"]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                except Exception as exc:
+                    st.error(f"批量上传失败：{exc}")
 
     with tabs[1]:
-        st.subheader("最近文献")
-
+        st.subheader("批次进度")
         try:
-            data = api_get("/documents", params={"limit": 100})
-            docs = data.get("documents", [])
+            batches = api_get(
+                f"/knowledge-bases/{selected_knowledge_base_id}/batches",
+                params={"limit": 100},
+            ).get("batches", [])
 
-            if not docs:
-                st.info("暂无文献。")
+            if not batches:
+                st.info("当前知识库还没有导入批次。")
             else:
-                df = pd.DataFrame(docs)
                 st.dataframe(
-                    df[
-                        [
-                            "id",
-                            "filename",
-                            "title",
-                            "status",
-                            "chunk_count",
-                            "chunk_done_count",
-                            "chunk_failed_count",
-                            "claim_count",
-                            "created_at",
-                            "updated_at",
-                        ]
-                    ],
+                    pd.DataFrame(batches),
                     use_container_width=True,
                     hide_index=True,
                 )
-        except Exception as e:
-            st.error(f"读取文献列表失败：{e}")
+                default_batch = st.session_state.get(
+                    "last_batch_id",
+                    batches[0]["id"],
+                )
+                batch_ids = [batch["id"] for batch in batches]
+                selected_batch_id = st.selectbox(
+                    "查看批次",
+                    batch_ids,
+                    index=(
+                        batch_ids.index(default_batch)
+                        if default_batch in batch_ids
+                        else 0
+                    ),
+                )
+                batch = api_get(
+                    f"/ingestion-batches/{selected_batch_id}"
+                )
+                items = batch.get("items", [])
+                finished = sum(
+                    item["status"] in {"done", "partial", "failed", "rejected"}
+                    for item in items
+                )
+                progress = finished / len(items) if items else 0.0
+                col1, col2, col3 = st.columns(3)
+                col1.metric("批次状态", batch["status"])
+                col2.metric("已接收", batch["accepted_count"])
+                col3.metric("完成比例", f"{progress * 100:.1f}%")
+                st.progress(progress)
+                st.dataframe(
+                    pd.DataFrame(items),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        except Exception as exc:
+            st.error(f"读取批次失败：{exc}")
 
     with tabs[2]:
-        st.subheader("处理进度")
-
-        document_id = st.number_input(
-            "输入 document_id",
-            min_value=1,
-            step=1,
-            key="progress_doc_id",
-        )
-
-        if st.button("查询进度", key="progress_query"):
-            pass
-
+        st.subheader("知识库文献")
         try:
-            data = api_get(f"/documents/{document_id}")
-            doc = data["document"]
-            stats, total, progress = normalize_chunk_stats(data.get("chunks", []))
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("文档状态", doc["status"])
-            col2.metric("Chunk 总数", total)
-            col3.metric("Claims 数量", data.get("claim_count", 0))
-            col4.metric("完成比例", f"{progress * 100:.1f}%")
-
-            st.progress(progress)
-
-            st.write("文件名：", doc["filename"])
-            st.write("标题：", doc.get("title") or "未解析")
-            st.write("错误信息：", doc.get("error") or "无")
-
-            st.table(pd.DataFrame([stats]))
-
-        except Exception as e:
-            st.warning(f"无法读取 document_id={document_id} 的状态：{e}")
-
-    with tabs[3]:
-        st.subheader("结构化 Claims")
-
-        document_id = st.number_input(
-            "输入 document_id",
-            min_value=1,
-            step=1,
-            key="claims_doc_id",
-        )
-
-        claim_limit = st.slider(
-            "最多显示 claims 数量",
-            min_value=10,
-            max_value=1000,
-            value=100,
-            step=10,
-        )
-
-        try:
-            data = api_get(
-                f"/documents/{document_id}/claims",
-                params={"limit": claim_limit},
-            )
-            claims = data.get("claims", [])
-
-            if not claims:
-                st.info("当前文献还没有抽取到 claims。")
-            else:
-                df = pd.DataFrame(claims)
-
-                display_cols = [
-                    "id",
-                    "subject_text",
-                    "subject_type",
-                    "predicate",
-                    "object_text",
-                    "object_type",
-                    "confidence",
-                    "negated",
-                    "speculative",
-                    "evidence_text",
-                ]
-
+            documents = api_get(
+                f"/knowledge-bases/{selected_knowledge_base_id}/documents",
+                params={"limit": 500},
+            ).get("documents", [])
+            if documents:
                 st.dataframe(
-                    df[display_cols],
+                    pd.DataFrame(documents),
                     use_container_width=True,
                     hide_index=True,
                 )
+            else:
+                st.info("暂无文献。")
+        except Exception as exc:
+            st.error(f"读取文献失败：{exc}")
 
-                with st.expander("查看原始 JSON"):
-                    st.json(claims)
-
-        except Exception as e:
-            st.warning(f"无法读取 claims：{e}")
+    with tabs[3]:
+        st.subheader("跨文献 Claims")
+        col1, col2 = st.columns(2)
+        predicate = col1.text_input("按关系筛选（可选）")
+        entity_type = col2.selectbox(
+            "按实体类型筛选",
+            [
+                "",
+                "Compound",
+                "Drug",
+                "Protein",
+                "Gene",
+                "Disease",
+                "CellLine",
+                "Organism",
+                "Assay",
+                "Pathway",
+                "Mutation",
+                "Other",
+            ],
+        )
+        try:
+            claims = api_get(
+                f"/knowledge-bases/{selected_knowledge_base_id}/claims",
+                params={
+                    "limit": 500,
+                    "predicate": predicate or None,
+                    "entity_type": entity_type or None,
+                },
+            ).get("claims", [])
+            if claims:
+                st.dataframe(
+                    pd.DataFrame(claims),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("当前筛选条件没有 claims。")
+        except Exception as exc:
+            st.error(f"读取 claims 失败：{exc}")
 
     with tabs[4]:
-        st.subheader("图谱示意图")
-
-        document_id = st.number_input(
-            "输入 document_id",
-            min_value=1,
-            step=1,
-            key="graph_doc_id",
-        )
-
-        graph_limit = st.slider(
-            "最多加载关系数量",
+        st.subheader("统一、可溯源知识图谱")
+        col1, col2, col3 = st.columns(3)
+        graph_limit = col1.slider(
+            "最多关系数",
             min_value=20,
-            max_value=1000,
+            max_value=2000,
             value=300,
             step=20,
         )
-
-        st.caption(
-            "节点颜色按实体类型区分；红色边表示 negated=true，橙色边表示 speculative=true。"
+        min_document_count = col2.number_input(
+            "最少支持文献数",
+            min_value=1,
+            value=1,
+            step=1,
         )
+        evidence_limit = col3.slider(
+            "每条关系显示的证据样本",
+            min_value=1,
+            max_value=10,
+            value=3,
+        )
+        include_speculative = st.checkbox("包含推测关系", value=True)
+        include_negated = st.checkbox("包含否定关系", value=True)
 
         try:
             graph = api_get(
-                f"/documents/{document_id}/graph",
-                params={"limit": graph_limit},
+                f"/knowledge-bases/{selected_knowledge_base_id}/graph",
+                params={
+                    "limit": graph_limit,
+                    "min_document_count": min_document_count,
+                    "evidence_limit": evidence_limit,
+                    "include_speculative": include_speculative,
+                    "include_negated": include_negated,
+                },
             )
-
-            col1, col2 = st.columns(2)
-            col1.metric("节点数量", len(graph.get("nodes", [])))
-            col2.metric("边数量", len(graph.get("edges", [])))
-
+            summary = graph.get("summary", {})
+            col1, col2, col3 = st.columns(3)
+            col1.metric("实体", summary.get("node_count", 0))
+            col2.metric("聚合关系", summary.get("relation_count", 0))
+            col3.metric(
+                "覆盖文献",
+                summary.get("represented_document_count", 0),
+            )
+            st.caption(
+                "同一实体按类型、规范化 ID 或规范化名称合并；"
+                "边粗细代表支持文献数。红色为否定，橙色为推测。"
+            )
             render_graph(graph)
-
-        except Exception as e:
-            st.warning(f"无法生成图谱：{e}")
+        except Exception as exc:
+            st.error(f"读取统一图谱失败：{exc}")
 
 
 if __name__ == "__main__":

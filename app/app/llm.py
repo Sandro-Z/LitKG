@@ -150,7 +150,8 @@ def build_extraction_messages(section_title: str, chunk_text: str):
 3. 如果是否定结果，negated=true。
 4. 如果是推测、假设、背景介绍、未来工作，speculative=true。
 5. 不确定时不要抽取。
-6. normalized_id 必须填 null，不要自己编造数据库 ID。
+6. 只有片段明确给出 ChEBI、PubChem CID、UniProt、NCBI Gene、DrugBank
+   等标准数据库 ID 时才填写 normalized_id；否则填 null，禁止推断或编造。
 7. 严格输出 JSON。
 8. 顶层字段必须是 claims。
 9. 不要输出解释。
