@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS documents (
     filename TEXT NOT NULL,
     source_path TEXT NOT NULL,
     title TEXT,
+    doi TEXT,
     status TEXT NOT NULL DEFAULT 'uploaded',
     error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -18,6 +19,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index INT NOT NULL,
     section_title TEXT,
+    page_start INT,
+    page_end INT,
+    page_spans JSONB NOT NULL DEFAULT '[]'::jsonb,
     text TEXT NOT NULL,
     token_estimate INT,
     status TEXT NOT NULL DEFAULT 'queued',
@@ -120,6 +124,24 @@ CREATE TABLE IF NOT EXISTS claims (
 
 -- These ALTER statements make this script safe to apply to databases created by
 -- the original single-document version.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doi TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS page_start INT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS page_end INT;
+ALTER TABLE chunks
+    ADD COLUMN IF NOT EXISTS page_spans JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- The old pypdf fallback used an unambiguous, one-based PDF page heading.
+UPDATE chunks
+SET page_start = SUBSTRING(section_title FROM '^Page ([0-9]+)$')::INT,
+    page_end = SUBSTRING(section_title FROM '^Page ([0-9]+)$')::INT,
+    page_spans = jsonb_build_array(jsonb_build_object(
+        'start', 0,
+        'end', LENGTH(text),
+        'page_start', SUBSTRING(section_title FROM '^Page ([0-9]+)$')::INT,
+        'page_end', SUBSTRING(section_title FROM '^Page ([0-9]+)$')::INT
+    ))
+WHERE page_start IS NULL AND section_title ~ '^Page [1-9][0-9]*$';
+
 ALTER TABLE claims
     ADD COLUMN IF NOT EXISTS subject_normalized_id TEXT;
 ALTER TABLE claims

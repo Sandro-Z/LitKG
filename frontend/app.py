@@ -1,4 +1,5 @@
 import os
+from html import escape
 
 import pandas as pd
 import requests
@@ -126,8 +127,11 @@ def render_graph(graph_data):
         samples = edge.get("evidence_samples") or []
         evidence_html = "<br><br>".join(
             (
-                f"[{sample.get('filename')}] "
-                f"{sample.get('sentence')}"
+                f"{escape(sample.get('title') or sample.get('filename') or '')}<br>"
+                f"DOI: {escape(sample.get('doi') or '未知')} | "
+                f"PDF 页码: {sample.get('page') or '未知'}"
+                f"–{sample.get('page_end') or sample.get('page') or '未知'}<br>"
+                f"{escape(sample.get('sentence') or '')}"
             )
             for sample in samples
         )
@@ -258,6 +262,7 @@ def main():
             "📚 文献",
             "🧾 Claims",
             "🕸️ 统一图谱",
+            "🔎 实体与关系检索",
         ]
     )
 
@@ -406,6 +411,12 @@ def main():
             if claims:
                 st.dataframe(
                     pd.DataFrame(claims),
+                    column_order=[
+                        "id", "subject_text", "predicate", "object_text",
+                        "title", "doi", "page", "page_end", "filename",
+                        "section_title", "table_or_figure", "evidence_text",
+                        "confidence", "negated", "speculative",
+                    ],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -416,6 +427,10 @@ def main():
 
     with tabs[4]:
         st.subheader("统一、可溯源知识图谱")
+        col1, col2, col3 = st.columns(3)
+        graph_query = col1.text_input("搜索实体名称、别名、标准 ID 或关系", key="graph_query")
+        graph_predicate = col2.text_input("关系类型（可选）", key="graph_predicate")
+        graph_entity_type = col3.selectbox("实体类型（可选）", [""] + list(ENTITY_COLORS), key="graph_entity_type")
         col1, col2, col3 = st.columns(3)
         graph_limit = col1.slider(
             "最多关系数",
@@ -444,6 +459,9 @@ def main():
                 f"/knowledge-bases/{selected_knowledge_base_id}/graph",
                 params={
                     "limit": graph_limit,
+                    "query": graph_query or None,
+                    "predicate": graph_predicate or None,
+                    "entity_type": graph_entity_type or None,
                     "min_document_count": min_document_count,
                     "evidence_limit": evidence_limit,
                     "include_speculative": include_speculative,
@@ -465,6 +483,79 @@ def main():
             render_graph(graph)
         except Exception as exc:
             st.error(f"读取统一图谱失败：{exc}")
+
+    with tabs[5]:
+        st.subheader("检索知识图谱中的实体与关系")
+        search_kind = st.radio("检索对象", ["关系", "实体"], horizontal=True)
+        result_key = f"kg_search_{selected_knowledge_base_id}_{search_kind}"
+        with st.form("kg_search"):
+            col1, col2 = st.columns(2)
+            query = col1.text_input("关键词", help="支持名称、别名和标准数据库 ID；关系检索也支持关系类型。")
+            entity_type = col2.selectbox("实体类型", [""] + list(ENTITY_COLORS), key="search_entity_type")
+            params = {"query": query or None, "entity_type": entity_type or None}
+            if search_kind == "关系":
+                col1, col2, col3 = st.columns(3)
+                params["subject"] = col1.text_input("主语名称（可选）") or None
+                params["predicate"] = col2.text_input("关系类型（可选）", key="search_predicate") or None
+                params["object"] = col3.text_input("宾语名称（可选）") or None
+                col1, col2 = st.columns(2)
+                selected_entity_id = col1.number_input("实体 ID（0 表示不限）", min_value=0, value=0, step=1)
+                params["entity_id"] = selected_entity_id or None
+                params["direction"] = col2.selectbox(
+                    "相对于该实体的方向",
+                    ["both", "outgoing", "incoming"],
+                    format_func=lambda value: {"both": "双向", "outgoing": "作为主语", "incoming": "作为宾语"}[value],
+                )
+                col1, col2 = st.columns(2)
+                params["include_negated"] = col1.checkbox("包含否定关系", value=True, key="search_negated")
+                params["include_speculative"] = col2.checkbox("包含推测关系", value=True, key="search_speculative")
+            col1, col2 = st.columns(2)
+            params["limit"] = col1.selectbox("每页条数", [20, 50, 100], index=1)
+            page_number = col2.number_input("页数", min_value=1, value=1, step=1)
+            params["offset"] = (page_number - 1) * params["limit"]
+            submitted = st.form_submit_button("检索", type="primary")
+
+        if submitted:
+            if params.get("direction", "both") != "both" and not params.get("entity_id"):
+                st.error("按方向筛选时，请填写实体 ID。")
+            else:
+                try:
+                    resource = "relations" if search_kind == "关系" else "entities"
+                    st.session_state[result_key] = api_get(
+                        f"/knowledge-bases/{selected_knowledge_base_id}/{resource}",
+                        params=params,
+                    )
+                except Exception as exc:
+                    st.error(f"检索失败：{exc}")
+
+        result = st.session_state.get(result_key)
+        if result is not None:
+            if search_kind == "实体":
+                entities = result.get("entities", [])
+                st.caption(f"本页返回 {len(entities)} 个实体，可使用实体 ID 查询相关关系。")
+                if entities:
+                    st.dataframe(pd.DataFrame(entities), use_container_width=True, hide_index=True)
+                else:
+                    st.info("没有匹配的实体。")
+            else:
+                relations = result.get("relations", [])
+                st.caption(f"共匹配 {result.get('total', 0)} 条关系，本页返回 {len(relations)} 条。")
+                if not relations:
+                    st.info("本页没有匹配的关系。")
+                for relation in relations:
+                    label = f"{relation['subject']['text']} → {relation['predicate']} → {relation['object']['text']}"
+                    with st.expander(label):
+                        st.caption(
+                            f"支持文献 {relation['document_count']} 篇 · 证据 {relation['evidence_count']} 条 · "
+                            f"否定：{'是' if relation['negated'] else '否'} · 推测：{'是' if relation['speculative'] else '否'}"
+                        )
+                        for sample in relation.get("evidence_samples", []):
+                            st.write(sample.get("sentence"))
+                            st.caption(
+                                f"{sample.get('title') or sample.get('filename')} | DOI: {sample.get('doi') or '未知'} | "
+                                f"PDF 页码: {sample.get('page') or '未知'}–{sample.get('page_end') or sample.get('page') or '未知'} | "
+                                f"章节: {sample.get('section') or '未知'}"
+                            )
 
 
 if __name__ == "__main__":

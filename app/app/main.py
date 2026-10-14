@@ -1,7 +1,7 @@
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     FastAPI,
@@ -14,7 +14,7 @@ from fastapi import (
 
 from app.batch_status import sync_batch_status
 from app.db import get_conn
-from app.graph_query import fetch_graph
+from app.graph_query import fetch_graph, fetch_relations, substring_pattern
 from app.ingestion import (
     UploadRejected,
     register_document,
@@ -22,6 +22,7 @@ from app.ingestion import (
     store_pdf,
 )
 from app.normalization import normalize_entity_type, normalize_predicate
+from app.provenance import add_claim_location
 from app.schemas import KnowledgeBaseCreate
 from app.tasks import (
     parse_document,
@@ -121,6 +122,7 @@ def _batch_payload(
                     item.status,
                     item.error,
                     document.title,
+                    document.doi,
                     document.created_at AS document_created_at,
                     document.updated_at AS document_updated_at
                 FROM ingestion_batch_items item
@@ -429,6 +431,7 @@ def list_knowledge_base_documents(
                     document.sha256,
                     document.filename,
                     document.title,
+                    document.doi,
                     document.status,
                     document.error,
                     document.created_at,
@@ -528,8 +531,12 @@ def get_knowledge_base_claims(
                     claim.id,
                     claim.document_id,
                     document.filename,
+                    document.title,
+                    document.doi,
                     claim.chunk_id,
                     chunk.section_title,
+                    chunk.page_start AS chunk_page_start,
+                    chunk.page_end AS chunk_page_end,
                     claim.subject_text,
                     claim.subject_type,
                     claim.subject_normalized_id,
@@ -555,7 +562,7 @@ def get_knowledge_base_claims(
                 """,
                 (*params, limit, offset),
             )
-            rows = cur.fetchall()
+            rows = [add_claim_location(row) for row in cur.fetchall()]
 
     return {
         "knowledge_base_id": knowledge_base_id,
@@ -575,22 +582,22 @@ def search_knowledge_base_entities(
 ):
     filters = []
     params: list[Any] = []
-    if query:
+    if query and query.strip():
         filters.append(
             """
             (
-                entity.canonical_name ILIKE %s
-                OR entity.normalized_id ILIKE %s
+                entity.canonical_name ILIKE %s ESCAPE '!'
+                OR entity.normalized_id ILIKE %s ESCAPE '!'
                 OR EXISTS (
                     SELECT 1
                     FROM entity_aliases alias
                     WHERE alias.entity_id = entity.id
-                      AND alias.alias ILIKE %s
+                      AND alias.alias ILIKE %s ESCAPE '!'
                 )
             )
             """
         )
-        pattern = f"%{query.strip()}%"
+        pattern = substring_pattern(query)
         params.extend([pattern, pattern, pattern])
     if entity_type:
         filters.append("entity.entity_type = %s")
@@ -639,7 +646,7 @@ def search_knowledge_base_entities(
                 LEFT JOIN entity_aliases alias ON alias.entity_id = entity.id
                 {"WHERE " + " AND ".join(filters) if filters else ""}
                 GROUP BY entity.id
-                ORDER BY document_count DESC, entity.canonical_name
+                ORDER BY document_count DESC, entity.canonical_name, entity.id
                 LIMIT %s OFFSET %s
                 """,
                 (
@@ -660,6 +667,54 @@ def search_knowledge_base_entities(
     }
 
 
+@app.get("/knowledge-bases/{knowledge_base_id}/relations")
+def search_knowledge_base_relations(
+    knowledge_base_id: int,
+    query: str | None = Query(None, max_length=200),
+    entity_id: int | None = Query(None, ge=1),
+    subject_entity_id: int | None = Query(None, ge=1),
+    object_entity_id: int | None = Query(None, ge=1),
+    subject: str | None = Query(None, max_length=200),
+    object_query: str | None = Query(None, alias="object", max_length=200),
+    direction: Literal["both", "outgoing", "incoming"] = Query("both"),
+    predicate: str | None = Query(None, max_length=200),
+    entity_type: str | None = Query(None, max_length=200),
+    min_document_count: int = Query(1, ge=1),
+    include_negated: bool = Query(True),
+    include_speculative: bool = Query(True),
+    evidence_limit: int = Query(3, ge=1, le=20),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    if direction != "both" and entity_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="entity_id is required for direction filtering",
+        )
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            return fetch_relations(
+                cur,
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                entity_id=entity_id,
+                subject_entity_id=subject_entity_id,
+                object_entity_id=object_entity_id,
+                subject=subject,
+                object_query=object_query,
+                direction=direction,
+                predicate=predicate,
+                entity_type=entity_type,
+                min_document_count=min_document_count,
+                include_negated=include_negated,
+                include_speculative=include_speculative,
+                evidence_limit=evidence_limit,
+                limit=limit,
+                offset=offset,
+            )
+
+
 @app.get("/knowledge-bases/{knowledge_base_id}/graph")
 def get_knowledge_base_graph(
     knowledge_base_id: int,
@@ -670,7 +725,15 @@ def get_knowledge_base_graph(
     entity_type: str | None = Query(None),
     include_negated: bool = Query(True),
     include_speculative: bool = Query(True),
+    query: str | None = Query(None, max_length=200),
+    entity_id: int | None = Query(None, ge=1),
+    direction: Literal["both", "outgoing", "incoming"] = Query("both"),
 ):
+    if direction != "both" and entity_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="entity_id is required for direction filtering",
+        )
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_knowledge_base(cur, knowledge_base_id)
@@ -684,6 +747,9 @@ def get_knowledge_base_graph(
                 entity_type=entity_type,
                 include_negated=include_negated,
                 include_speculative=include_speculative,
+                query=query,
+                entity_id=entity_id,
+                direction=direction,
             )
     graph["knowledge_base_id"] = knowledge_base_id
     return graph
@@ -747,6 +813,7 @@ def list_documents(limit: int = Query(50, ge=1, le=500)):
                     document.id,
                     document.filename,
                     document.title,
+                    document.doi,
                     document.status,
                     document.error,
                     document.created_at,
@@ -783,6 +850,7 @@ def get_document(document_id: int):
                     sha256,
                     filename,
                     title,
+                    doi,
                     status,
                     error,
                     created_at,
@@ -843,32 +911,45 @@ def get_claims(
 ):
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM documents WHERE id = %s", (document_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Document not found")
             cur.execute(
                 """
                 SELECT
-                    id,
-                    subject_text,
-                    subject_type,
-                    subject_normalized_id,
-                    subject_entity_id,
-                    predicate,
-                    object_text,
-                    object_type,
-                    object_normalized_id,
-                    object_entity_id,
-                    evidence_text,
-                    confidence,
-                    negated,
-                    speculative,
-                    claim_json
-                FROM claims
-                WHERE document_id = %s
-                ORDER BY id
+                    claim.id,
+                    claim.document_id,
+                    document.filename,
+                    document.title,
+                    document.doi,
+                    claim.chunk_id,
+                    chunk.section_title,
+                    chunk.page_start AS chunk_page_start,
+                    chunk.page_end AS chunk_page_end,
+                    claim.subject_text,
+                    claim.subject_type,
+                    claim.subject_normalized_id,
+                    claim.subject_entity_id,
+                    claim.predicate,
+                    claim.object_text,
+                    claim.object_type,
+                    claim.object_normalized_id,
+                    claim.object_entity_id,
+                    claim.evidence_text,
+                    claim.confidence,
+                    claim.negated,
+                    claim.speculative,
+                    claim.claim_json
+                FROM claims claim
+                JOIN documents document ON document.id = claim.document_id
+                LEFT JOIN chunks chunk ON chunk.id = claim.chunk_id
+                WHERE claim.document_id = %s
+                ORDER BY claim.id
                 LIMIT %s OFFSET %s
                 """,
                 (document_id, limit, offset),
             )
-            rows = cur.fetchall()
+            rows = [add_claim_location(row) for row in cur.fetchall()]
     return {
         "document_id": document_id,
         "claims": rows,

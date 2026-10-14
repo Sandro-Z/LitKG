@@ -1,9 +1,12 @@
+from psycopg.types.json import Jsonb
+
 from app.batch_status import sync_batches_for_document
 from app.celery_app import celery_app
 from app.db import get_conn
 from app.graph_store import project_existing_claim, store_claim
 from app.llm import LLM_MODEL, extract_claims
 from app.parser import parse_pdf_to_chunks
+from app.provenance import locate_evidence_pages
 
 
 def update_document_status(
@@ -108,18 +111,19 @@ def parse_document(document_id: int):
         if not document:
             raise RuntimeError(f"Document not found: {document_id}")
 
-        title, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
+        metadata, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
 
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE documents
-                    SET title = %s, status = 'chunked', error = NULL,
+                    SET title = COALESCE(%s, title), doi = COALESCE(%s, doi),
+                        status = 'chunked', error = NULL,
                         updated_at = now()
                     WHERE id = %s
                     """,
-                    (title, document_id),
+                    (metadata["title"], metadata["doi"], document_id),
                 )
 
                 # A re-run replaces the document's projection. Evidence from other
@@ -137,14 +141,20 @@ def parse_document(document_id: int):
                             document_id,
                             chunk_index,
                             section_title,
+                            page_start,
+                            page_end,
+                            page_spans,
                             text,
                             token_estimate,
                             status
                         )
-                        VALUES (%s, %s, %s, %s, %s, 'queued')
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued')
                         ON CONFLICT (document_id, chunk_index)
                         DO UPDATE SET
                             section_title = EXCLUDED.section_title,
+                            page_start = EXCLUDED.page_start,
+                            page_end = EXCLUDED.page_end,
+                            page_spans = EXCLUDED.page_spans,
                             text = EXCLUDED.text,
                             token_estimate = EXCLUDED.token_estimate,
                             status = 'queued',
@@ -156,6 +166,9 @@ def parse_document(document_id: int):
                             document_id,
                             index,
                             chunk["section_title"],
+                            chunk["page_start"],
+                            chunk["page_end"],
+                            Jsonb(chunk["page_spans"]),
                             chunk["text"],
                             chunk["token_estimate"],
                         ),
@@ -202,6 +215,9 @@ def extract_chunk(chunk_id: int):
                         id,
                         document_id,
                         section_title,
+                        page_start,
+                        page_end,
+                        page_spans,
                         text
                     FROM chunks
                     WHERE id = %s
@@ -225,6 +241,11 @@ def extract_chunk(chunk_id: int):
                 cur.execute("DELETE FROM claims WHERE chunk_id = %s", (chunk_id,))
 
                 for claim in bundle.claims:
+                    page, page_end = locate_evidence_pages(claim.evidence.sentence, chunk)
+                    claim.evidence.page = page
+                    claim.evidence.page_end = page_end
+                    if not claim.evidence.section:
+                        claim.evidence.section = chunk["section_title"]
                     store_claim(
                         cur,
                         document_id=document_id,

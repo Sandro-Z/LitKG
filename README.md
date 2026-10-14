@@ -12,7 +12,9 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 - 一个部署可维护多个独立知识库。
 - 实体先规范化再写入全局实体表，跨文献出现的同一实体只形成一个节点。
 - 相同主语、谓词、宾语、限定条件和极性的关系合并成一条边。
-- 每条聚合边保留支持文献数、证据数、原文句子、章节、文件名和置信度。
+- 每条 claim 和图谱证据保留标题、DOI、PDF 页码、原文句子、章节和文件名。
+- 可按实体名称、别名、标准 ID、主语/宾语和关系类型检索知识图谱。
+- 每条聚合边保留支持文献数、证据数和置信度。
 - 新文献处理完成后直接加入现有图谱，不需要全量重建。
 - Celery 重投递或手动重跑同一 chunk 时不会累积重复 claim。
 - 原有的 `POST /documents`、单篇 claims 和单篇 graph 接口保持兼容。
@@ -112,6 +114,11 @@ curl -X POST \
 请使用第一个请求中 `slug=default` 的实际 ID，不要在非全新数据库中假定
 它一定为 `1`。重建任务只补充规范化投影，不会重新调用 LLM。
 
+本次出处信息升级也使用上述幂等迁移：新增 `documents.doi` 和 chunks 的
+页码、段落位置字段。旧版 pypdf 生成的 `Page N` 片段可自动补齐页码；
+其他旧文献若缺少 DOI 或页码，请重新上传相同 PDF 并设置
+`force_reprocess=true`，重新解析和抽取。仅重建图谱不会补齐解析元数据。
+
 ## API 示例
 
 ### 1. 创建知识库
@@ -201,6 +208,10 @@ include_negated=false&include_speculative=false"
         {
           "document_id": 31,
           "filename": "paper-a.pdf",
+          "title": "Kinase inhibition study",
+          "doi": "10.1234/example",
+          "page": 3,
+          "page_end": 3,
           "section": "Results",
           "sentence": "Exact evidence sentence...",
           "confidence": 0.96
@@ -228,6 +239,104 @@ curl "http://localhost:8080/knowledge-bases/2/batches"
 所有列表接口都支持有界的 `limit`；claims、entities 和文献列表支持
 `offset`，便于大知识库分页。
 
+claims 的知识库接口和单篇接口均新增以下顶层字段，并保留原有字段：
+
+- `title`、`doi`：当前文献的标题和 DOI。DOI 优先从 GROBID 文献头提取，
+  排除参考文献；PDF 回退解析使用元数据或首页显式标注的 DOI。
+- `page`、`page_end`：证据所在的 PDF 起止页，按 PDF 页序号从 `1` 开始，
+  与期刊印刷页码可能不同。段落跨页或无法精确匹配句子时保留已知页码范围。
+- `section`、`table_or_figure`：证据章节和图表标记。
+- `document_id`、`filename`、`chunk_id`：用于追溯对应文献和片段。
+
+标题、DOI 或页码缺失时返回 `null`。页码由解析器确定，模型输出的页码
+不作为来源。图谱和关系检索接口的 `evidence_samples` 同样包含这些出处信息。
+Streamlit 的 Claims 表格、图谱证据提示和关系检索结果可直接查看出处。
+
+### 6. 检索实体与关系
+
+实体检索沿用 `GET /knowledge-bases/{id}/entities`，按名称、别名或标准数据库
+ID 做大小写不敏感的子串匹配。关系检索新增
+`GET /knowledge-bases/{id}/relations`：
+
+```bash
+# 先找到实体及其 ID
+curl "http://localhost:8080/knowledge-bases/2/entities?query=EGFR&entity_type=Protein"
+
+# 按实体关键词检索相关关系
+curl "http://localhost:8080/knowledge-bases/2/relations?query=EGFR&limit=50&offset=0"
+
+# 精确查找某个实体作为宾语的抑制关系
+curl "http://localhost:8080/knowledge-bases/2/relations?entity_id=12&direction=incoming&predicate=INHIBITS"
+
+# 同时指定主语与宾语名称（也支持别名、标准 ID）
+curl "http://localhost:8080/knowledge-bases/2/relations?subject=gefitinib&object=EGFR"
+
+# 将检索结果展示成子图
+curl "http://localhost:8080/knowledge-bases/2/graph?query=EGFR"
+```
+
+关系检索参数：
+
+| 参数 | 用途 |
+| --- | --- |
+| `query` | 匹配两端实体的名称、别名、标准 ID，或关系类型 |
+| `entity_id` | 精确匹配任一端实体 ID |
+| `direction` | `both`（默认）、`outgoing`（作为主语）、`incoming`（作为宾语）；后两者必须提供 `entity_id` |
+| `subject_entity_id` / `object_entity_id` | 精确指定主语 / 宾语实体 ID |
+| `subject` / `object` | 分别按主语 / 宾语名称、别名或标准 ID 匹配 |
+| `predicate` / `entity_type` | 筛选关系类型 / 任一端实体类型 |
+| `min_document_count` | 最少支持文献数，默认 `1` |
+| `include_negated` / `include_speculative` | 是否包含否定 / 推测关系，默认 `true` |
+| `evidence_limit` | 每条关系返回的证据样本数，默认 `3`，最大 `20` |
+| `limit` / `offset` | 分页，默认 `100` / `0`，`limit` 最大 `1000` |
+
+多个筛选条件同时生效，搜索中的 `%` 和 `_` 按普通字符处理。
+所有关系、支持文献计数和证据样本均限定在当前知识库内。
+
+```json
+{
+  "knowledge_base_id": 2,
+  "relations": [
+    {
+      "id": 8,
+      "subject": {"id": 4, "text": "Gefitinib", "type": "Drug", "normalized_id": null},
+      "predicate": "INHIBITS",
+      "object": {"id": 12, "text": "EGFR", "type": "Protein", "normalized_id": null},
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "confidence": 0.93,
+      "max_confidence": 0.96,
+      "document_count": 7,
+      "evidence_count": 9,
+      "evidence": "Exact evidence sentence...",
+      "evidence_samples": [
+        {
+          "claim_id": 99,
+          "document_id": 31,
+          "filename": "paper-a.pdf",
+          "title": "Kinase inhibition study",
+          "doi": "10.1234/example",
+          "page": 3,
+          "page_end": 3,
+          "section": "Results",
+          "table_or_figure": null,
+          "sentence": "Exact evidence sentence...",
+          "confidence": 0.96
+        }
+      ]
+    }
+  ],
+  "total": 1,
+  "limit": 100,
+  "offset": 0
+}
+```
+
+`total` 为分页前匹配关系总数，超出末页时仍返回准确的总数。
+`GET /knowledge-bases/{id}/graph` 也支持 `query`、`entity_id` 和 `direction`，
+返回现有 `nodes` / `edges` 结构。
+
 ## 旧版接口兼容
 
 ```bash
@@ -249,6 +358,7 @@ app/app/
 ├── normalization.py   # 实体、谓词、限定条件和 claim 稳定键
 ├── graph_store.py     # 实体、关系和证据的并发安全 upsert
 ├── graph_query.py     # 单篇/跨文献统一图谱查询与证据聚合
+├── provenance.py      # 证据句子页码定位与出处字段
 ├── batch_status.py    # 批次状态汇总
 ├── tasks.py           # 解析、抽取、增量投影和旧数据重建任务
 └── main.py            # 知识库、批次、文献、claims、实体和图谱 API
@@ -270,5 +380,10 @@ python -m unittest discover -s tests -v
 ```
 
 测试覆盖实体规范化、关系/claim 指纹、文件名安全处理、PDF 校验、上传大小
-限制和基于内容的文件去重。完整部署后还可用 Swagger 依次执行“创建知识库
+限制、文件去重、DOI 提取、跨页证据定位、关系检索和 API 参数校验。
+设置 `LITKG_TEST_DATABASE_URL` 为独立、可丢弃的 PostgreSQL 测试库后，
+同一命令还会运行真实数据库集成测试。测试库需支持 pgvector 和 pg_trgm；
+测试会在随机临时 schema 中验证解析落库、知识库隔离、分页和幂等迁移，
+结束后删除该 schema。未设置此变量时跳过数据库集成测试。
+完整部署后还可用 Swagger 依次执行“创建知识库
 → 上传两篇文献 → 等待批次完成 → 查询统一图谱”进行端到端验证。

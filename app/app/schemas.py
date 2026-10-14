@@ -11,7 +11,8 @@ class Entity(BaseModel):
 class Evidence(BaseModel):
     section: Optional[str] = None
     sentence: str
-    page: Optional[int] = None
+    page: Optional[int] = Field(default=None, ge=1)
+    page_end: Optional[int] = Field(default=None, ge=1)
     table_or_figure: Optional[str] = None
 
 

@@ -1,7 +1,28 @@
 from collections import defaultdict
-from typing import Any
+from typing import Any, Literal
 
 from app.normalization import normalize_entity_type, normalize_predicate
+from app.provenance import evidence_location
+
+
+def substring_pattern(query: str) -> str:
+    """Treat user input as a literal substring, including SQL wildcard chars."""
+    escaped = query.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    return f"%{escaped}%"
+
+
+def _entity_search(alias: str) -> str:
+    return f"""
+        (
+            {alias}.canonical_name ILIKE %s ESCAPE '!'
+            OR {alias}.normalized_id ILIKE %s ESCAPE '!'
+            OR EXISTS (
+                SELECT 1 FROM entity_aliases alias
+                WHERE alias.entity_id = {alias}.id
+                  AND alias.alias ILIKE %s ESCAPE '!'
+            )
+        )
+    """
 
 
 def _scope_clause(
@@ -38,6 +59,15 @@ def fetch_graph(
     entity_type: str | None = None,
     include_negated: bool = True,
     include_speculative: bool = True,
+    query: str | None = None,
+    entity_id: int | None = None,
+    subject_entity_id: int | None = None,
+    object_entity_id: int | None = None,
+    subject: str | None = None,
+    object_query: str | None = None,
+    direction: Literal["both", "outgoing", "incoming"] = "both",
+    offset: int = 0,
+    include_total: bool = False,
 ) -> dict[str, Any]:
     scope_sql, scope_params = _scope_clause(
         knowledge_base_id=knowledge_base_id,
@@ -45,6 +75,39 @@ def fetch_graph(
     )
     relation_filters = []
     relation_params: list[Any] = []
+
+    if direction not in {"both", "outgoing", "incoming"}:
+        raise ValueError("Unknown relation direction")
+    if direction != "both" and entity_id is None:
+        raise ValueError("entity_id is required when filtering by direction")
+    if query and query.strip():
+        relation_filters.append(
+            f"({_entity_search('subject')} OR {_entity_search('object')} "
+            "OR r.predicate ILIKE %s ESCAPE '!')"
+        )
+        relation_params.extend([substring_pattern(query)] * 7)
+    for alias, value in (("subject", subject), ("object", object_query)):
+        if value and value.strip():
+            relation_filters.append(_entity_search(alias))
+            relation_params.extend([substring_pattern(value)] * 3)
+    if entity_id is not None:
+        if direction == "outgoing":
+            relation_filters.append("r.subject_entity_id = %s")
+            relation_params.append(entity_id)
+        elif direction == "incoming":
+            relation_filters.append("r.object_entity_id = %s")
+            relation_params.append(entity_id)
+        else:
+            relation_filters.append(
+                "(r.subject_entity_id = %s OR r.object_entity_id = %s)"
+            )
+            relation_params.extend([entity_id, entity_id])
+    if subject_entity_id is not None:
+        relation_filters.append("r.subject_entity_id = %s")
+        relation_params.append(subject_entity_id)
+    if object_entity_id is not None:
+        relation_filters.append("r.object_entity_id = %s")
+        relation_params.append(object_entity_id)
 
     if predicate:
         relation_filters.append("r.predicate = %s")
@@ -64,8 +127,7 @@ def fetch_graph(
     if relation_filters:
         filter_sql = "WHERE " + " AND ".join(relation_filters)
 
-    cur.execute(
-        f"""
+    aggregate_sql = f"""
         WITH raw_scoped_evidence AS (
             SELECT
                 re.relation_id,
@@ -125,19 +187,32 @@ def fetch_graph(
             subject.id,
             object.id
         HAVING COUNT(DISTINCT se.document_id) >= %s
+        """
+    aggregate_params = (*scope_params, *relation_params, min_document_count)
+    pagination = {}
+    if include_total:
+        cur.execute(
+            f"SELECT COUNT(*)::INT AS total FROM ({aggregate_sql}) matched",
+            aggregate_params,
+        )
+        pagination["total"] = cur.fetchone()["total"]
+    cur.execute(
+        f"""
+        {aggregate_sql}
         ORDER BY
             document_count DESC,
             evidence_count DESC,
             confidence DESC NULLS LAST,
             r.id
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,
-        (*scope_params, *relation_params, min_document_count, limit),
+        (*aggregate_params, limit, offset),
     )
     relation_rows = cur.fetchall()
 
     if not relation_rows:
         return {
+            **pagination,
             "nodes": [],
             "edges": [],
             "summary": {
@@ -172,7 +247,12 @@ def fetch_graph(
                 c.id AS claim_id,
                 c.document_id,
                 d.filename,
+                d.title,
+                d.doi,
                 ch.section_title,
+                ch.page_start AS chunk_page_start,
+                ch.page_end AS chunk_page_end,
+                c.claim_json,
                 c.evidence_text,
                 c.confidence
             FROM relation_evidence re
@@ -202,7 +282,12 @@ def fetch_graph(
             claim_id,
             document_id,
             filename,
+            title,
+            doi,
             section_title,
+            chunk_page_start,
+            chunk_page_end,
+            claim_json,
             evidence_text,
             confidence
         FROM ranked
@@ -220,7 +305,7 @@ def fetch_graph(
                 "claim_id": evidence["claim_id"],
                 "document_id": evidence["document_id"],
                 "filename": evidence["filename"],
-                "section": evidence["section_title"],
+                **evidence_location(evidence),
                 "sentence": evidence["evidence_text"],
                 "confidence": evidence["confidence"],
             }
@@ -269,6 +354,7 @@ def fetch_graph(
         )
 
     return {
+        **pagination,
         "nodes": list(node_map.values()),
         "edges": edges,
         "summary": {
@@ -276,4 +362,48 @@ def fetch_graph(
             "relation_count": len(edges),
             "represented_document_count": represented_document_count,
         },
+    }
+
+
+def fetch_relations(
+    cur,
+    *,
+    knowledge_base_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    **filters,
+) -> dict[str, Any]:
+    graph = fetch_graph(
+        cur,
+        knowledge_base_id=knowledge_base_id,
+        limit=limit,
+        offset=offset,
+        include_total=True,
+        **filters,
+    )
+    nodes = {node["id"]: node for node in graph["nodes"]}
+
+    def entity(entity_id):
+        node = nodes[entity_id]
+        return {
+            "id": node["id"],
+            "text": node["label"],
+            "type": node["type"],
+            "normalized_id": node["normalized_id"],
+        }
+
+    relations = [
+        {
+            **{key: value for key, value in edge.items() if key not in {"source", "target", "label"}},
+            "subject": entity(edge["source"]),
+            "object": entity(edge["target"]),
+        }
+        for edge in graph["edges"]
+    ]
+    return {
+        "knowledge_base_id": knowledge_base_id,
+        "relations": relations,
+        "total": graph["total"],
+        "limit": limit,
+        "offset": offset,
     }

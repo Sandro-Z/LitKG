@@ -46,6 +46,7 @@ CLAIM_SCHEMA_TEXT = """
         "section": "string or null",
         "sentence": "exact evidence sentence from input text",
         "page": null,
+        "page_end": null,
         "table_or_figure": "string or null"
       },
       "confidence": 0.0,
@@ -158,6 +159,7 @@ def build_extraction_messages(section_title: str, chunk_text: str):
 10. 不要输出 Markdown。
 11. 不要输出 ```json。
 12. 如果没有可抽取内容，输出 {{"claims": []}}。
+13. evidence.page 和 evidence.page_end 必须填 null；页码由服务端根据 PDF 定位。
 
 文献片段：
 {chunk_text}
