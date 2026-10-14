@@ -427,6 +427,61 @@ def main():
 
     with tabs[4]:
         st.subheader("统一、可溯源知识图谱")
+        normalization_key = f"normalization_{selected_knowledge_base_id}"
+        diagnostics_key = f"diagnostics_{selected_knowledge_base_id}"
+        with st.expander("实体规范化与完整图谱连通性"):
+            st.caption("按原文定义统一缩写和全称，保留数字变体与物种信息。重建使用已有证据，不调用模型。")
+            col1, col2 = st.columns(2)
+            if col1.button("检查完整知识库连通性"):
+                try:
+                    st.session_state[diagnostics_key] = api_get(
+                        f"/knowledge-bases/{selected_knowledge_base_id}/graph/diagnostics"
+                    )
+                except Exception as exc:
+                    st.error(f"连通性检查失败：{exc}")
+            if col2.button("重新规范化已有实体"):
+                try:
+                    st.session_state[normalization_key] = api_post_json(
+                        f"/knowledge-bases/{selected_knowledge_base_id}/rebuild-graph", {}
+                    )
+                except Exception as exc:
+                    st.error(f"启动规范化失败：{exc}")
+            job = st.session_state.get(normalization_key)
+            if job:
+                if job.get("status") in {"queued", "processing"}:
+                    try:
+                        status_url = f"/knowledge-bases/{selected_knowledge_base_id}/rebuild-graph/{job['task_id']}"
+                        updated_job = api_get(status_url)
+                        job = {**job, **updated_job}
+                        st.session_state[normalization_key] = job
+                    except Exception as exc:
+                        st.error(f"读取规范化进度失败：{exc}")
+                st.caption(f"规范化状态：{job.get('status')}")
+                if job.get("error"):
+                    st.error(job["error"])
+                report = job.get("result")
+                if report:
+                    st.session_state[diagnostics_key] = report["after"]
+                    labels = {
+                        "node_count": "实体数", "component_count": "连通分量数",
+                        "largest_component_node_count": "主图实体数",
+                        "isolated_node_count": "独立实体数",
+                    }
+                    st.dataframe(pd.DataFrame([
+                        {"阶段": stage, **{label: report[key][metric] for metric, label in labels.items()}}
+                        for stage, key in [("重建前", "before"), ("重建后", "after")]
+                    ]), use_container_width=True, hide_index=True)
+                    if report.get("failed_count") or report.get("skipped_active_document_count"):
+                        st.warning(
+                            f"失败 claim：{report.get('failed_count', 0)}；跳过处理中文献：{report.get('skipped_active_document_count', 0)}。"
+                        )
+            diagnostics = st.session_state.get(diagnostics_key)
+            if diagnostics:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("完整图谱连通分量", diagnostics["component_count"])
+                col2.metric("主图实体占比", f"{diagnostics['largest_component_ratio']:.1%}")
+                col3.metric("独立实体", diagnostics["isolated_node_count"])
+                st.caption("按完整知识库计算，不受下方显示关系数限制。独立实体包括仅有自环的实体。")
         col1, col2, col3 = st.columns(3)
         graph_query = col1.text_input("搜索实体名称、别名、标准 ID 或关系", key="graph_query")
         graph_predicate = col2.text_input("关系类型（可选）", key="graph_predicate")
@@ -480,6 +535,7 @@ def main():
                 "同一实体按类型、规范化 ID 或规范化名称合并；"
                 "边粗细代表支持文献数。红色为否定，橙色为推测。"
             )
+            st.caption(f"当前显示子图包含 {summary.get('component_count', 0)} 个连通分量；显示数量和筛选条件会影响子图连通性。")
             render_graph(graph)
         except Exception as exc:
             st.error(f"读取统一图谱失败：{exc}")

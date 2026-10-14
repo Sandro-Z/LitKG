@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS documents (
     source_path TEXT NOT NULL,
     title TEXT,
     doi TEXT,
+    abbreviation_map JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL DEFAULT 'uploaded',
     error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -99,6 +100,36 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     UNIQUE(entity_id, normalized_alias)
 );
 
+CREATE TABLE IF NOT EXISTS entity_identifiers (
+    entity_id BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    entity_family TEXT NOT NULL,
+    normalized_id TEXT NOT NULL,
+    identifier_key TEXT NOT NULL,
+    PRIMARY KEY (entity_family, identifier_key),
+    UNIQUE (entity_id, identifier_key)
+);
+
+-- Retain existing identifiers; canonical prefix/URL variants are added during
+-- re-normalization. Chemical IDs are shared across Drug/Compound labels.
+INSERT INTO entity_identifiers (entity_id, entity_family, normalized_id, identifier_key)
+SELECT id,
+       CASE WHEN entity_type IN ('Drug', 'Compound') THEN 'Chemical' ELSE entity_type END,
+       normalized_id, LOWER(TRIM(normalized_id))
+FROM entities
+WHERE normalized_id IS NOT NULL AND TRIM(normalized_id) <> ''
+ORDER BY id
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS graph_rebuild_jobs (
+    id UUID PRIMARY KEY,
+    knowledge_base_id BIGINT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    result JSONB,
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS claims (
     id BIGSERIAL PRIMARY KEY,
     document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -125,6 +156,8 @@ CREATE TABLE IF NOT EXISTS claims (
 -- These ALTER statements make this script safe to apply to databases created by
 -- the original single-document version.
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS doi TEXT;
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS abbreviation_map JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS page_start INT;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS page_end INT;
 ALTER TABLE chunks
@@ -257,6 +290,12 @@ CREATE INDEX IF NOT EXISTS idx_entity_aliases_normalized
     ON entity_aliases(normalized_alias);
 CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias_trgm
     ON entity_aliases USING GIN(alias gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_entity_identifiers_entity
+    ON entity_identifiers(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_identifiers_id_trgm
+    ON entity_identifiers USING GIN(normalized_id gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_graph_rebuild_jobs_kb_created
+    ON graph_rebuild_jobs(knowledge_base_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_relations_subject
     ON relations(subject_entity_id);
 CREATE INDEX IF NOT EXISTS idx_relations_object

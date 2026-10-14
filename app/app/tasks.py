@@ -3,8 +3,10 @@ from psycopg.types.json import Jsonb
 from app.batch_status import sync_batches_for_document
 from app.celery_app import celery_app
 from app.db import get_conn
-from app.graph_store import project_existing_claim, store_claim
+from app.graph_diagnostics import fetch_graph_diagnostics
+from app.graph_store import lock_graph_projection, project_existing_claim, store_claim
 from app.llm import LLM_MODEL, extract_claims
+from app.normalization import extract_abbreviations
 from app.parser import parse_pdf_to_chunks
 from app.provenance import locate_evidence_pages
 
@@ -112,18 +114,21 @@ def parse_document(document_id: int):
             raise RuntimeError(f"Document not found: {document_id}")
 
         metadata, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
+        abbreviations = extract_abbreviations("\n".join(chunk["text"] for chunk in parsed_chunks))
 
         with get_conn() as conn:
             with conn.cursor() as cur:
+                lock_graph_projection(cur)
                 cur.execute(
                     """
                     UPDATE documents
                     SET title = COALESCE(%s, title), doi = COALESCE(%s, doi),
+                        abbreviation_map = %s,
                         status = 'chunked', error = NULL,
                         updated_at = now()
                     WHERE id = %s
                     """,
-                    (metadata["title"], metadata["doi"], document_id),
+                    (metadata["title"], metadata["doi"], Jsonb(abbreviations), document_id),
                 )
 
                 # A re-run replaces the document's projection. Evidence from other
@@ -212,15 +217,17 @@ def extract_chunk(chunk_id: int):
                 cur.execute(
                     """
                     SELECT
-                        id,
-                        document_id,
-                        section_title,
-                        page_start,
-                        page_end,
-                        page_spans,
-                        text
-                    FROM chunks
-                    WHERE id = %s
+                        chunk.id,
+                        chunk.document_id,
+                        chunk.section_title,
+                        chunk.page_start,
+                        chunk.page_end,
+                        chunk.page_spans,
+                        chunk.text,
+                        document.abbreviation_map
+                    FROM chunks chunk
+                    JOIN documents document ON document.id = chunk.document_id
+                    WHERE chunk.id = %s
                     """,
                     (chunk_id,),
                 )
@@ -237,6 +244,7 @@ def extract_chunk(chunk_id: int):
 
         with get_conn() as conn:
             with conn.cursor() as cur:
+                lock_graph_projection(cur)
                 # Makes Celery redelivery and manual reprocessing idempotent.
                 cur.execute("DELETE FROM claims WHERE chunk_id = %s", (chunk_id,))
 
@@ -252,6 +260,7 @@ def extract_chunk(chunk_id: int):
                         chunk_id=chunk_id,
                         claim=claim,
                         extraction_model=LLM_MODEL,
+                        abbreviations=chunk.get("abbreviation_map") or {},
                     )
 
                 cur.execute(
@@ -276,28 +285,53 @@ def extract_chunk(chunk_id: int):
         raise
 
 
-@celery_app.task(name="rebuild_knowledge_graph", queue="extract")
-def rebuild_knowledge_graph(knowledge_base_id: int):
+def _rebuild_knowledge_graph(knowledge_base_id: int):
     last_claim_id = 0
     projected_count = 0
     failed_count = 0
     failure_samples = []
+    abbreviations_by_document = {}
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            before = fetch_graph_diagnostics(cur, knowledge_base_id)
+            cur.execute(
+                """
+                SELECT d.id, d.status,
+                    EXISTS (SELECT 1 FROM chunks ch WHERE ch.document_id = d.id AND ch.status = 'extracting') AS active_chunks
+                FROM documents d
+                JOIN knowledge_base_documents member ON member.document_id = d.id
+                WHERE member.knowledge_base_id = %s
+                ORDER BY d.id
+                """,
+                (knowledge_base_id,),
+            )
+            documents = cur.fetchall()
+    active_statuses = {"queued", "parsing", "extracting", "chunked"}
+    document_ids = [document["id"] for document in documents if document["status"] not in active_statuses and not document["active_chunks"]]
+    for document_id in document_ids:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT text FROM chunks WHERE document_id = %s ORDER BY chunk_index", (document_id,))
+                abbreviations = extract_abbreviations("\n".join(row["text"] for row in cur.fetchall()))
+                abbreviations_by_document[document_id] = abbreviations
+                cur.execute("UPDATE documents SET abbreviation_map = %s WHERE id = %s", (Jsonb(abbreviations), document_id))
 
-    while True:
+    while document_ids:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT c.id, c.claim_json
+                    SELECT c.id, c.document_id, c.claim_json
                     FROM claims c
                     JOIN knowledge_base_documents member
                       ON member.document_id = c.document_id
                     WHERE member.knowledge_base_id = %s
                       AND c.id > %s
+                      AND c.document_id = ANY(%s::BIGINT[])
                     ORDER BY c.id
                     LIMIT 500
                     """,
-                    (knowledge_base_id, last_claim_id),
+                    (knowledge_base_id, last_claim_id, document_ids),
                 )
                 rows = cur.fetchall()
 
@@ -314,6 +348,8 @@ def rebuild_knowledge_graph(knowledge_base_id: int):
                                 cur,
                                 claim_id=row["id"],
                                 claim_json=row["claim_json"],
+                                abbreviations=abbreviations_by_document[row["document_id"]],
+                                document_id=row["document_id"],
                             )
                     projected_count += 1
                 except Exception as exc:
@@ -326,9 +362,45 @@ def rebuild_knowledge_graph(knowledge_base_id: int):
                             }
                         )
 
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            after = fetch_graph_diagnostics(cur, knowledge_base_id)
     return {
         "knowledge_base_id": knowledge_base_id,
         "projected_count": projected_count,
         "failed_count": failed_count,
         "failure_samples": failure_samples,
+        "skipped_active_document_count": len(documents) - len(document_ids),
+        "abbreviation_count": sum(bool(value) for values in abbreviations_by_document.values() for value in values.values()),
+        "ambiguous_abbreviation_count": sum(value is None for values in abbreviations_by_document.values() for value in values.values()),
+        "before": before,
+        "after": after,
     }
+
+
+def _update_rebuild_job(job_id, knowledge_base_id, status, result=None, error=None):
+    if job_id is None:
+        return
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE graph_rebuild_jobs
+                SET status = %s, result = %s, error = %s, updated_at = now()
+                WHERE id = %s::UUID AND knowledge_base_id = %s
+                """,
+                (status, Jsonb(result) if result is not None else None, error, job_id, knowledge_base_id),
+            )
+
+
+@celery_app.task(name="rebuild_knowledge_graph", queue="extract")
+def rebuild_knowledge_graph(knowledge_base_id: int, job_id: str | None = None):
+    _update_rebuild_job(job_id, knowledge_base_id, "processing")
+    try:
+        result = _rebuild_knowledge_graph(knowledge_base_id)
+        status = "partial" if result["failed_count"] or result["skipped_active_document_count"] else "done"
+        _update_rebuild_job(job_id, knowledge_base_id, status, result=result)
+        return result
+    except Exception as exc:
+        _update_rebuild_job(job_id, knowledge_base_id, "failed", error=f"Graph rebuild failed: {type(exc).__name__}")
+        raise

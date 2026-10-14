@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any, Literal
 
 from app.normalization import normalize_entity_type, normalize_predicate
+from app.graph_diagnostics import connectivity_metrics
 from app.provenance import evidence_location
 
 
@@ -20,6 +21,11 @@ def _entity_search(alias: str) -> str:
                 SELECT 1 FROM entity_aliases alias
                 WHERE alias.entity_id = {alias}.id
                   AND alias.alias ILIKE %s ESCAPE '!'
+            )
+            OR EXISTS (
+                SELECT 1 FROM entity_identifiers identifier
+                WHERE identifier.entity_id = {alias}.id
+                  AND identifier.normalized_id ILIKE %s ESCAPE '!'
             )
         )
     """
@@ -85,11 +91,11 @@ def fetch_graph(
             f"({_entity_search('subject')} OR {_entity_search('object')} "
             "OR r.predicate ILIKE %s ESCAPE '!')"
         )
-        relation_params.extend([substring_pattern(query)] * 7)
+        relation_params.extend([substring_pattern(query)] * 9)
     for alias, value in (("subject", subject), ("object", object_query)):
         if value and value.strip():
             relation_filters.append(_entity_search(alias))
-            relation_params.extend([substring_pattern(value)] * 3)
+            relation_params.extend([substring_pattern(value)] * 4)
     if entity_id is not None:
         if direction == "outgoing":
             relation_filters.append("r.subject_entity_id = %s")
@@ -216,8 +222,7 @@ def fetch_graph(
             "nodes": [],
             "edges": [],
             "summary": {
-                "node_count": 0,
-                "relation_count": 0,
+                **connectivity_metrics([]),
                 "represented_document_count": 0,
             },
         }
@@ -358,8 +363,7 @@ def fetch_graph(
         "nodes": list(node_map.values()),
         "edges": edges,
         "summary": {
-            "node_count": len(node_map),
-            "relation_count": len(edges),
+            **connectivity_metrics(edges),
             "represented_document_count": represented_document_count,
         },
     }

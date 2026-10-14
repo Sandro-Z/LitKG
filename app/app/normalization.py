@@ -19,7 +19,23 @@ ENTITY_TYPES = {
     "other": "Other",
     "pathway": "Pathway",
     "protein": "Protein",
+    "chemical": "Compound",
+    "chemicalcompound": "Compound",
+    "smallmolecule": "Compound",
+    "medication": "Drug",
+    "proteins": "Protein",
+    "genes": "Gene",
+    "celllines": "CellLine",
 }
+
+_GREEK = str.maketrans({
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta",
+    "ε": "epsilon", "κ": "kappa", "λ": "lambda", "μ": "mu",
+    "ω": "omega", "θ": "theta", "σ": "sigma", "τ": "tau",
+    "ζ": "zeta", "η": "eta", "ι": "iota", "ν": "nu", "ξ": "xi",
+    "ο": "omicron", "π": "pi", "ρ": "rho", "υ": "upsilon",
+    "φ": "phi", "χ": "chi", "ψ": "psi",
+})
 
 _DASHES = str.maketrans(
     {
@@ -40,6 +56,11 @@ class EntityIdentity:
     entity_type: str
     normalized_id: str | None
     normalized_alias: str
+    aliases: tuple[str, ...] = ()
+    context_resolved: bool = False
+    document_scoped: bool = False
+    context_ambiguous: bool = False
+    local_label: bool = False
 
 
 def clean_text(value: str | None, fallback: str = "Unknown") -> str:
@@ -62,34 +83,189 @@ def normalize_alias(value: str | None) -> str:
     return re.sub(r"\s+", " ", text).casefold()
 
 
+def entity_family(entity_type: str) -> str:
+    canonical = normalize_entity_type(entity_type)
+    return "Chemical" if canonical in {"Drug", "Compound"} else canonical
+
+
+def compatible_entity_types(entity_type: str) -> list[str]:
+    return ["Drug", "Compound"] if entity_family(entity_type) == "Chemical" else [entity_type]
+
+
+def normalize_entity_alias(value: str | None, entity_type: str) -> str:
+    text = normalize_alias(value).translate(_GREEK)
+    canonical_type = normalize_entity_type(entity_type)
+    if canonical_type in {"Gene", "Protein", "CellLine", "Pathway"}:
+        # Keep digits, slash-delimited groups, mutations and species labels.
+        text = re.sub(r"[\s_-]+", "", text)
+    elif canonical_type == "Disease":
+        text = re.sub(r"[\s_-]+", " ", text)
+    else:
+        # Chemical hyphens can carry stereochemical meaning.
+        text = re.sub(r"\s*-\s*", "-", text)
+    return text
+
+
 def normalize_external_id(value: str | None) -> str | None:
     if not value:
         return None
     normalized = clean_text(value, fallback="")
-    return normalized or None
+    patterns = [
+        (r"(?:CHEBI\s*[:_]\s*|https?://purl\.obolibrary\.org/obo/CHEBI_)(\d+)", "CHEBI"),
+        (r"(?:PubChem(?:\s*CID)?\s*:\s*|CID\s*:\s*|https?://pubchem\.ncbi\.nlm\.nih\.gov/compound/)(\d+)", "PubChem"),
+        (r"(?:UniProt(?:KB)?\s*:\s*|https?://(?:www\.)?uniprot\.org/(?:uniprotkb|uniprot)/|https?://purl\.uniprot\.org/uniprot/)([A-Z0-9]+(?:-\d+)?)", "UniProt"),
+        (r"(?:NCBI\s*Gene\s*:\s*|GeneID\s*:\s*|Entrez(?:\s*Gene)?\s*:\s*|https?://(?:www\.)?ncbi\.nlm\.nih\.gov/gene/)(\d+)", "NCBIGene"),
+        (r"(?:DrugBank\s*:\s*|https?://(?:go\.)?drugbank\.(?:com|ca)/drugs/)(DB\d+)", "DrugBank"),
+    ]
+    for pattern, namespace in patterns:
+        match = re.fullmatch(pattern, normalized.rstrip("/"), flags=re.I)
+        if match:
+            identifier = match.group(1).upper()
+            if identifier.isdigit():
+                identifier = str(int(identifier))
+            return f"{namespace}:{identifier}"
+    return re.sub(r"\s*:\s*", ":", normalized) or None
+
+
+def identifier_namespace(value: str) -> str:
+    normalized = normalize_external_id(value) or value
+    return normalized.split(":", 1)[0].casefold() if ":" in normalized else "unknown"
+
+
+def abbreviation_key(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", normalize_alias(value).translate(_GREEK))
+
+
+def _align_abbreviation(short: str, long: str) -> str | None:
+    """Match abbreviation letters backwards, requiring the first at a word start."""
+    letters = [char for char in short.casefold().translate(_GREEK) if char.isalnum()]
+    if not 2 <= len(letters) <= 12 or not any(char.isalpha() for char in letters):
+        return None
+    folded = []
+    original_positions = []
+    for original_position, char in enumerate(long):
+        for value in char.casefold().translate(_GREEK):
+            folded.append(value)
+            original_positions.append(original_position)
+    comparable_long = "".join(folded)
+    position = len(comparable_long) - 1
+    start = None
+    for index in range(len(letters) - 1, -1, -1):
+        while position >= 0:
+            matches = comparable_long[position] == letters[index]
+            word_start = position == 0 or not comparable_long[position - 1].isalnum()
+            if matches and (index > 0 or word_start):
+                break
+            position -= 1
+        if position < 0:
+            return None
+        start = original_positions[position]
+        position -= 1
+    expansion = long[start:].strip(" ,;:")
+    modifier = re.search(
+        r"\b(human|mouse|murine|rat|bovine|porcine|canine|mutant|recombinant|phosphorylated|wild-type)\s*$",
+        long[:start], flags=re.I,
+    )
+    if modifier:
+        expansion = long[modifier.start():].strip(" ,;:")
+    if abbreviation_key(expansion) == abbreviation_key(short):
+        return None
+    # Definitions should contain a full word, rather than another short symbol.
+    if not any(len(token) > 3 for token in expansion.split()):
+        return None
+    if re.findall(r"\d+", short) != re.findall(r"\d+", expansion):
+        return None
+    return expansion
+
+
+def extract_abbreviations(text: str) -> dict[str, str | None]:
+    definitions: dict[str, dict[str, str]] = {}
+    normalized_text = clean_text(text, fallback="")
+    for match in re.finditer(r"\(([^()\n]{2,100})\)", normalized_text):
+        inside = match.group(1).strip()
+        prefix = normalized_text[:match.start()]
+        clause = re.split(r"[.;:!?\n]", prefix)[-1].strip()
+        short = inside
+        long = " ".join(clause.split()[-20:])
+        if len(inside.split()) > 2 or len(inside) > 20:
+            preceding = re.search(r"([\wα-ω-]{2,20})\s*$", clause)
+            if not preceding:
+                continue
+            short, long = preceding.group(1), inside
+        if len(short.split()) > 2 or not re.fullmatch(r"[\wα-ω -]+", short):
+            continue
+        expansion = _align_abbreviation(short, long)
+        if not expansion:
+            continue
+        key = abbreviation_key(short)
+        comparable = abbreviation_key(expansion)
+        definitions.setdefault(key, {})[comparable] = expansion
+    # Ambiguous definitions in one document are deliberately left unresolved.
+    return {
+        key: next(iter(values.values())) if len(values) == 1 else None
+        for key, values in definitions.items()
+    }
 
 
 def entity_identity(
     text: str | None,
     entity_type: str | None,
     normalized_id: str | None = None,
+    abbreviations: dict[str, str | None] | None = None,
+    document_id: int | None = None,
 ) -> EntityIdentity:
-    canonical_name = clean_text(text)
+    original_name = clean_text(text)
+    canonical_name = original_name
     canonical_type = normalize_entity_type(entity_type)
     external_id = normalize_external_id(normalized_id)
-    normalized_name = normalize_alias(canonical_name)
+    if canonical_type == "Other" and external_id:
+        canonical_type = {"uniprot": "Protein", "ncbigene": "Gene", "chebi": "Compound", "pubchem": "Compound", "drugbank": "Drug"}.get(identifier_namespace(external_id), canonical_type)
+    definitions = {**(abbreviations or {}), **extract_abbreviations(original_name)}
+    context_ambiguous = abbreviation_key(original_name) in definitions and definitions[abbreviation_key(original_name)] is None
+    expansion = definitions.get(abbreviation_key(original_name))
+    inline = re.fullmatch(r"(.+?)\s*\(([^()]+)\)", original_name)
+    if inline and abbreviation_key(inline.group(2)) in definitions:
+        expansion = definitions[abbreviation_key(inline.group(2))]
+    if expansion:
+        canonical_name = expansion
+    normalized_name = normalize_entity_alias(canonical_name, canonical_type)
+    aliases = {original_name, canonical_name}
+    for abbreviation, full_name in definitions.items():
+        if full_name and normalize_entity_alias(full_name, canonical_type) == normalized_name:
+            aliases.add(abbreviation)
 
     if external_id:
         identity_part = f"id:{external_id.casefold()}"
     else:
         identity_part = f"name:{normalized_name}"
+    non_specific = normalize_alias(canonical_name) in {
+        "unknown", "unspecified", "unnamed", "compound", "drug", "protein", "gene",
+        "the compound", "the drug", "the protein", "the gene",
+    }
+    local_label = non_specific or bool(
+        entity_family(canonical_type) == "Chemical"
+        and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I)
+    )
+    document_scoped = bool(
+        document_id is not None and external_id is None
+        and (
+            context_ambiguous or local_label
+        )
+    )
+    if document_scoped:
+        identity_part = f"document:{document_id}|{identity_part}"
 
     return EntityIdentity(
-        canonical_key=f"{canonical_type.casefold()}|{identity_part}",
+        canonical_key=f"{entity_family(canonical_type).casefold()}|{identity_part}",
         canonical_name=canonical_name,
         entity_type=canonical_type,
         normalized_id=external_id,
         normalized_alias=normalized_name,
+        aliases=tuple(sorted(aliases)),
+        context_resolved=bool(expansion),
+        document_scoped=document_scoped,
+        context_ambiguous=context_ambiguous,
+        local_label=local_label,
     )
 
 

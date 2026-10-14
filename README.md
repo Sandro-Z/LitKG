@@ -35,17 +35,31 @@ flowchart LR
 
 ## 数据合并规则
 
-实体使用以下稳定键：
+实体先经过本地、可追溯的规范化，再确定身份：
 
-1. 有 `normalized_id` 时：`实体类型 + normalized_id`；
-2. 没有 `normalized_id` 时：`实体类型 + NFKC/大小写/空白规范化后的名称`。
+1. 规范化标准 ID 的前缀、大小写和已支持的 URL 写法，例如
+   `CHEBI_15365`、`chebi: 15365` 和 OBO URL 均归为 `CHEBI:15365`。
+   同一实体可保存多个数据库 ID，实体检索返回 `identifiers` 并支持搜索这些 ID。
+2. 统一 NFKC、大小写和希腊字母。Protein、Gene、CellLine 和 Pathway
+   统一空白、连字符与下划线，例如 `TNF-α` / `TNF alpha`、`IL-6` / `IL6`。
+3. 从每篇文献保存的原文识别“全称（缩写）”及“缩写（全称）”，把全文中
+   明确定义的缩写映射到全称，跨 chunk 生效。同一篇文献里出现多个不同
+   定义的缩写保持歧义，不借用其他文献的单一解释。
+4. Drug / Compound 使用共同的 Chemical 身份，缓解模型类型不一致造成的
+   重复节点；Gene / Protein 仍严格分开。
 
-因此，`Aspirin` 和 `ASPIRIN` 会合并；`MET` Gene 与 `MET` Protein 不会
-误合并。LLM 只会使用片段中明确出现的标准数据库 ID，未知 ID 必须填
-`null`，所以没有外部 ID 时只能做确定性的名称合并。后续接入 ChEBI、
-PubChem、UniProt、NCBI Gene 等实体链接器后，只需让抽取结果填入
-`normalized_id`，或在
-`app/app/normalization.py` 前增加实体链接步骤，数据库结构无需改变。
+有 ID 的身份键为 `身份类别 + 标准 ID`，无 ID 时为
+`身份类别 + 规范化名称`。`compound 1` 等没有全局身份的文献内编号按
+文献隔离，即使带有 ID，也不会仅凭局部编号推断跨数据库 ID 等价。
+
+合并会保留数字、物种、突变、修饰、异构体和化学立体构型信息。
+同一数据库命名空间的不同 ID 不自动合并；含歧义的短名称不据此合并
+已有节点。不同命名空间的 ID 仅在唯一名称匹配、且无已知 ID 冲突时附加。
+旧节点重建时还可合并规范化名称一致、ID 不冲突的重复节点。
+合并在事务中迁移关系、别名和所有证据，不修改原始 `claim_json`。
+
+LLM 仍只能填写片段明确给出的标准 ID，未知 ID 必须为 `null`。
+以上过程不调用外部实体链接服务，也不上传文献。
 
 关系的唯一键由以下字段组成：
 
@@ -54,6 +68,39 @@ PubChem、UniProt、NCBI Gene 等实体链接器后，只需让抽取结果填�
 同一关系可连接多条 `relation_evidence`。图谱查询会返回
 `document_count`、`evidence_count` 和 `evidence_samples`，不会因为合并而
 丢失出处。
+
+### 缓解不连通的小图
+
+实体被拆成多个名称节点只是碎片化的一个来源。图谱的 `limit` 和筛选条件
+也会隐藏连接边；主题不同、原文没有连接事实的实体则应保留独立分量。
+系统不会为了提高连通率添加未经文献支持的边或强行合并相似名称。
+
+`GET /knowledge-bases/{id}/graph/diagnostics` 统计完整知识库，不受显示数量
+和图谱筛选条件影响，返回连通分量数、最大分量实体数及占比、主图外实体数、
+独立实体数、自环关系数，以及分量大小分布。连通性按无向连接计算；
+仅有自环的节点算独立实体；小分量定义为不超过 `5` 个节点。
+普通 graph 响应的 `summary` 也包含相同指标，但只针对当前显示子图。
+
+升级后执行本节下方的数据库迁移，再重建每个知识库即可把新规则应用于
+已有 claims，无需重新上传 PDF 或重新调用 LLM：
+
+```bash
+curl -X POST http://localhost:8080/knowledge-bases/2/rebuild-graph
+# 从响应中获取 task_id，然后查询进度和重建前后指标
+curl http://localhost:8080/knowledge-bases/2/rebuild-graph/TASK_ID
+curl http://localhost:8080/knowledge-bases/2/graph/diagnostics
+```
+
+重建响应包含 `task_id` 和 `status_url`。状态查询返回 `queued`、`processing`、
+`done`、`partial` 或 `failed`，完成后的 `result` 包含 `before`、`after`、
+`projected_count`、`failed_count`、缩写数量和跳过的处理中文献数量。
+正在解析或抽取的文献会跳过，完成后可再次重建。重建可重复执行。
+实体表在知识库之间共享；已确认等价的节点合并会更新其全局引用，保留
+各知识库文献范围、所有原文证据和否定/推测/限定条件。实体与聚合关系 ID
+可能改变，保存过这些 ID 的客户端应重新检索。
+
+Streamlit 的“统一图谱 → 实体规范化与完整图谱连通性”可直接检查完整图谱、
+启动重建并查看前后对比。实际改善程度以当前文献的重建报告为准。
 
 ## 快速启动
 
@@ -118,6 +165,11 @@ curl -X POST \
 页码、段落位置字段。旧版 pypdf 生成的 `Page N` 片段可自动补齐页码；
 其他旧文献若缺少 DOI 或页码，请重新上传相同 PDF 并设置
 `force_reprocess=true`，重新解析和抽取。仅重建图谱不会补齐解析元数据。
+
+实体规范化升级同样需要执行 `db/init.sql`：新增文献的 `abbreviation_map`、
+`entity_identifiers` 和 `graph_rebuild_jobs`。应用迁移并重新构建 API / worker / frontend
+后，使用重建图谱接口更新已有实体即可。缩写来源是已经保存的 chunks；
+如果旧片段没有保留定义所在的原文，则仍需要重新解析该文献才能使用定义。
 
 ## API 示例
 
@@ -358,6 +410,7 @@ app/app/
 ├── normalization.py   # 实体、谓词、限定条件和 claim 稳定键
 ├── graph_store.py     # 实体、关系和证据的并发安全 upsert
 ├── graph_query.py     # 单篇/跨文献统一图谱查询与证据聚合
+├── graph_diagnostics.py # 完整图谱与显示子图的连通性统计
 ├── provenance.py      # 证据句子页码定位与出处字段
 ├── batch_status.py    # 批次状态汇总
 ├── tasks.py           # 解析、抽取、增量投影和旧数据重建任务
@@ -381,6 +434,8 @@ python -m unittest discover -s tests -v
 
 测试覆盖实体规范化、关系/claim 指纹、文件名安全处理、PDF 校验、上传大小
 限制、文件去重、DOI 提取、跨页证据定位、关系检索和 API 参数校验。
+新增规范化测试覆盖希腊字母与名称格式、文献缩写歧义、局部编号隔离、
+不同 ID 写法与并发写入，以及旧图合并后的连通性和证据保留。
 设置 `LITKG_TEST_DATABASE_URL` 为独立、可丢弃的 PostgreSQL 测试库后，
 同一命令还会运行真实数据库集成测试。测试库需支持 pgvector 和 pg_trgm；
 测试会在随机临时 schema 中验证解析落库、知识库隔离、分页和幂等迁移，

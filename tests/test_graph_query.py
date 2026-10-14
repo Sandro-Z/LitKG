@@ -104,8 +104,8 @@ class GraphQueryTests(unittest.TestCase):
         sql, params = cursor.executions[0]
         self.assertNotIn(query, sql)
         self.assertIn("alias.alias ILIKE", sql)
-        self.assertEqual(params[1:8], ("%EGFR!_!%!!'; SELECT 1; --%",) * 7)
-        self.assertEqual(params[8:11], ("BINDS_TO", "Protein", "Protein"))
+        self.assertEqual(params[1:10], ("%EGFR!_!%!!'; SELECT 1; --%",) * 9)
+        self.assertEqual(params[10:13], ("BINDS_TO", "Protein", "Protein"))
 
     def test_direction_and_subject_object_filters(self):
         for direction, fragment in [
@@ -121,7 +121,7 @@ class GraphQueryTests(unittest.TestCase):
                 self.assertEqual(params[1:-3], (12, 12) if direction == "both" else (12,))
         cursor = FakeCursor([[]])
         fetch_graph(cursor, knowledge_base_id=3, subject="Aspirin", object_query="COX-1", subject_entity_id=10, object_entity_id=20)
-        self.assertEqual(cursor.executions[0][1][1:-3], ("%Aspirin%",) * 3 + ("%COX-1%",) * 3 + (10, 20))
+        self.assertEqual(cursor.executions[0][1][1:-3], ("%Aspirin%",) * 4 + ("%COX-1%",) * 4 + (10, 20))
 
     def test_past_last_page_keeps_total(self):
         cursor = FakeCursor([{"total": 7}, []])

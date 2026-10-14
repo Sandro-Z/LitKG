@@ -160,6 +160,9 @@ def build_extraction_messages(section_title: str, chunk_text: str):
 11. 不要输出 ```json。
 12. 如果没有可抽取内容，输出 {{"claims": []}}。
 13. evidence.page 和 evidence.page_end 必须填 null；页码由服务端根据 PDF 定位。
+14. 同一实体在片段内使用一致的名称和类型；有明确全称和缩写定义时优先使用全称。
+15. 保留物种、亚型、数字编号、突变和修饰状态，禁止将这些不同实体当作名称变体。
+16. compound 1 等局部编号保留原文编号，不要猜测为已知药物。
 
 文献片段：
 {chunk_text}

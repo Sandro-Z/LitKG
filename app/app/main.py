@@ -14,6 +14,7 @@ from fastapi import (
 
 from app.batch_status import sync_batch_status
 from app.db import get_conn
+from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_query import fetch_graph, fetch_relations, substring_pattern
 from app.ingestion import (
     UploadRejected,
@@ -594,11 +595,16 @@ def search_knowledge_base_entities(
                     WHERE alias.entity_id = entity.id
                       AND alias.alias ILIKE %s ESCAPE '!'
                 )
+                OR EXISTS (
+                    SELECT 1 FROM entity_identifiers identifier
+                    WHERE identifier.entity_id = entity.id
+                      AND identifier.normalized_id ILIKE %s ESCAPE '!'
+                )
             )
             """
         )
         pattern = substring_pattern(query)
-        params.extend([pattern, pattern, pattern])
+        params.extend([pattern, pattern, pattern, pattern])
     if entity_type:
         filters.append("entity.entity_type = %s")
         params.append(normalize_entity_type(entity_type))
@@ -636,6 +642,12 @@ def search_knowledge_base_entities(
                     entity.canonical_name,
                     entity.entity_type,
                     entity.normalized_id,
+                    ARRAY(
+                        SELECT identifier.normalized_id
+                        FROM entity_identifiers identifier
+                        WHERE identifier.entity_id = entity.id
+                        ORDER BY identifier.normalized_id
+                    ) AS identifiers,
                     ARRAY_AGG(DISTINCT alias.alias)
                         FILTER (WHERE alias.alias IS NOT NULL) AS aliases,
                     COUNT(DISTINCT scoped.document_id)::INT AS document_count,
@@ -755,21 +767,62 @@ def get_knowledge_base_graph(
     return graph
 
 
+@app.get("/knowledge-bases/{knowledge_base_id}/graph/diagnostics")
+def get_graph_diagnostics(knowledge_base_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            metrics = fetch_graph_diagnostics(cur, knowledge_base_id)
+    return {"knowledge_base_id": knowledge_base_id, "scope": "full_knowledge_base", **metrics}
+
+
+@app.get("/knowledge-bases/{knowledge_base_id}/rebuild-graph/{job_id}")
+def get_graph_rebuild_job(knowledge_base_id: int, job_id: uuid.UUID):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            cur.execute(
+                """
+                SELECT id, knowledge_base_id, status, result, error, created_at, updated_at
+                FROM graph_rebuild_jobs WHERE id = %s AND knowledge_base_id = %s
+                """,
+                (job_id, knowledge_base_id),
+            )
+            job = cur.fetchone()
+            if not job:
+                raise HTTPException(status_code=404, detail="Graph rebuild job not found")
+    return job
+
+
 @app.post(
     "/knowledge-bases/{knowledge_base_id}/rebuild-graph",
     status_code=202,
 )
 def rebuild_graph_projection(knowledge_base_id: int):
+    job_id = uuid.uuid4()
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_knowledge_base(cur, knowledge_base_id)
-    result = rebuild_knowledge_graph.apply_async(
-        args=[knowledge_base_id],
-        queue="extract",
-    )
+            cur.execute(
+                "INSERT INTO graph_rebuild_jobs (id, knowledge_base_id) VALUES (%s, %s)",
+                (job_id, knowledge_base_id),
+            )
+    try:
+        rebuild_knowledge_graph.apply_async(
+            args=[knowledge_base_id, str(job_id)], task_id=str(job_id), queue="extract",
+        )
+    except Exception:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE graph_rebuild_jobs SET status = 'failed', error = 'Could not enqueue graph rebuild', updated_at = now() WHERE id = %s",
+                    (job_id,),
+                )
+        raise HTTPException(status_code=503, detail="Could not enqueue graph rebuild")
     return {
         "knowledge_base_id": knowledge_base_id,
-        "task_id": result.id,
+        "task_id": str(job_id),
+        "status_url": f"/knowledge-bases/{knowledge_base_id}/rebuild-graph/{job_id}",
         "status": "queued",
     }
 

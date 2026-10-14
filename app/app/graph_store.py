@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -7,154 +8,257 @@ from app.normalization import (
     canonicalize_qualifiers,
     claim_fingerprint,
     clean_text,
+    compatible_entity_types,
+    entity_family,
     entity_identity,
+    identifier_namespace,
+    normalize_alias,
+    normalize_entity_alias,
+    normalize_external_id,
     normalize_predicate,
     qualifiers_fingerprint,
 )
 from app.schemas import Claim
 
 
-def upsert_entity(cur, identity: EntityIdentity) -> int:
-    # Serialize identities that share an alias or external ID. This avoids
-    # producing a name-only node and an ID-backed node when concurrent papers
-    # introduce the same entity in different forms.
-    lock_keys = {
-        (
-            f"entity-alias|{identity.entity_type.casefold()}|"
-            f"{identity.normalized_alias}"
-        )
+def _identity_locks(identity: EntityIdentity) -> set[str]:
+    family = entity_family(identity.entity_type)
+    keys = {
+        f"entity-alias|{family}|{normalize_entity_alias(alias, identity.entity_type)}"
+        for alias in identity.aliases or (identity.canonical_name,)
     }
     if identity.normalized_id:
-        lock_keys.add(f"entity-id|{identity.canonical_key}")
-    for lock_key in sorted(lock_keys):
+        keys.add(f"entity-id|{family}|{identity.normalized_id.casefold()}")
+    return keys
+
+
+def _candidate_identifiers(cur, candidate) -> list[str]:
+    cur.execute("SELECT normalized_id FROM entity_identifiers WHERE entity_id = %s", (candidate["id"],))
+    values = [row["normalized_id"] for row in cur.fetchall()]
+    if candidate["normalized_id"]:
+        values.append(candidate["normalized_id"])
+    return [normalize_external_id(value) for value in values]
+
+
+def _merge_entities(cur, target, sources):
+    """Rewire equivalent nodes atomically, preserving every claim and its JSON."""
+    source_ids = [row["id"] for row in sources]
+    if not source_ids:
+        return
+    target_id = target["id"]
+    cur.execute("SELECT * FROM relations WHERE subject_entity_id = ANY(%s::BIGINT[]) OR object_entity_id = ANY(%s::BIGINT[]) ORDER BY id FOR UPDATE", (source_ids, source_ids))
+    for relation in cur.fetchall():
+        subject = target_id if relation["subject_entity_id"] in source_ids else relation["subject_entity_id"]
+        object_ = target_id if relation["object_entity_id"] in source_ids else relation["object_entity_id"]
+        cur.execute(
+            """
+            INSERT INTO relations (subject_entity_id, predicate, object_entity_id, qualifiers, qualifiers_hash, negated, speculative)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (subject_entity_id, predicate, object_entity_id, qualifiers_hash, negated, speculative)
+            DO UPDATE SET updated_at = now() RETURNING id
+            """,
+            (subject, relation["predicate"], object_, Jsonb(relation["qualifiers"]), relation["qualifiers_hash"], relation["negated"], relation["speculative"]),
+        )
+        relation_id = cur.fetchone()["id"]
+        cur.execute("UPDATE relation_evidence SET relation_id = %s WHERE relation_id = %s", (relation_id, relation["id"]))
+        cur.execute("DELETE FROM relations WHERE id = %s", (relation["id"],))
+    cur.execute("UPDATE claims SET subject_entity_id = %s WHERE subject_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
+    cur.execute("UPDATE claims SET object_entity_id = %s WHERE object_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
+    cur.execute(
+        """
+        INSERT INTO entity_aliases (entity_id, alias, normalized_alias)
+        SELECT %s, alias, normalized_alias FROM entity_aliases WHERE entity_id = ANY(%s::BIGINT[])
+        ON CONFLICT (entity_id, normalized_alias) DO NOTHING
+        """,
+        (target_id, source_ids),
+    )
+    cur.execute("UPDATE entity_identifiers SET entity_id = %s WHERE entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
+    if not target["normalized_id"]:
+        primary = next((normalize_external_id(source["normalized_id"]) for source in sources if source["normalized_id"]), None)
+        if primary:
+            cur.execute("UPDATE entities SET normalized_id = %s WHERE id = %s", (primary, target_id))
+            target["normalized_id"] = primary
+    if any(source["entity_type"] == "Drug" for source in sources):
+        cur.execute("UPDATE entities SET entity_type = 'Drug' WHERE id = %s AND entity_type = 'Compound'", (target_id,))
+    cur.execute("DELETE FROM entities WHERE id = ANY(%s::BIGINT[])", (source_ids,))
+
+
+def _reconcile_exact_names(cur, existing, identity):
+    if identity.local_label or identity.context_ambiguous or identity.document_scoped:
+        return existing
+    # A bare short code is insufficient proof for merging existing global nodes.
+    if len(identity.normalized_alias) < 5:
+        return existing
+    cur.execute(
+        """
+        SELECT id, canonical_name, normalized_id, entity_type FROM entities entity
+        WHERE entity_type = ANY(%s::TEXT[])
+          AND EXISTS (SELECT 1 FROM entity_aliases alias WHERE alias.entity_id = entity.id AND alias.normalized_alias = ANY(%s::TEXT[]))
+        ORDER BY id LIMIT 10
+        """,
+        (compatible_entity_types(identity.entity_type), [identity.normalized_alias, normalize_alias(identity.canonical_name)]),
+    )
+    rows = cur.fetchall()
+    if len(rows) == 10:
+        return existing
+    candidates = [row for row in rows if normalize_entity_alias(row["canonical_name"], identity.entity_type) == identity.normalized_alias]
+    if not any(row["id"] == existing["id"] for row in candidates):
+        return existing
+    if len(candidates) < 2:
+        return existing
+    namespaces = {}
+    for candidate in candidates:
+        for value in _candidate_identifiers(cur, candidate):
+            namespaces.setdefault(identifier_namespace(value), set()).add(value.casefold())
+    if any(len(values) > 1 for values in namespaces.values()):
+        return existing
+    target = min(candidates, key=lambda row: row["id"])
+    _merge_entities(cur, target, [row for row in candidates if row["id"] != target["id"]])
+    return target
+
+
+def lock_graph_projection(cur, reconcile_existing=False):
+    lock = "pg_advisory_xact_lock" if reconcile_existing else "pg_advisory_xact_lock_shared"
+    cur.execute(f"SELECT {lock}(hashtextextended(%s, 0))", ("litkg-entity-projection-v3",))
+
+
+def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = False) -> int:
+    lock_graph_projection(cur, reconcile_existing)
+    family = entity_family(identity.entity_type)
+    for lock_key in sorted(_identity_locks(identity)):
         cur.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (lock_key,),
         )
 
-    cur.execute(
-        """
-        SELECT id, normalized_id
-        FROM entities
-        WHERE canonical_key = %s
-        """,
-        (identity.canonical_key,),
-    )
-    existing = cur.fetchone()
-
-    if not existing:
+    existing = None
+    if identity.normalized_id:
         cur.execute(
             """
-            SELECT DISTINCT entity.id, entity.normalized_id
+            SELECT entity.id, entity.canonical_name, entity.normalized_id, entity.entity_type
+            FROM entity_identifiers identifier
+            JOIN entities entity ON entity.id = identifier.entity_id
+            WHERE identifier.entity_family = %s AND identifier.identifier_key = %s
+            """,
+            (family, identity.normalized_id.casefold()),
+        )
+        existing = cur.fetchone()
+    if not existing:
+        cur.execute(
+            "SELECT id, canonical_name, normalized_id, entity_type FROM entities WHERE canonical_key = %s",
+            (identity.canonical_key,),
+        )
+        existing = cur.fetchone()
+    if not existing and not identity.document_scoped and not identity.context_ambiguous and not identity.local_label:
+        # A document-defined abbreviation must match its expansion, never a
+        # globally shared short symbol such as AR with another definition.
+        lookup_keys = {
+            identity.normalized_alias,
+            normalize_alias(identity.canonical_name),
+        }
+        cur.execute(
+            """
+            SELECT DISTINCT entity.id, entity.canonical_name, entity.normalized_id, entity.entity_type
             FROM entities entity
             JOIN entity_aliases alias ON alias.entity_id = entity.id
-            WHERE entity.entity_type = %s
-              AND alias.normalized_alias = %s
+            WHERE entity.entity_type = ANY(%s::TEXT[])
+              AND alias.normalized_alias = ANY(%s::TEXT[])
             ORDER BY entity.id
-            LIMIT 2
+            LIMIT 3
             """,
-            (identity.entity_type, identity.normalized_alias),
+            (compatible_entity_types(identity.entity_type), sorted(lookup_keys)),
         )
         alias_candidates = cur.fetchall()
-
-        reusable = None
+        candidate_ids = [(candidate, _candidate_identifiers(cur, candidate)) for candidate in alias_candidates]
+        if identity.normalized_id:
+            exact = [candidate for candidate, values in candidate_ids if identity.normalized_id in values]
+            if len(exact) == 1:
+                existing = exact[0]
         if len(alias_candidates) == 1:
-            candidate = alias_candidates[0]
+            candidate, values = candidate_ids[0]
             if not identity.normalized_id:
-                reusable = candidate
-            elif (
-                candidate["normalized_id"] is None
-                or candidate["normalized_id"].casefold()
-                == identity.normalized_id.casefold()
+                existing = candidate
+            elif not any(
+                identifier_namespace(value) == identifier_namespace(identity.normalized_id)
+                and value.casefold() != identity.normalized_id.casefold()
+                for value in values
             ):
-                reusable = candidate
+                # Different namespaces may identify the same exact name. Two
+                # conflicting IDs from one namespace must remain separate.
+                existing = candidate
 
-        if reusable:
-            entity_id = reusable["id"]
-            if identity.normalized_id and not reusable["normalized_id"]:
-                cur.execute(
-                    """
-                    UPDATE entities
-                    SET
-                        canonical_key = %s,
-                        normalized_id = %s,
-                        updated_at = now()
-                    WHERE id = %s
-                    """,
-                    (
-                        identity.canonical_key,
-                        identity.normalized_id,
-                        entity_id,
-                    ),
-                )
-        else:
-            cur.execute(
-                """
-                INSERT INTO entities (
-                    canonical_key,
-                    canonical_name,
-                    entity_type,
-                    normalized_id
-                )
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (canonical_key)
-                DO UPDATE SET
-                    normalized_id = COALESCE(
-                        entities.normalized_id,
-                        EXCLUDED.normalized_id
-                    ),
-                    updated_at = now()
-                RETURNING id
-                """,
-                (
-                    identity.canonical_key,
-                    identity.canonical_name,
-                    identity.entity_type,
-                    identity.normalized_id,
-                ),
-            )
-            entity_id = cur.fetchone()["id"]
-    else:
+    if existing:
+        if reconcile_existing:
+            existing = _reconcile_exact_names(cur, existing, identity)
         entity_id = existing["id"]
-        if identity.normalized_id and not existing["normalized_id"]:
+        cur.execute(
+            """
+            UPDATE entities
+            SET canonical_key = CASE WHEN normalized_id IS NULL AND %s::TEXT IS NOT NULL THEN %s ELSE canonical_key END,
+                normalized_id = COALESCE(normalized_id, %s),
+                entity_type = CASE WHEN entity_type = 'Compound' AND %s = 'Drug' THEN 'Drug' ELSE entity_type END,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (identity.normalized_id, identity.canonical_key, identity.normalized_id, identity.entity_type, entity_id),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO entities (canonical_key, canonical_name, entity_type, normalized_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (canonical_key) DO UPDATE SET updated_at = now()
+            RETURNING id
+            """,
+            (identity.canonical_key, identity.canonical_name, identity.entity_type, identity.normalized_id),
+        )
+        entity_id = cur.fetchone()["id"]
+
+    if identity.normalized_id:
+        cur.execute(
+            """
+            INSERT INTO entity_identifiers (entity_id, entity_family, normalized_id, identifier_key)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (entity_family, identifier_key) DO NOTHING
+            """,
+            (entity_id, family, identity.normalized_id, identity.normalized_id.casefold()),
+        )
+    for alias in identity.aliases or (identity.canonical_name,):
+        keys = {normalize_alias(alias), normalize_entity_alias(alias, identity.entity_type)}
+        for key in sorted(keys):
             cur.execute(
                 """
-                UPDATE entities
-                SET normalized_id = %s, updated_at = now()
-                WHERE id = %s
+                INSERT INTO entity_aliases (entity_id, alias, normalized_alias)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (entity_id, normalized_alias) DO NOTHING
                 """,
-                (identity.normalized_id, entity_id),
+                (entity_id, alias, key),
             )
-
-    cur.execute(
-        """
-        INSERT INTO entity_aliases (entity_id, alias, normalized_alias)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (entity_id, normalized_alias)
-        DO UPDATE SET alias = EXCLUDED.alias
-        """,
-        (
-            entity_id,
-            identity.canonical_name,
-            identity.normalized_alias,
-        ),
-    )
     return entity_id
 
 
-def _claim_projection(cur, claim: Claim) -> dict[str, Any]:
+def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *, reconcile_existing=False) -> dict[str, Any]:
+    lock_graph_projection(cur, reconcile_existing)
     subject = entity_identity(
         claim.subject.text,
         claim.subject.type,
         claim.subject.normalized_id,
+        abbreviations=abbreviations,
+        document_id=document_id,
     )
     object_ = entity_identity(
         claim.object.text,
         claim.object.type,
         claim.object.normalized_id,
+        abbreviations=abbreviations,
+        document_id=document_id,
     )
-    subject_entity_id = upsert_entity(cur, subject)
-    object_entity_id = upsert_entity(cur, object_)
+    # Acquire both endpoints' locks in a stable order, including aliases, before
+    # either upsert. Opposite-direction claims cannot invert the lock order.
+    for key in sorted(_identity_locks(subject) | _identity_locks(object_)):
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+    subject_entity_id = upsert_entity(cur, subject, reconcile_existing=reconcile_existing)
+    object_entity_id = upsert_entity(cur, object_, reconcile_existing=reconcile_existing)
     predicate = normalize_predicate(claim.predicate)
     qualifiers = canonicalize_qualifiers(claim.qualifiers)
     evidence_text = clean_text(claim.evidence.sentence)
@@ -169,9 +273,9 @@ def _claim_projection(cur, claim: Claim) -> dict[str, Any]:
         "qualifiers_hash": qualifiers_fingerprint(qualifiers),
         "evidence_text": evidence_text,
         "fingerprint": claim_fingerprint(
-            subject=subject,
+            subject=replace(subject, canonical_key=f"entity:{subject_entity_id}"),
             predicate=predicate,
-            object_=object_,
+            object_=replace(object_, canonical_key=f"entity:{object_entity_id}"),
             qualifiers=qualifiers,
             evidence_text=evidence_text,
             negated=claim.negated,
@@ -244,8 +348,9 @@ def store_claim(
     chunk_id: int,
     claim: Claim,
     extraction_model: str,
+    abbreviations: dict[str, str | None] | None = None,
 ) -> tuple[int, int]:
-    projection = _claim_projection(cur, claim)
+    projection = _claim_projection(cur, claim, abbreviations, document_id)
     claim_json = claim.model_dump(mode="json")
 
     cur.execute(
@@ -325,9 +430,9 @@ def store_claim(
     return claim_id, relation_id
 
 
-def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any]) -> int:
+def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None) -> int:
     claim = Claim.model_validate(claim_json)
-    projection = _claim_projection(cur, claim)
+    projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=True)
 
     # Old versions could store the same extraction more than once. When
     # backfilling, keep the first matching row so the new unique fingerprint
@@ -412,6 +517,10 @@ def prune_orphan_projection(cur) -> dict[str, int]:
             SELECT 1
             FROM relations r
             WHERE r.subject_entity_id = e.id OR r.object_entity_id = e.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM claims c
+            WHERE c.subject_entity_id = e.id OR c.object_entity_id = e.id
         )
         """
     )
