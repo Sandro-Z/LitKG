@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.graph_store import store_claim
 from app.schemas import Claim
+from pdf_fixtures import text_pdf
 
 
 @unittest.skipUnless(os.environ.get("LITKG_TEST_DATABASE_URL"), "Set LITKG_TEST_DATABASE_URL to a disposable PostgreSQL database")
@@ -229,6 +230,103 @@ class GraphIntegrationTests(unittest.TestCase):
         finally:
             with self.connect() as conn:
                 conn.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+
+    def test_page_repair_preserves_claims_graph_and_supports_dry_run_and_retry(self):
+        from app import page_repair, tasks
+
+        first, second = "Aspirin inhibited COX-1.", "EGFR binds gefitinib."
+        with text_pdf(["", first, second]) as pdf:
+            with self.connect() as conn:
+                document_id = conn.execute(
+                    "INSERT INTO documents (sha256, filename, source_path, doi, status) "
+                    "VALUES ('page-repair', 'repair.pdf', %s, '10.1234/repair', 'done') RETURNING id",
+                    (str(pdf),),
+                ).fetchone()["id"]
+                conn.execute("INSERT INTO knowledge_base_documents (knowledge_base_id, document_id) VALUES (%s, %s)",
+                             (self.kb_a, document_id))
+                chunk_id = conn.execute(
+                    "INSERT INTO chunks (document_id, chunk_index, text, status) VALUES (%s, 0, %s, 'done') RETURNING id",
+                    (document_id, first + " " + second),
+                ).fetchone()["id"]
+                for sentence in (first, second):
+                    claim = Claim.model_validate({
+                        "subject": {"text": "Page repair drug", "type": "Drug"}, "predicate": "INHIBITS",
+                        "object": {"text": "Page repair target", "type": "Protein"},
+                        "evidence": {"sentence": sentence, "page": 999, "section": "Results"},
+                        "qualifiers": {"condition": "original"}, "confidence": 0.9, "negated": True,
+                    })
+                    store_claim(conn.cursor(), document_id=document_id, chunk_id=chunk_id,
+                                claim=claim, extraction_model="test-only")
+            try:
+                def snapshot():
+                    with self.connect() as conn:
+                        return {
+                            "document": conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone(),
+                            "chunk": conn.execute("SELECT * FROM chunks WHERE id = %s", (chunk_id,)).fetchone(),
+                            "claims": conn.execute("SELECT * FROM claims WHERE document_id = %s ORDER BY id", (document_id,)).fetchall(),
+                            "edges": conn.execute("SELECT * FROM relation_evidence WHERE claim_id IN "
+                                                  "(SELECT id FROM claims WHERE document_id = %s) ORDER BY claim_id", (document_id,)).fetchall(),
+                        }
+
+                original = snapshot()
+                with patch.object(page_repair, "get_conn", side_effect=self.connect), patch.object(
+                    tasks, "extract_claims", side_effect=AssertionError("Page repair must not call the LLM"),
+                ):
+                    preview = page_repair.repair_pages(document_id=document_id, dry_run=True)["documents"][0]
+                    self.assertEqual((preview["changed_chunk_count"], preview["changed_claim_count"]), (1, 2))
+                    self.assertEqual(snapshot(), original)
+                    # A busy claim must roll back any chunk updates made earlier.
+                    with self.connect() as locked:
+                        locked.execute("SELECT id FROM claims WHERE document_id = %s FOR UPDATE", (document_id,))
+                        report = page_repair.repair_document_pages(document_id)
+                        self.assertEqual(report["status"], "skipped_active")
+                    self.assertEqual(snapshot(), original)
+                    report = page_repair.repair_pages(document_id=document_id)["documents"][0]
+                    self.assertEqual(report["located_claim_count"], 2)
+                    self.assertEqual(report["unresolved_claim_count"], 0)
+                    second_run = page_repair.repair_pages(document_id=document_id)["documents"][0]
+                    self.assertEqual((second_run["changed_chunk_count"], second_run["changed_claim_count"]), (0, 0))
+                repaired = snapshot()
+                self.assertEqual(repaired["document"], original["document"])
+                self.assertEqual(repaired["chunk"]["text"], original["chunk"]["text"])
+                self.assertEqual(repaired["edges"], original["edges"])
+                for before, after, expected_page in zip(original["claims"], repaired["claims"], (2, 3)):
+                    self.assertEqual({k: v for k, v in before.items() if k != "claim_json"},
+                                     {k: v for k, v in after.items() if k != "claim_json"})
+                    expected_json = {**before["claim_json"], "evidence": {
+                        **before["claim_json"]["evidence"], "page": expected_page, "page_end": expected_page,
+                    }}
+                    self.assertEqual(after["claim_json"], expected_json)
+                with patch.object(self.main, "get_conn", side_effect=self.connect):
+                    claims = self.client.get(f"/documents/{document_id}/claims").json()["claims"]
+                self.assertEqual([claim["page"] for claim in claims], [2, 3])
+                relation = self.get("relations", {"subject": "Page repair drug"})["relations"][0]
+                self.assertEqual({sample["page"] for sample in relation["evidence_samples"]}, {2, 3})
+
+                for document_status, chunk_status in [("parsing", "done"), ("done", "extracting"), ("done", "queued")]:
+                    with self.connect() as conn:
+                        conn.execute("UPDATE documents SET status = %s WHERE id = %s", (document_status, document_id))
+                        conn.execute("UPDATE chunks SET status = %s WHERE id = %s", (chunk_status, chunk_id))
+                    with patch.object(page_repair, "get_conn", side_effect=self.connect), patch.object(
+                        page_repair, "fallback_pdf_text", side_effect=AssertionError("Skip active documents before reading PDFs"),
+                    ):
+                        self.assertEqual(page_repair.repair_document_pages(document_id)["status"], "skipped_active")
+            finally:
+                with self.connect() as conn:
+                    conn.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+
+    def test_page_repair_scope_does_not_touch_another_knowledge_base(self):
+        from app import page_repair
+
+        with patch.object(page_repair, "get_conn", side_effect=self.connect), patch.object(
+            page_repair, "repair_document_pages", return_value={"status": "preview"},
+        ) as repair:
+            page_repair.repair_pages(knowledge_base_id=self.kb_b, dry_run=True)
+            repair.assert_called_once_with(self.documents[1], dry_run=True)
+            for arguments in [{}, {"knowledge_base_id": 0}, {"document_id": -1},
+                              {"knowledge_base_id": self.kb_a, "document_id": self.documents[0]}]:
+                with self.assertRaises(ValueError):
+                    page_repair.repair_pages(**arguments)
 
     def test_migration_handles_old_columns_and_is_idempotent(self):
         schema = "litkg_legacy_test_" + uuid.uuid4().hex

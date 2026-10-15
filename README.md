@@ -166,6 +166,40 @@ curl -X POST \
 其他旧文献若缺少 DOI 或页码，请重新上传相同 PDF 并设置
 `force_reprocess=true`，重新解析和抽取。仅重建图谱不会补齐解析元数据。
 
+### 修复已有文献的 PDF 页码
+
+旧解析器只请求段落坐标。GROBID 正常返回 DOI 和正文时，仍可能缺少
+段落坐标；一个段落跨页时，整段范围也不能精确代表某一句证据的位置。
+现在请求句子与段落坐标，优先保存句子位置；缺失或只有跨页段落范围时，
+使用本地 PDF 逐页文本补齐。匹配支持 PDF 连字、软连字符和断行差异，
+不会把匹配失败的文字猜成某一页。
+
+仅更新镜像不会重新解析已经入库的文献。保留现有 claims 和图谱，
+无需重新上传或调用 LLM，可以从原始 PDF 修复页码。先更新代码并构建
+API 和两个 worker，再预览指定知识库的变更：
+
+```bash
+docker compose up -d --build api worker_parse worker_extract
+docker compose exec -T api python -m app.page_repair --knowledge-base-id 1 --dry-run
+```
+
+确认预览结果后去掉 `--dry-run` 应用修复（将 `1` 换成实际知识库 ID）：
+
+```bash
+docker compose exec -T api python -m app.page_repair --knowledge-base-id 1
+```
+
+也可以用 `--document-id 123` 只修复单篇。命令只读取已保存的本地 PDF，
+更新 chunks 的页码/位置和 `claim_json.evidence` 的 `page`、`page_end`，
+保留原文、claim ID、实体、关系和证据链接。按文献事务提交，可重复运行；
+正在处理或被其他事务锁定的文献返回 `skipped_active`，稍后重试。
+文献可能属于多个知识库，修复该文献的出处也会更新这些知识库的显示。
+
+报告包含 `changed_chunk_count`、`changed_claim_count`、`located_claim_count`
+和 `unresolved_claim_count`。无法定位的旧证据保留原字段并计入 unresolved；
+PDF 文件丢失返回 `failed`，没有可提取文字返回 `no_pdf_text`。扫描 PDF
+若没有文字层，需要先做 OCR。此修复不新增数据库字段。
+
 实体规范化升级同样需要执行 `db/init.sql`：新增文献的 `abbreviation_map`、
 `entity_identifiers` 和 `graph_rebuild_jobs`。应用迁移并重新构建 API / worker / frontend
 后，使用重建图谱接口更新已有实体即可。缩写来源是已经保存的 chunks；
@@ -296,7 +330,8 @@ claims 的知识库接口和单篇接口均新增以下顶层字段，并保留�
 - `title`、`doi`：当前文献的标题和 DOI。DOI 优先从 GROBID 文献头提取，
   排除参考文献；PDF 回退解析使用元数据或首页显式标注的 DOI。
 - `page`、`page_end`：证据所在的 PDF 起止页，按 PDF 页序号从 `1` 开始，
-  与期刊印刷页码可能不同。段落跨页或无法精确匹配句子时保留已知页码范围。
+  与期刊印刷页码可能不同。优先使用句子坐标，缺失时与本地 PDF 逐页文字
+  匹配；句子跨页、重复出现在多页或只能确定片段范围时保留已知页码范围。
 - `section`、`table_or_figure`：证据章节和图表标记。
 - `document_id`、`filename`、`chunk_id`：用于追溯对应文献和片段。
 

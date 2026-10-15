@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from typing import Any
 
 
@@ -14,9 +15,48 @@ def page_bounds(spans: list[dict[str, Any]]) -> tuple[int | None, int | None]:
         return None, None
     starts = [_valid_page(span.get("page_start")) for span in spans]
     ends = [_valid_page(span.get("page_end")) for span in spans]
-    if None in starts or None in ends:
+    if None in starts or None in ends or any(start > end for start, end in zip(starts, ends)):
         return None, None
     return min(starts), max(ends)
+
+
+def normalized_text_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Normalize PDF typography for text alignment, retaining original offsets."""
+    line_hyphens = {match.start() for match in re.finditer(
+        r"(?<=\w)[-\u2010]\s*\n\s*(?=\w)", text,
+    )}
+    translation = str.maketrans({
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u2010": "-", "\u2011": "-", "\u2013": "-", "\u2014": "-",
+    })
+    characters, offsets = [], []
+    for offset, character in enumerate(text):
+        if offset in line_hyphens or character == "\u00ad":
+            continue
+        for normalized in unicodedata.normalize("NFKC", character).casefold().translate(translation):
+            if not normalized.isspace():
+                characters.append(normalized)
+                offsets.append(offset)
+    return "".join(characters), offsets
+
+
+def _evidence_matches(sentence: str, text: str) -> list[tuple[int, int]]:
+    tokens = sentence.split()
+    if not tokens:
+        return []
+    pattern = r"\s+".join(re.escape(token) for token in tokens)
+    matches = [(match.start(), match.end()) for match in re.finditer(pattern, text, re.I)]
+    if matches:
+        return matches
+    needle, _ = normalized_text_with_offsets(sentence)
+    haystack, offsets = normalized_text_with_offsets(text)
+    if not needle:
+        return []
+    start = haystack.find(needle)
+    while start >= 0:
+        matches.append((offsets[start], offsets[start + len(needle) - 1] + 1))
+        start = haystack.find(needle, start + 1)
+    return matches
 
 
 def locate_evidence_pages(
@@ -25,26 +65,21 @@ def locate_evidence_pages(
 ) -> tuple[int | None, int | None]:
     """Locate an evidence sentence using parser offsets, never LLM page guesses."""
     spans = chunk.get("page_spans") or []
-    tokens = sentence.split()
-    if tokens and spans:
-        pattern = r"\s+".join(re.escape(token) for token in tokens)
-        matches = list(re.finditer(pattern, chunk["text"], flags=re.IGNORECASE))
+    if sentence and spans:
+        matches = _evidence_matches(sentence, chunk["text"])
         if matches:
             covered = [
                 span
                 for span in spans
                 if any(
-                    span["start"] < match.end() and span["end"] > match.start()
-                    for match in matches
+                    span["start"] < end and span["end"] > start
+                    for start, end in matches
                 )
             ]
             return page_bounds(covered)
 
     # If the sentence cannot be matched, retain the whole chunk's known range.
-    return (
-        _valid_page(chunk.get("page_start")),
-        _valid_page(chunk.get("page_end")),
-    )
+    return page_bounds([chunk])
 
 
 def evidence_location(row: dict[str, Any]) -> dict[str, Any]:

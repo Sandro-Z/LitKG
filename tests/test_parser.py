@@ -1,9 +1,13 @@
 import unittest
+import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from pdf_fixtures import text_pdf
 
 from app.parser import (
     fallback_pdf_text,
+    call_grobid,
     normalize_doi,
     parse_pdf_to_chunks,
     parse_tei_sections,
@@ -31,6 +35,60 @@ TEI = '''<TEI xmlns="http://www.tei-c.org/ns/1.0">
 
 
 class ParserTests(unittest.TestCase):
+    def test_grobid_requests_sentence_segmentation_and_both_coordinate_types(self):
+        response = MagicMock(text=TEI)
+        with text_pdf(["Study abstract."]) as pdf, patch(
+            "app.parser.requests.post", return_value=response,
+        ) as post:
+            call_grobid(str(pdf))
+        fields = post.call_args.kwargs["data"]
+        self.assertEqual(fields["segmentSentences"], "1")
+        self.assertEqual(fields["teiCoordinates"], ["p", "s"])
+
+    def test_sentence_coordinates_override_cross_page_paragraph_coordinates(self):
+        xml = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><div>
+          <p coords="2,0,0,100,20;3,0,0,100,20"><s coords="2,0,0,100,20">Aspirin inhibited COX-1.</s><s coords="3,0,0,100,20">EGFR binds gefitinib.</s></p>
+        </div></body></text></TEI>'''
+        _, sections = parse_tei_sections(xml)
+        chunk = split_into_chunks(sections)[0]
+        self.assertEqual(chunk["text"], "Aspirin inhibited COX-1. EGFR binds gefitinib.")
+        self.assertEqual(locate_evidence_pages("Aspirin inhibited COX-1.", chunk), (2, 2))
+        self.assertEqual(locate_evidence_pages("EGFR binds gefitinib.", chunk), (3, 3))
+
+    def test_sentence_only_coordinates_and_inline_markup_preserve_text(self):
+        xml = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><div>
+          <p><s coords="5,0,0,100,20">IL-<hi>6</hi> activates STAT3<ref>[1]</ref>.</s></p>
+        </div></body></text></TEI>'''
+        _, sections = parse_tei_sections(xml)
+        chunk = split_into_chunks(sections)[0]
+        self.assertEqual(chunk["text"], "IL-6 activates STAT3[1].")
+        self.assertEqual(locate_evidence_pages(chunk["text"], chunk), (5, 5))
+
+    def test_real_pdf_supplements_missing_coordinates_without_losing_grobid_doi(self):
+        xml = re.sub(r' coords="[^"]*"', '', TEI)
+        with text_pdf(["Study abstract.", "Aspirin inhibited COX-1.", "EGFR binds gefitinib."],
+                      {"/Title": "PDF fallback title"}) as pdf, patch(
+            "app.parser.call_grobid", return_value=xml,
+        ):
+            metadata, chunks = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata, {"title": "Aspirin study", "doi": "10.1234/study"})
+        self.assertEqual(chunks[0]["page_start"], 1)
+        results = chunks[1]
+        self.assertEqual((results["page_start"], results["page_end"]), (2, 3))
+        self.assertEqual(locate_evidence_pages("Aspirin inhibited COX-1.", results), (2, 2))
+        self.assertEqual(locate_evidence_pages("EGFR binds gefitinib.", results), (3, 3))
+        self.assertEqual(results["section_title"], "Results")
+
+    def test_pdf_text_failure_preserves_grobid_text_doi_and_known_pages(self):
+        xml = TEI.replace(' coords="1,0,0,100,20"', '')
+        with patch("app.parser.call_grobid", return_value=xml), patch(
+            "app.parser.fallback_pdf_text", side_effect=RuntimeError("no text layer"),
+        ), self.assertLogs("app.parser", level="WARNING"):
+            metadata, chunks = parse_pdf_to_chunks("unused.pdf")
+        self.assertEqual(metadata["doi"], "10.1234/study")
+        self.assertIsNone(chunks[0]["page_start"])
+        self.assertEqual(locate_evidence_pages("Aspirin inhibited COX-1.", chunks[1]), (2, 2))
+
     def test_header_metadata_and_short_sections_keep_page_coordinates(self):
         metadata, sections = parse_tei_sections(TEI)
         self.assertEqual(metadata, {"title": "Aspirin study", "doi": "10.1234/study"})
