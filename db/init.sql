@@ -252,6 +252,7 @@ SELECT kb.id, d.id
 FROM knowledge_bases kb
 CROSS JOIN documents d
 WHERE kb.slug = 'default'
+  AND NOT EXISTS (SELECT 1 FROM knowledge_base_documents member WHERE member.document_id = d.id)
 ON CONFLICT (knowledge_base_id, document_id) DO NOTHING;
 
 CREATE INDEX IF NOT EXISTS idx_documents_status
@@ -304,3 +305,136 @@ CREATE INDEX IF NOT EXISTS idx_relations_predicate
     ON relations(predicate);
 CREATE INDEX IF NOT EXISTS idx_relation_evidence_claim
     ON relation_evidence(claim_id);
+
+-- v3: immutable processing versions and source-preserving projections.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS pipeline_generation INT NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_epoch INT NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS catalog_version TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS catalog_status TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS catalog_error TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS extraction_version TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS catalog_version TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS processing_version TEXT;
+
+CREATE TABLE IF NOT EXISTS document_catalogs (
+    document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    processing_version TEXT NOT NULL,
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (document_id, version)
+);
+CREATE TABLE IF NOT EXISTS document_entities (
+    document_id BIGINT NOT NULL,
+    catalog_version TEXT NOT NULL,
+    local_id TEXT NOT NULL,
+    entity_id BIGINT REFERENCES entities(id) ON DELETE RESTRICT,
+    entry JSONB NOT NULL,
+    PRIMARY KEY (document_id, catalog_version, local_id),
+    FOREIGN KEY (document_id, catalog_version) REFERENCES document_catalogs(document_id, version) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS processing_cache (
+    document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (document_id, stage, cache_key)
+);
+CREATE TABLE IF NOT EXISTS processing_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_id BIGINT,
+    stage TEXT NOT NULL,
+    version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    output JSONB,
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS claim_history (
+    id BIGSERIAL PRIMARY KEY,
+    document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    original_claim_id BIGINT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    snapshot JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (original_claim_id, snapshot_hash)
+);
+
+-- A fact is a source assertion. Equivalent assertions can share fact_key and
+-- the existing deduplicated binary relation, without collapsing their sources.
+CREATE TABLE IF NOT EXISTS facts (
+    id BIGSERIAL PRIMARY KEY,
+    claim_id BIGINT UNIQUE NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    relation_id BIGINT REFERENCES relations(id) ON DELETE SET NULL,
+    fact_key TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    qualifiers JSONB NOT NULL,
+    negated BOOLEAN NOT NULL,
+    speculative BOOLEAN NOT NULL,
+    catalog_version TEXT,
+    processing_version TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS fact_participants (
+    fact_id BIGINT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    entity_id BIGINT NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
+    role TEXT NOT NULL,
+    mention TEXT,
+    PRIMARY KEY (fact_id, role, entity_id)
+);
+CREATE TABLE IF NOT EXISTS fact_evidence (
+    fact_id BIGINT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    ordinal INT NOT NULL,
+    evidence JSONB NOT NULL,
+    PRIMARY KEY (fact_id, ordinal)
+);
+CREATE TABLE IF NOT EXISTS review_items (
+    id BIGSERIAL PRIMARY KEY,
+    document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    detail JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    note TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (document_id, version, item_key)
+);
+CREATE TABLE IF NOT EXISTS derived_content (
+    knowledge_base_id BIGINT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    source_id BIGINT NOT NULL,
+    content TEXT NOT NULL,
+    sources JSONB NOT NULL,
+    content_hash TEXT NOT NULL,
+    processing_version TEXT NOT NULL,
+    embedding vector,
+    embedding_model TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (knowledge_base_id, kind, source_id)
+);
+CREATE TABLE IF NOT EXISTS maintenance_jobs (
+    id UUID PRIMARY KEY,
+    knowledge_base_id BIGINT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    document_id BIGINT REFERENCES documents(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    result JSONB,
+    error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS derived_dirty_documents (
+    document_id BIGINT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    revision BIGINT NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_document_entities_entity ON document_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(fact_key);
+CREATE INDEX IF NOT EXISTS idx_facts_predicate_polarity ON facts(predicate, negated);
+CREATE INDEX IF NOT EXISTS idx_fact_participants_entity ON fact_participants(entity_id, fact_id);
+CREATE INDEX IF NOT EXISTS idx_derived_text ON derived_content USING GIN(to_tsvector('simple', content));
+CREATE INDEX IF NOT EXISTS idx_derived_substring ON derived_content USING GIN(content gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_review_pending ON review_items(document_id, status);

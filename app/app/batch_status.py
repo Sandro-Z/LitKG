@@ -1,7 +1,7 @@
 from app.db import get_conn
 
 
-ACTIVE_STATUSES = ("uploaded", "queued", "parsing", "chunked", "extracting")
+ACTIVE_STATUSES = ("uploaded", "queued", "parsing", "chunked", "cataloging", "extracting")
 
 
 def sync_batch_status(cur, batch_id: int) -> None:

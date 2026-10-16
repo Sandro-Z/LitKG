@@ -46,7 +46,7 @@ def api_post_json(path: str, payload: dict):
     response = requests.post(
         f"{API_BASE_URL}{path}",
         json=payload,
-        timeout=60,
+        timeout=360,
     )
     response.raise_for_status()
     return response.json()
@@ -196,6 +196,9 @@ def main():
 
     try:
         knowledge_bases = load_knowledge_bases()
+        type_names = list(api_get('/entity-types')['types'])
+        for name in type_names:
+            ENTITY_COLORS.setdefault(name, '#0D9488')
     except Exception as exc:
         st.error(f"无法连接 API：{exc}")
         st.stop()
@@ -263,6 +266,8 @@ def main():
             "🧾 Claims",
             "🕸️ 统一图谱",
             "🔎 实体与关系检索",
+            "💬 证据问答",
+            "📖 知识浏览与维护",
         ]
     )
 
@@ -384,20 +389,7 @@ def main():
         predicate = col1.text_input("按关系筛选（可选）")
         entity_type = col2.selectbox(
             "按实体类型筛选",
-            [
-                "",
-                "Compound",
-                "Drug",
-                "Protein",
-                "Gene",
-                "Disease",
-                "CellLine",
-                "Organism",
-                "Assay",
-                "Pathway",
-                "Mutation",
-                "Other",
-            ],
+            [""] + type_names,
         )
         try:
             claims = api_get(
@@ -539,6 +531,85 @@ def main():
             render_graph(graph)
         except Exception as exc:
             st.error(f"读取统一图谱失败：{exc}")
+
+    with tabs[6]:
+        prefix = f'/knowledge-bases/{selected_knowledge_base_id}'
+        with st.form('evidence_question'):
+            question = st.text_area('向当前知识库提问')
+            generate = st.checkbox('根据证据生成答案', value=True)
+            submitted_question = st.form_submit_button('检索证据并回答')
+        answer_key = f'answer_{selected_knowledge_base_id}'
+        if submitted_question:
+            try:
+                with st.spinner('正在检索原文证据…'):
+                    st.session_state[answer_key] = api_post_json(prefix+'/ask', {'question': question, 'generate': generate})
+            except Exception as exc:
+                st.error(f'问答失败，可重试：{exc}')
+        answer = st.session_state.get(answer_key)
+        if answer:
+            st.write(answer['answer'])
+            for warning in answer.get('warnings', []):
+                st.warning(warning)
+            for ref in answer.get('citations', []):
+                with st.expander(f"[{ref['id']}] {ref.get('title') or ref['filename']} · PDF {ref.get('page') or '未知'}"):
+                    st.write(ref['sentence'])
+                    st.caption(f"DOI: {ref.get('doi') or '未知'} | 文献 {ref['document_id']} | 片段 {ref['chunk_id']} | 否定={ref['negated']} | 推测={ref['speculative']}")
+                    st.json(ref['qualifiers'])
+                    st.write(ref['context'])
+
+    with tabs[7]:
+        prefix = f'/knowledge-bases/{selected_knowledge_base_id}'
+        st.caption('摘要为带来源的事实摘录，可随原始记录重建。复核标记不自动修改原始事实。')
+        kind = st.selectbox('浏览内容', ['overview','document','entity','fact'],
+                            format_func=lambda k: {'overview':'知识库概览','document':'文献摘要','entity':'实体摘要','fact':'完整事实'}[k])
+        browse_page = st.number_input('浏览页码', min_value=1, value=1, step=1)
+        try:
+            pages = api_get(prefix+'/browse', {'kind':kind,'limit':20,'offset':(browse_page-1)*20})['pages']
+            if not pages:
+                st.info('暂无派生页面，可在下方运行“更新索引和摘要”。')
+            for page in pages:
+                with st.expander(f"{page['kind']} · {page['source_id']}"):
+                    st.text(page['content'])
+                    st.json(page['sources'])
+        except Exception as exc:
+            st.error(f'浏览失败：{exc}')
+        with st.expander('目录、处理状态与旧文献升级'):
+            doc_id = st.number_input('文献 ID（0 表示维护整个知识库）', min_value=0, value=0, step=1)
+            if doc_id and st.button('查看全文实体目录与处理状态'):
+                try:
+                    st.json(api_get(prefix+f'/documents/{doc_id}/processing'))
+                    st.json(api_get(prefix+f'/documents/{doc_id}/catalog'))
+                except Exception as exc:
+                    st.error(f'读取失败：{exc}')
+            mode = st.selectbox('维护方式', ['derived','reproject','retry','reextract'], format_func=lambda k: {
+                'derived':'更新索引和摘要', 'reproject':'重新投影已有记录（无需 LLM）',
+                'retry':'重试失败阶段（可能调用 LLM）','reextract':'重新抽取全文（需要 LLM）'}[k])
+            st.caption('同一 PDF 可属于多个知识库；更新共享文献会更新所有包含它的知识库。重新投影不能补回旧模型未记录的语义。')
+            job_key = f'maintenance_{selected_knowledge_base_id}'
+            if st.button('开始维护'):
+                try:
+                    st.session_state[job_key] = api_post_json(prefix+'/maintenance', {'mode':mode,'document_id':doc_id or None})
+                except Exception as exc:
+                    st.error(f'启动失败：{exc}')
+            if job_key in st.session_state:
+                try:
+                    st.json(api_get(st.session_state[job_key]['status_url']))
+                except Exception as exc:
+                    st.error(f'查询失败：{exc}')
+        with st.expander('待复核'):
+            try:
+                review_page = st.number_input('复核页码', min_value=1, value=1, step=1)
+                items = api_get(prefix+'/reviews', {'limit':20,'offset':(review_page-1)*20})['reviews']
+                if not items:
+                    st.info('当前没有待复核项。')
+                for item in items:
+                    st.write(f"#{item['id']} · 文献 {item['document_id']} · {item['kind']}")
+                    st.json(item['detail'])
+                    if st.button('标记已复核', key=f"review_{item['id']}"):
+                        api_post_json(prefix+f"/reviews/{item['id']}?status=resolved", {})
+                        st.rerun()
+            except Exception as exc:
+                st.error(f'读取复核项失败：{exc}')
 
     with tabs[5]:
         st.subheader("检索知识图谱中的实体与关系")

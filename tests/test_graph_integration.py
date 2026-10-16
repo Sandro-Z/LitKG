@@ -203,10 +203,19 @@ class GraphIntegrationTests(unittest.TestCase):
         try:
             with patch.object(tasks, "get_conn", side_effect=self.connect), patch.object(
                 tasks, "parse_pdf_to_chunks", return_value=({"title": "Parser study", "doi": "10.1234/parser"}, [chunk])
-            ), patch.object(tasks, "update_document_status"), patch.object(tasks.extract_chunk, "apply_async") as enqueue:
+            ), patch.object(tasks, "update_document_status"), patch.object(tasks.build_document_catalog, "apply_async") as enqueue, patch.object(tasks.extract_chunk, 'apply_async') as relationships:
                 result = tasks.parse_document.run(document_id)
             self.assertEqual(result["chunk_count"], 1)
-            chunk_id = enqueue.call_args.kwargs["args"][0]
+            enqueue.assert_called_once_with(args=[document_id], queue='extract')
+            relationships.assert_not_called()
+            from app.schemas import CatalogBundle
+            catalog = CatalogBundle.model_validate({'entities': [
+                {'text':'Gefitinib','type':'Drug','evidence':sentence},
+                {'text':'EGFR','type':'Protein','evidence':sentence},
+            ]})
+            with patch.object(tasks,'get_conn',side_effect=self.connect), patch.object(tasks,'extract_catalog',return_value=catalog), patch.object(tasks.extract_chunk,'apply_async') as relationships:
+                tasks.build_document_catalog.run(document_id)
+            chunk_id = relationships.call_args.kwargs['args'][0]
             with self.connect() as conn:
                 document = conn.execute("SELECT title, doi FROM documents WHERE id = %s", (document_id,)).fetchone()
                 stored_chunk = conn.execute("SELECT page_start, page_end, page_spans FROM chunks WHERE id = %s", (chunk_id,)).fetchone()
@@ -214,9 +223,9 @@ class GraphIntegrationTests(unittest.TestCase):
             self.assertEqual(stored_chunk["page_spans"], chunk["page_spans"])
             self.assertEqual((stored_chunk["page_start"], stored_chunk["page_end"]), (4, 4))
             bundle = ClaimBundle.model_validate({"claims": [{
-                "subject": {"text": "Gefitinib", "type": "Drug", "normalized_id": "CHEBI:49668"},
+                "subject": {"text": "Gefitinib", "type": "Drug"},
                 "predicate": "INHIBITS",
-                "object": {"text": "EGFR", "type": "Protein", "normalized_id": "UniProt:P00533"},
+                "object": {"text": "EGFR", "type": "Protein"},
                 "evidence": {"sentence": sentence, "page": 999}, "confidence": 0.9,
             }]})
             with patch.object(tasks, "get_conn", side_effect=self.connect), patch.object(

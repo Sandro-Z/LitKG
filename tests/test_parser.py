@@ -35,6 +35,21 @@ TEI = '''<TEI xmlns="http://www.tei-c.org/ns/1.0">
 
 
 class ParserTests(unittest.TestCase):
+    def test_body_figures_tables_lists_and_appendix_are_not_silently_dropped(self):
+        xml='''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+        <p>Direct body entity.</p><div><head>Results</head><p>Paragraph entity.</p>
+        <figure><head>Figure entity</head><figDesc><p>Caption entity.</p></figDesc>
+        <table><row><cell>RNA</cell><cell>5 nM</cell></row></table></figure>
+        <list><item>List entity.</item></list></div></body>
+        <back><div><head>Appendix</head><p>Final appendix entity.</p></div>
+        <listBibl><biblStruct><note><p>Reference only.</p></note></biblStruct></listBibl></back></text></TEI>'''
+        _,sections=parse_tei_sections(xml)
+        text='\n'.join(s['text'] for s in sections)
+        for expected in ['Direct body entity.','Paragraph entity.','Figure entity','Caption entity.','RNA 5 nM','List entity.','Final appendix entity.']:
+            self.assertIn(expected,text)
+        self.assertEqual(text.count('Caption entity.'),1)
+        self.assertNotIn('Reference only.',text)
+
     def test_grobid_requests_sentence_segmentation_and_both_coordinate_types(self):
         response = MagicMock(text=TEI)
         with text_pdf(["Study abstract."]) as pdf, patch(

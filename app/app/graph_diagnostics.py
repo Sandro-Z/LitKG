@@ -57,8 +57,11 @@ def fetch_graph_diagnostics(cur, knowledge_base_id: int) -> dict:
         FROM relations r
         JOIN relation_evidence re ON re.relation_id = r.id
         JOIN claims c ON c.id = re.claim_id
+        JOIN documents d ON d.id=c.document_id
         JOIN knowledge_base_documents member ON member.document_id = c.document_id
         WHERE member.knowledge_base_id = %s
+          AND d.catalog_status IN ('done','legacy')
+          AND c.catalog_version IS NOT DISTINCT FROM d.catalog_version
         """,
         (knowledge_base_id,),
     )

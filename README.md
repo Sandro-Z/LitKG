@@ -477,3 +477,167 @@ python -m unittest discover -s tests -v
 结束后删除该 schema。未设置此变量时跳过数据库集成测试。
 完整部署后还可用 Swagger 依次执行“创建知识库
 → 上传两篇文献 → 等待批次完成 → 查询统一图谱”进行端到端验证。
+
+## v3：全文目录、完整事实与证据问答
+
+新增处理顺序为 `PDF → 全文目录 → chunk 关系 → 完整事实 → 派生索引/摘要`。
+目录识别覆盖所有已解析 chunks，长片段有重叠分段，包含文章标题和章节标题；
+GROBID 正文中的图表、列表和附录也保留。参考文献列表不作为本文实验事实。
+扫描 PDF 仍需文字层或 OCR。不会对长文档取前 N 字后宣称处理完成。
+
+目录保存文档内稳定 ID、规范名、统一类型、别名、原文明确给出的标准 ID、
+位置、歧义和不确定原因。跨段只按明确身份、明确且唯一的别名/缩写归并；
+同一命名空间冲突 ID 和多义缩写保留分离。目录提交完成前不会发布关系任务。
+关系仅能使用当前 chunk 的证据和提及；目录漏项可追加，并进入待复核。
+旧版文献的目录状态是 `legacy`，重新投影不会伪装成已完成全文实体识别。
+
+类型由 `app/app/entity_types.py` 统一管理，经 `/entity-types` 提供给前端；新增
+CellType、Tissue、AnatomicalStructure、RNA、MolecularComplex、BiologicalProcess、
+Phenotype。未知类型保留 Other 和原因。当前工作区未提供真实 PDF，未访问正式文献库
+做分布校准；新增类型依据任务要求，真实 Other 分布需使用下面的评估入口。
+
+实体 `text` 表示身份，`mention` 保留完整原始提及；实体上的 `process` 分别保存
+`expression`、`secretion`、`activity` 及方向。剂量、时间、数值等保存在 qualifiers；
+`participants` 保存 cell_line、species、assay 等带角色的实体。同一角色可有多个实体。
+身份性的突变、修饰、异构体、物种标签和立体构型不会按过程词删除。
+无法可靠拆分时保留名称、原文并进入复核，不通过强制归类降低 Other。
+
+`facts` 保存逐来源断言，`fact_participants` 复用全局规范化实体 ID，
+`fact_evidence` 保存主证据和全部 additional_evidence。相同内容的断言可共享
+`fact_key` 和原有聚合 relation，但仍保留各自来源。二元关系键还包含参与者条件，
+不同时间、物种、细胞系、过程、否定和推测不会合成同一结论。旧 graph/relations
+接口仍可用；当前目录版本以外的旧抽取不进入当前图谱或问答。
+
+原始模型结构保存在 processing_attempts 和 processing_cache；claim_json 保留
+模型名称及原始提及，页码由服务器定位。重新解析或替换前保存 claim_history，
+包含原始 chunk、标题、DOI、文件名和页码位置。派生内容可删除重建，不能替代证据。
+
+### 迁移与旧文献升级
+
+以下命令供人工在选定环境执行；本次开发没有对正式库执行迁移或启动正式服务。
+先对目标库做备份，再使用已有的 `db/init.sql` 幂等迁移。独立测试库可直接执行：
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f db/init.sql
+```
+
+既有 Docker 环境也可沿用前文的 `docker compose cp/exec` 迁移方式。
+重新应用迁移不会把已属于其他知识库的文献自动加入 default。
+
+```bash
+# 无需抽取 LLM：从已有记录重建实体/完整事实；不会恢复旧记录未保存的过程语义
+curl -X POST http://127.0.0.1:18080/knowledge-bases/2/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"reproject","document_id":31}'
+
+# 需要抽取 LLM：用全部已保存原文建立目录，再重新抽取所有 chunks
+curl -X POST http://127.0.0.1:18080/knowledge-bases/2/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"reextract","document_id":31}'
+
+# 失败后续接；已经成功的分段复用内容与处理版本缓存
+curl -X POST http://127.0.0.1:18080/knowledge-bases/2/maintenance \
+  -H 'Content-Type: application/json' -d '{"mode":"retry","document_id":31}'
+
+# 只更新索引和摘要；省略 document_id 时维护该知识库的文献
+curl -X POST http://127.0.0.1:18080/knowledge-bases/2/maintenance \
+  -H 'Content-Type: application/json' -d '{"mode":"derived"}'
+```
+
+响应包含 task_id 和 status_url；`GET status_url` 返回持久化状态和逐篇结果。
+模型输出错误、截断、无效引用或原文校验失败会记录失败，不能变成成功空列表。
+队列发布失败同样可见。`retry` 可恢复队列中断后遗留的 queued/extracting 状态；
+任务锁及版本检查会阻止同时写入或写入过期结果。
+同一 PDF 的文献记录可由多个知识库共享，更新该记录会更新所有包含它的知识库。
+
+```text
+GET  /knowledge-bases/{kb}/documents/{doc}/catalog
+GET  /knowledge-bases/{kb}/documents/{doc}/processing
+GET  /knowledge-bases/{kb}/facts?entity_id=12&limit=100&offset=0
+GET  /knowledge-bases/{kb}/browse?kind=overview|document|entity|fact
+GET  /knowledge-bases/{kb}/reviews?status=pending
+POST /knowledge-bases/{kb}/reviews/{review}?status=resolved&note=...
+```
+
+复核支持 pending/resolved/dismissed；标记复核不自动改写证据。复核项包括目录歧义、
+漏项、Other、不可靠的过程拆分，以及相同参与者/条件下的相反极性候选冲突。
+不同条件的结果不会因此被判为冲突。浏览页面采用有来源链接的抽取式摘要，
+文献/实体页面展示最多 20 条断言，并提供完整事实分页入口；这不是抽取截断。
+
+### 检索与问答
+
+检索分别召回实体与完整条件事实，结合文本匹配和可选语义召回，再沿参与者关联
+进行 0–2 跳有界扩展。引用直接回查当前知识库的事实和证据，组装原文上下文；
+不会把派生摘要当成原文。答案逐项引用；引用 ID 无效或缺失时返回原文证据及错误提示。
+没有证据时返回 insufficient_evidence；生成失败返回 evidence_only，不伪装为正常回答。
+LLM 是否正确理解证据仍需实际评估，引用有效不等于语义蕴含已由程序证明。
+
+```bash
+curl -X POST http://127.0.0.1:18080/knowledge-bases/2/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"该处理对目标蛋白的分泌有何影响？","hops":1,"limit":12,"generate":true}'
+```
+
+响应含 answer、statements、citations、facts 和 warnings。citations 包含文献 ID、
+标题、文件名、DOI、PDF 起止页、chunk、原文句子、上下文、条件、否定和推测。
+未能定位的 DOI/页码仍为 null。`generate=false` 只检索展示证据，不调用答案 LLM。
+Streamlit 增加“证据问答”和“知识浏览与维护”入口。
+
+Embedding 默认关闭；启用时使用独立配置：
+
+```dotenv
+EMBEDDING_BASE_URL=http://your-embedding-server/v1
+EMBEDDING_MODEL=your-embedding-model
+EMBEDDING_API_KEY=EMPTY
+# 同名模型权重或提示策略更新时可改变此值以失效抽取缓存
+LLM_REVISION=2026-10-16
+CATALOG_SEGMENT_CHARS=12000
+```
+
+更换 embedding 端点/模型后运行 derived 维护。向量保存在现有 PostgreSQL pgvector，
+仅比较同一端点/模型且维度相同的向量。嵌入失败有 warnings，并保留文本检索。
+实体/事实索引按内容及处理版本缓存；变更只刷新相关文献及其原有/新增实体。
+配置的模型服务会接收所需原文；仅使用适合该文献数据访问范围的端点。
+
+### 本机临时启动示例
+
+先提供独立的临时 PostgreSQL、Redis 和模型服务环境变量，不复用正式数据库。
+安装依赖后可在不同终端运行（不注册为服务）：
+
+```bash
+export PYTHONPATH=app
+export UPLOAD_DIR=/tmp/litkg-v3-uploads
+# DATABASE_URL / REDIS_URL / LLM_BASE_URL / LLM_MODEL 指向测试服务
+uvicorn app.main:app --host 127.0.0.1 --port 18080
+celery -A app.celery_app worker -Q parse,extract --concurrency=2 --loglevel=INFO
+API_BASE_URL=http://127.0.0.1:18080 streamlit run frontend/app.py \
+  --server.address 127.0.0.1 --server.port 18501
+```
+
+### 验证与小规模对照
+
+```bash
+# 安装 app/requirements.txt、httpx；前端测试另需 frontend/requirements.txt
+PYTHONPATH=app python -m unittest discover -s tests -v
+# 使用可丢弃测试库启用真实 SQL 集成测试；每组使用临时 schema 并清理
+LITKG_TEST_DATABASE_URL=postgresql://... PYTHONPATH=app \
+  python -m unittest discover -s tests -v
+
+# 在有真实文献和人工标注时生成评估快照；默认不调用答案 LLM
+PYTHONPATH=app python -m app.evaluation --knowledge-base-id 2 \
+  --queries /tmp/labelled-questions.json --output /tmp/after.json \
+  --baseline /tmp/before.json
+```
+
+标注文件是 JSON 数组，例如
+`[{"question":"目标蛋白的分泌变化？","expected_claim_ids":[99]}]`，也支持
+expected_document_ids。评估输出类型/Other 分布、同名候选重复实体、证据召回和
+可定位引用错误。无人工标签时召回为 null；同名候选不代表已经确定重复。
+`--generate-answers` 显式启用真实答案 LLM。原文支持程度需要人工逐项核对，
+不能用引用格式有效替代。当前验证范围及续接信息见 [开发状态](docs/WORK_STATE.md)。
+
+实现参考只限相关机制：
+[llm_wiki 的内容缓存](https://github.com/nashsu/llm_wiki/blob/main/src/lib/ingest-cache.ts)、
+[来源约束与派生页面](https://github.com/nashsu/llm_wiki/blob/main/src/lib/ingest.ts)、
+[HyperGraphRAG 的实体/完整事实召回和原文组合](https://github.com/LHRLAB/HyperGraphRAG/blob/main/hypergraphrag/operate.py)。
+没有移植其图数据库、桌面应用或代理系统。

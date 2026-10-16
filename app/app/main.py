@@ -15,7 +15,7 @@ from fastapi import (
 from app.batch_status import sync_batch_status
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
-from app.graph_query import fetch_graph, fetch_relations, substring_pattern
+from app.graph_query import fetch_graph, fetch_relations, substring_pattern, current_claim_clause
 from app.ingestion import (
     UploadRejected,
     register_document,
@@ -24,11 +24,16 @@ from app.ingestion import (
 )
 from app.normalization import normalize_entity_type, normalize_predicate
 from app.provenance import add_claim_location
-from app.schemas import KnowledgeBaseCreate
+from app.schemas import KnowledgeBaseCreate, QuestionRequest, MaintenanceRequest
+from app.entity_types import TYPE_DEFINITIONS
+from app.catalog import PROCESSING_VERSION, load_catalog
+from app.retrieval import fetch_facts, retrieve, answer_question
 from app.tasks import (
     parse_document,
     rebuild_knowledge_graph,
     update_document_status,
+    maintain_knowledge_base,
+    refresh_derived,
 )
 
 
@@ -41,7 +46,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
     title="LitKG API",
-    version="2.0.0",
+    version="3.0.0",
     description=(
         "Batch literature ingestion with a unified, provenance-preserving "
         "knowledge graph"
@@ -295,12 +300,19 @@ def _ingest_files(
                 f"Could not enqueue document: {exc}",
             )
 
-    return _batch_payload(batch_id, item_metadata=item_metadata)
+    batch = _batch_payload(batch_id, item_metadata=item_metadata)
+    for item in batch['items']:
+        if item.get('document_id') and item['status'] == 'done':
+            try:
+                refresh_derived.apply_async(args=[item['document_id']], queue='extract')
+            except Exception:
+                batch['derived_error'] = 'Could not enqueue derived index refresh; retry derived maintenance'
+    return batch
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "api_version": "2.0.0"}
+    return {"status": "ok", "api_version": "3.0.0"}
 
 
 @app.post("/knowledge-bases", status_code=201)
@@ -624,6 +636,7 @@ def search_knowledge_base_entities(
                       ON member.document_id = claim.document_id
                     WHERE member.knowledge_base_id = %s
                       AND claim.subject_entity_id IS NOT NULL
+                      AND {current_claim_clause('claim')}
 
                     UNION ALL
 
@@ -636,6 +649,23 @@ def search_knowledge_base_entities(
                       ON member.document_id = claim.document_id
                     WHERE member.knowledge_base_id = %s
                       AND claim.object_entity_id IS NOT NULL
+                      AND {current_claim_clause('claim')}
+
+                    UNION ALL
+
+                    SELECT participant.entity_id, claim.id AS claim_id, claim.document_id
+                    FROM fact_participants participant JOIN facts f ON f.id=participant.fact_id
+                    JOIN claims claim ON claim.id=f.claim_id
+                    JOIN knowledge_base_documents member ON member.document_id=claim.document_id
+                    WHERE member.knowledge_base_id=%s AND {current_claim_clause('claim')}
+
+                    UNION ALL
+
+                    SELECT de.entity_id,NULL::BIGINT,de.document_id FROM document_entities de
+                    JOIN documents d ON d.id=de.document_id
+                    JOIN knowledge_base_documents member ON member.document_id=de.document_id
+                    WHERE member.knowledge_base_id=%s AND de.catalog_version=d.catalog_version
+                      AND d.catalog_status='done' AND de.entity_id IS NOT NULL
                 )
                 SELECT
                     entity.id,
@@ -662,6 +692,8 @@ def search_knowledge_base_entities(
                 LIMIT %s OFFSET %s
                 """,
                 (
+                    knowledge_base_id,
+                    knowledge_base_id,
                     knowledge_base_id,
                     knowledge_base_id,
                     *params,
@@ -1033,3 +1065,139 @@ def get_document_graph(
             )
     graph["document_id"] = document_id
     return graph
+
+
+@app.get('/entity-types')
+def entity_types():
+    return {"version": PROCESSING_VERSION, "types": TYPE_DEFINITIONS}
+
+
+def _require_member(cur, knowledge_base_id, document_id):
+    _get_knowledge_base(cur, knowledge_base_id)
+    cur.execute('SELECT 1 FROM knowledge_base_documents WHERE knowledge_base_id=%s AND document_id=%s', (knowledge_base_id, document_id))
+    if not cur.fetchone():
+        raise HTTPException(404, 'Document is not in this knowledge base')
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/documents/{document_id}/catalog')
+def document_catalog(knowledge_base_id: int, document_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _require_member(cur, knowledge_base_id, document_id)
+            cur.execute('SELECT catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
+            document = cur.fetchone()
+            entries = load_catalog(cur, document_id, document['catalog_version']) if document['catalog_version'] else []
+    return {**document, 'entities': entries}
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/documents/{document_id}/processing')
+def processing_status(knowledge_base_id: int, document_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _require_member(cur, knowledge_base_id, document_id)
+            cur.execute('SELECT id,status,error,catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
+            document = cur.fetchone()
+            cur.execute('SELECT id,chunk_index,status,error,extraction_version FROM chunks WHERE document_id=%s ORDER BY chunk_index', (document_id,))
+            chunks = cur.fetchall()
+            cur.execute('SELECT id,stage,version,status,error,created_at FROM processing_attempts WHERE document_id=%s ORDER BY id DESC LIMIT 100', (document_id,))
+            attempts = cur.fetchall()
+    return {'document': document, 'chunks': chunks, 'attempts': attempts,
+            'upgrade': {'reproject': 'No LLM; rebuilds facts/index/summaries from saved claims; cannot recover unrecorded semantics',
+                        'reextract': 'LLM required; full saved text directory followed by all chunks',
+                        'retry': 'Resumes failed stages with validated segment caches',
+                        'derived': 'Rebuilds index and extractive summaries; optional embeddings'}}
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/facts')
+def complete_facts(knowledge_base_id: int, document_id: int | None = Query(None, ge=1),
+                   entity_id: int | None = Query(None, ge=1), limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            rows = fetch_facts(cur, knowledge_base_id, document_id=document_id, entity_id=entity_id, limit=limit, offset=offset)
+    for row in rows:
+        row.pop('source_text', None)
+    return {'facts': rows, 'limit': limit, 'offset': offset}
+
+
+@app.post('/knowledge-bases/{knowledge_base_id}/ask')
+def ask(knowledge_base_id: int, request: QuestionRequest):
+    if not request.question.strip():
+        raise HTTPException(422, 'Question cannot be blank')
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            result = retrieve(cur, knowledge_base_id, request.question, request.limit, request.hops)
+    return answer_question(result, request.question, request.generate)
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/browse')
+def browse(knowledge_base_id: int, kind: Literal['overview','document','entity','fact'] = Query('overview'),
+           source_id: int | None = Query(None, ge=0), query: str | None = Query(None, max_length=200),
+           limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            cur.execute("""SELECT kind,source_id,content,sources,content_hash,processing_version,updated_at
+                FROM derived_content WHERE knowledge_base_id=%s AND kind=%s AND (%s::BIGINT IS NULL OR source_id=%s)
+                AND (%s::TEXT IS NULL OR content ILIKE %s ESCAPE '!') ORDER BY source_id LIMIT %s OFFSET %s""",
+                (knowledge_base_id,kind,source_id,source_id,query,substring_pattern(query or ''),limit,offset))
+            rows = cur.fetchall()
+    return {'pages': rows, 'limit': limit, 'offset': offset, 'derived': True}
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/reviews')
+def reviews(knowledge_base_id: int, status: Literal['pending','resolved','dismissed'] = Query('pending'),
+            limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            cur.execute("""SELECT r.* FROM review_items r JOIN documents d ON d.id=r.document_id
+                JOIN knowledge_base_documents m ON m.document_id=r.document_id
+                WHERE m.knowledge_base_id=%s AND r.status=%s AND r.version=COALESCE(d.catalog_version,'legacy')
+                AND (NOT (r.detail ? 'knowledge_base_id') OR r.detail->>'knowledge_base_id'=%s)
+                ORDER BY r.id LIMIT %s OFFSET %s""", (knowledge_base_id,status,str(knowledge_base_id),limit,offset))
+            rows = cur.fetchall()
+    return {'reviews': rows, 'limit': limit, 'offset': offset}
+
+
+@app.post('/knowledge-bases/{knowledge_base_id}/reviews/{review_id}')
+def review_action(knowledge_base_id: int, review_id: int, status: Literal['pending','resolved','dismissed'], note: str = Query('', max_length=2000)):
+    with get_conn() as conn:
+        row = conn.execute("""UPDATE review_items r SET status=%s,note=%s,updated_at=now()
+            WHERE r.id=%s AND EXISTS (SELECT 1 FROM knowledge_base_documents m WHERE m.document_id=r.document_id AND m.knowledge_base_id=%s)
+            AND (NOT (r.detail ? 'knowledge_base_id') OR r.detail->>'knowledge_base_id'=%s) RETURNING id,status,note""",
+            (status,note,review_id,knowledge_base_id,str(knowledge_base_id))).fetchone()
+    if not row:
+        raise HTTPException(404, 'Review item not found')
+    return row
+
+
+@app.post('/knowledge-bases/{knowledge_base_id}/maintenance', status_code=202)
+def start_maintenance(knowledge_base_id: int, request: MaintenanceRequest):
+    job_id = str(uuid.uuid4())
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            if request.document_id:
+                _require_member(cur, knowledge_base_id, request.document_id)
+            cur.execute('INSERT INTO maintenance_jobs (id,knowledge_base_id,document_id,mode) VALUES (%s::UUID,%s,%s,%s)',
+                        (job_id,knowledge_base_id,request.document_id,request.mode))
+    try:
+        maintain_knowledge_base.apply_async(args=[job_id], queue='extract')
+    except Exception as exc:
+        with get_conn() as conn:
+            conn.execute("UPDATE maintenance_jobs SET status='failed',error=%s WHERE id=%s::UUID", (f'Queue publication failed ({type(exc).__name__})',job_id))
+        raise HTTPException(503, f'Queue unavailable; failed job {job_id} is recorded') from None
+    return {'task_id': job_id, 'mode': request.mode, 'llm_required': request.mode in {'reextract','retry'},
+            'status_url': f'/knowledge-bases/{knowledge_base_id}/maintenance/{job_id}',
+            'scope': 'Shared documents are updated in every knowledge base containing them'}
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/maintenance/{job_id}')
+def maintenance_status(knowledge_base_id: int, job_id: uuid.UUID):
+    with get_conn() as conn:
+        row = conn.execute('SELECT * FROM maintenance_jobs WHERE id=%s AND knowledge_base_id=%s', (job_id,knowledge_base_id)).fetchone()
+    if not row:
+        raise HTTPException(404, 'Maintenance job not found')
+    return row

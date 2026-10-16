@@ -19,6 +19,9 @@ from app.normalization import (
     qualifiers_fingerprint,
 )
 from app.schemas import Claim
+from app.facts import fact_qualifiers, normalized_participants, store_fact
+from app.catalog import PROCESSING_VERSION, digest, load_catalog, resolve_bundle
+from app.schemas import ClaimBundle
 
 
 def _identity_locks(identity: EntityIdentity) -> set[str]:
@@ -46,10 +49,23 @@ def _merge_entities(cur, target, sources):
     if not source_ids:
         return
     target_id = target["id"]
-    cur.execute("SELECT * FROM relations WHERE subject_entity_id = ANY(%s::BIGINT[]) OR object_entity_id = ANY(%s::BIGINT[]) ORDER BY id FOR UPDATE", (source_ids, source_ids))
+    cur.execute("""SELECT DISTINCT f.id,c.document_id FROM facts f JOIN claims c ON c.id=f.claim_id
+        JOIN fact_participants p ON p.fact_id=f.id WHERE p.entity_id=ANY(%s::BIGINT[])""", (source_ids,))
+    affected_facts = cur.fetchall()
+    cur.execute("""INSERT INTO derived_dirty_documents (document_id)
+        SELECT DISTINCT de.document_id FROM document_entities de WHERE de.entity_id=ANY(%s::BIGINT[])
+        UNION SELECT DISTINCT c.document_id FROM claims c JOIN facts f ON f.claim_id=c.id
+        JOIN fact_participants p ON p.fact_id=f.id WHERE p.entity_id=ANY(%s::BIGINT[])
+        ON CONFLICT (document_id) DO UPDATE SET revision=derived_dirty_documents.revision+1""", (source_ids,source_ids))
+    cur.execute("""SELECT * FROM relations WHERE subject_entity_id = ANY(%s::BIGINT[]) OR object_entity_id = ANY(%s::BIGINT[])
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(qualifiers->'participants','[]'::jsonb)) p
+                   WHERE (p->>1)::BIGINT=ANY(%s::BIGINT[])) ORDER BY id FOR UPDATE""", (source_ids, source_ids, source_ids))
     for relation in cur.fetchall():
         subject = target_id if relation["subject_entity_id"] in source_ids else relation["subject_entity_id"]
         object_ = target_id if relation["object_entity_id"] in source_ids else relation["object_entity_id"]
+        qualifiers = dict(relation['qualifiers'])
+        if 'participants' in qualifiers:
+            qualifiers['participants'] = sorted({(role,target_id if entity_id in source_ids else entity_id) for role,entity_id in qualifiers['participants']})
         cur.execute(
             """
             INSERT INTO relations (subject_entity_id, predicate, object_entity_id, qualifiers, qualifiers_hash, negated, speculative)
@@ -57,13 +73,32 @@ def _merge_entities(cur, target, sources):
             ON CONFLICT (subject_entity_id, predicate, object_entity_id, qualifiers_hash, negated, speculative)
             DO UPDATE SET updated_at = now() RETURNING id
             """,
-            (subject, relation["predicate"], object_, Jsonb(relation["qualifiers"]), relation["qualifiers_hash"], relation["negated"], relation["speculative"]),
+            (subject, relation["predicate"], object_, Jsonb(qualifiers), qualifiers_fingerprint(qualifiers), relation["negated"], relation["speculative"]),
         )
         relation_id = cur.fetchone()["id"]
+        cur.execute("UPDATE facts SET relation_id = %s WHERE relation_id = %s", (relation_id, relation["id"]))
         cur.execute("UPDATE relation_evidence SET relation_id = %s WHERE relation_id = %s", (relation_id, relation["id"]))
-        cur.execute("DELETE FROM relations WHERE id = %s", (relation["id"],))
+        if relation_id != relation['id']:
+            cur.execute("DELETE FROM relations WHERE id = %s", (relation["id"],))
     cur.execute("UPDATE claims SET subject_entity_id = %s WHERE subject_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
     cur.execute("UPDATE claims SET object_entity_id = %s WHERE object_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
+    # Complete facts and directory entries refer to the same normalized IDs.
+    cur.execute("""INSERT INTO fact_participants (fact_id, entity_id, role, mention)
+        SELECT fact_id, %s, role, mention FROM fact_participants WHERE entity_id = ANY(%s::BIGINT[])
+        ON CONFLICT DO NOTHING""", (target_id, source_ids))
+    cur.execute("DELETE FROM fact_participants WHERE entity_id = ANY(%s::BIGINT[])", (source_ids,))
+    for fact in affected_facts:
+        cur.execute('SELECT * FROM facts WHERE id=%s', (fact['id'],))
+        current = cur.fetchone()
+        cur.execute('SELECT role,entity_id FROM fact_participants WHERE fact_id=%s ORDER BY role,entity_id', (fact['id'],))
+        participants = [(p['role'],p['entity_id']) for p in cur.fetchall()]
+        qualifiers = dict(current['qualifiers'])
+        if 'participants' in qualifiers:
+            qualifiers['participants'] = sorted({(role,target_id if entity_id in source_ids else entity_id) for role,entity_id in qualifiers['participants']})
+        key = digest({'participants':participants,'predicate':current['predicate'],'qualifiers':qualifiers,
+                      'negated':current['negated'],'speculative':current['speculative']})
+        cur.execute('UPDATE facts SET fact_key=%s,qualifiers=%s,updated_at=now() WHERE id=%s', (key,Jsonb(qualifiers),fact['id']))
+    cur.execute("UPDATE document_entities SET entity_id = %s WHERE entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
     cur.execute(
         """
         INSERT INTO entity_aliases (entity_id, alias, normalized_alias)
@@ -255,16 +290,30 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
     )
     # Acquire both endpoints' locks in a stable order, including aliases, before
     # either upsert. Opposite-direction claims cannot invert the lock order.
-    for key in sorted(_identity_locks(subject) | _identity_locks(object_)):
+    extra_identities = [(p, entity_identity(p.entity.text, p.entity.type, p.entity.normalized_id, abbreviations, document_id)) for p in normalized_participants(claim)]
+    keys = _identity_locks(subject) | _identity_locks(object_)
+    for _, identity in extra_identities:
+        keys |= _identity_locks(identity)
+    for key in sorted(keys):
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
     subject_entity_id = upsert_entity(cur, subject, reconcile_existing=reconcile_existing)
     object_entity_id = upsert_entity(cur, object_, reconcile_existing=reconcile_existing)
     predicate = normalize_predicate(claim.predicate)
-    qualifiers = canonicalize_qualifiers(claim.qualifiers)
+    participants = [
+        {"role": "subject", "entity_id": subject_entity_id, "mention": claim.subject.mention or claim.subject.text, "entity": claim.subject},
+        {"role": "object", "entity_id": object_entity_id, "mention": claim.object.mention or claim.object.text, "entity": claim.object},
+    ]
+    for participant, identity in extra_identities:
+        participants.append({"role": participant.role, "entity_id": upsert_entity(cur, identity, reconcile_existing=reconcile_existing),
+                             "mention": participant.entity.mention or participant.entity.text, "entity": participant.entity})
+    qualifiers = fact_qualifiers(claim)
+    if extra_identities:
+        qualifiers["participants"] = sorted({(p["role"], p["entity_id"]) for p in participants if p["role"] not in {"subject", "object"}})
     evidence_text = clean_text(claim.evidence.sentence)
 
     return {
         "subject": subject,
+        "participants": participants,
         "object": object_,
         "subject_entity_id": subject_entity_id,
         "object_entity_id": object_entity_id,
@@ -272,7 +321,7 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
         "qualifiers": qualifiers,
         "qualifiers_hash": qualifiers_fingerprint(qualifiers),
         "evidence_text": evidence_text,
-        "fingerprint": claim_fingerprint(
+        "fingerprint": digest([claim_fingerprint(
             subject=replace(subject, canonical_key=f"entity:{subject_entity_id}"),
             predicate=predicate,
             object_=replace(object_, canonical_key=f"entity:{object_entity_id}"),
@@ -280,7 +329,7 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
             evidence_text=evidence_text,
             negated=claim.negated,
             speculative=claim.speculative,
-        ),
+        ), [e.model_dump() for e in claim.additional_evidence]]),
     }
 
 
@@ -349,9 +398,10 @@ def store_claim(
     claim: Claim,
     extraction_model: str,
     abbreviations: dict[str, str | None] | None = None,
+    original_claim_json: dict | None = None,
 ) -> tuple[int, int]:
     projection = _claim_projection(cur, claim, abbreviations, document_id)
-    claim_json = claim.model_dump(mode="json")
+    claim_json = original_claim_json if original_claim_json is not None else claim.model_dump(mode="json")
 
     cur.execute(
         """
@@ -420,6 +470,8 @@ def store_claim(
         ),
     )
     claim_id = cur.fetchone()["id"]
+    cur.execute("""UPDATE claims SET catalog_version=(SELECT catalog_version FROM documents WHERE id=%s),
+        processing_version=%s WHERE id=%s""", (document_id,PROCESSING_VERSION,claim_id))
     relation_id = _upsert_relation_evidence(
         cur,
         claim_id=claim_id,
@@ -427,11 +479,24 @@ def store_claim(
         negated=claim.negated,
         speculative=claim.speculative,
     )
+    store_fact(cur, claim_id, relation_id, claim, projection, document_id)
     return claim_id, relation_id
 
 
 def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None) -> int:
+    if document_id is None:
+        cur.execute("SELECT document_id FROM claims WHERE id = %s", (claim_id,))
+        document_id = cur.fetchone()["document_id"]
     claim = Claim.model_validate(claim_json)
+    cur.execute("""SELECT d.catalog_version,d.catalog_status,ch.id,ch.text,c.catalog_version AS claim_catalog_version
+        FROM claims c JOIN documents d ON d.id=c.document_id JOIN chunks ch ON ch.id=c.chunk_id
+        WHERE c.id=%s""", (claim_id,))
+    source = cur.fetchone()
+    if source and source['claim_catalog_version'] != source['catalog_version']:
+        raise ValueError('Stale extraction version; re-extraction is required')
+    if source and source['catalog_status'] == 'done':
+        entries = load_catalog(cur, document_id, source['catalog_version'])
+        resolve_bundle(ClaimBundle(claims=[claim]), entries, source, source['catalog_version'])
     projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=True)
 
     # Old versions could store the same extraction more than once. When
@@ -488,13 +553,15 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
             claim_id,
         ),
     )
-    return _upsert_relation_evidence(
+    relation_id = _upsert_relation_evidence(
         cur,
         claim_id=claim_id,
         projection=projection,
         negated=claim.negated,
         speculative=claim.speculative,
     )
+    store_fact(cur, claim_id, relation_id, claim, projection, document_id)
+    return relation_id
 
 
 def prune_orphan_projection(cur) -> dict[str, int]:
@@ -522,6 +589,8 @@ def prune_orphan_projection(cur) -> dict[str, int]:
             SELECT 1 FROM claims c
             WHERE c.subject_entity_id = e.id OR c.object_entity_id = e.id
         )
+        AND NOT EXISTS (SELECT 1 FROM fact_participants p WHERE p.entity_id = e.id)
+        AND NOT EXISTS (SELECT 1 FROM document_entities d WHERE d.entity_id = e.id)
         """
     )
     deleted_entities = cur.rowcount

@@ -4,29 +4,9 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
+from app.entity_types import ENTITY_TYPES
 
 
-ENTITY_TYPES = {
-    "assay": "Assay",
-    "cellline": "CellLine",
-    "cell_line": "CellLine",
-    "compound": "Compound",
-    "disease": "Disease",
-    "drug": "Drug",
-    "gene": "Gene",
-    "mutation": "Mutation",
-    "organism": "Organism",
-    "other": "Other",
-    "pathway": "Pathway",
-    "protein": "Protein",
-    "chemical": "Compound",
-    "chemicalcompound": "Compound",
-    "smallmolecule": "Compound",
-    "medication": "Drug",
-    "proteins": "Protein",
-    "genes": "Gene",
-    "celllines": "CellLine",
-}
 
 _GREEK = str.maketrans({
     "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta",
@@ -74,7 +54,7 @@ def normalize_entity_type(value: str | None) -> str:
     raw = clean_text(value, fallback="Other")
     key = re.sub(r"[\s-]+", "_", raw).casefold()
     compact_key = key.replace("_", "")
-    return ENTITY_TYPES.get(key, ENTITY_TYPES.get(compact_key, raw))
+    return ENTITY_TYPES.get(key, ENTITY_TYPES.get(compact_key, "Other"))
 
 
 def normalize_alias(value: str | None) -> str:

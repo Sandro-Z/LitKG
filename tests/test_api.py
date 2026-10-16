@@ -110,6 +110,8 @@ class ApiTests(unittest.TestCase):
 
         chunk = {
             "id": 8, "document_id": 5, "section_title": "Results",
+            "catalog_version": "test-version", "catalog_status": "done", "pipeline_generation": 1,
+            "abbreviation_map": {},
             "text": "Aspirin inhibited COX-1.", "page_start": 2, "page_end": 2,
             "page_spans": [{"start": 0, "end": 24, "page_start": 2, "page_end": 2}],
         }
@@ -127,7 +129,9 @@ class ApiTests(unittest.TestCase):
                     tasks, "update_chunk_status"
                 ), patch.object(tasks, "refresh_document_status"), patch.object(
                     tasks, "extract_claims", return_value=bundle
-                ), patch.object(tasks, "store_claim") as store:
+                ), patch.object(tasks, "load_catalog", return_value=[]), patch.object(
+                    tasks, "cached_model", return_value=bundle
+                ), patch.object(tasks, "store_claim", return_value=(1, 1)) as store:
                     tasks.extract_chunk.run(8)
                 evidence = store.call_args.kwargs["claim"].evidence
                 self.assertEqual(evidence.page, 2 if known_pages else None)

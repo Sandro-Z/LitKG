@@ -14,6 +14,7 @@ from app.db import get_conn
 from app.page_mapping import PdfPageIndex
 from app.parser import fallback_pdf_text
 from app.provenance import locate_evidence_pages, page_bounds
+from app.catalog import archive_claims
 
 
 def repair_document_pages(document_id: int, *, dry_run=False):
@@ -27,7 +28,7 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                 document = cur.fetchone()
                 if not document:
                     return {"document_id": document_id, "status": "missing"}
-                if document["status"] in {"queued", "parsing", "chunked", "extracting"}:
+                if document["status"] in {"queued", "parsing", "chunked", "cataloging", "extracting"}:
                     return {"document_id": document_id, "status": "skipped_active"}
                 cur.execute(
                     "SELECT id, text, status, page_start, page_end, page_spans FROM chunks "
@@ -41,6 +42,8 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                 if not pages:
                     return {"document_id": document_id, "status": "no_pdf_text"}
                 index = PdfPageIndex.from_sections(pages)
+                if not dry_run:
+                    archive_claims(cur, document_id)
                 mapped_chunks = {}
                 changed_chunks = 0
                 for chunk in chunks:
@@ -81,15 +84,51 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                         continue
                     located_claims += 1
                     updated = {**original, "evidence": {**evidence, "page": first, "page_end": last}}
+                    if original.get('additional_evidence'):
+                        additional = []
+                        for extra in original['additional_evidence']:
+                            a,b = index.locate(extra['sentence'],within=bounds if bounds[0] else None)
+                            if a is None:
+                                a,b = locate_evidence_pages(extra['sentence'],mapped_chunk)
+                            additional.append({**extra,'page':a,'page_end':b} if a is not None else extra)
+                        updated['additional_evidence'] = additional
                     if updated != original:
                         changed_claims += 1
                         if not dry_run:
                             cur.execute("UPDATE claims SET claim_json = %s WHERE id = %s",
                                         (Jsonb(updated), claim["id"]))
+                    if not dry_run:
+                        for ordinal, item in enumerate([updated['evidence'],*updated.get('additional_evidence',[])]):
+                            cur.execute('''UPDATE fact_evidence SET evidence=%s WHERE ordinal=%s
+                                AND fact_id IN (SELECT id FROM facts WHERE claim_id=%s)''',(Jsonb(item),ordinal,claim['id']))
+                cur.execute('''SELECT de.catalog_version,de.local_id,de.entry FROM document_entities de
+                    JOIN documents d ON d.id=de.document_id WHERE de.document_id=%s AND de.catalog_version=d.catalog_version''',(document_id,))
+                changed_directory = 0
+                for row in cur.fetchall():
+                    entry = row['entry']
+                    updated_locations = []
+                    for location in entry['locations']:
+                        quote = location.get('evidence') or location.get('mention')
+                        chunk = mapped_chunks.get(location.get('chunk_id'))
+                        if not quote or not chunk or location.get('source_kind','text') != 'text':
+                            updated_locations.append(location)
+                            continue
+                        bounds = page_bounds([chunk])
+                        first,last = index.locate(quote,within=bounds if bounds[0] else None)
+                        updated_locations.append({**location,'page':first,'page_end':last} if first is not None else location)
+                    if updated_locations != entry['locations']:
+                        changed_directory += 1
+                        if not dry_run:
+                            cur.execute('UPDATE document_entities SET entry=%s WHERE document_id=%s AND catalog_version=%s AND local_id=%s',
+                                        (Jsonb({**entry,'locations':updated_locations}),document_id,row['catalog_version'],row['local_id']))
+                if not dry_run and (changed_chunks or changed_claims or changed_directory):
+                    cur.execute('''INSERT INTO derived_dirty_documents (document_id) VALUES (%s)
+                        ON CONFLICT (document_id) DO UPDATE SET revision=derived_dirty_documents.revision+1''',(document_id,))
                 return {
                     "document_id": document_id, "status": "preview" if dry_run else "done",
                     "changed_chunk_count": changed_chunks, "changed_claim_count": changed_claims,
                     "located_claim_count": located_claims, "unresolved_claim_count": unresolved_claims,
+                    'changed_directory_count': changed_directory,
                 }
     except LockNotAvailable:
         return {"document_id": document_id, "status": "skipped_active"}
@@ -129,6 +168,14 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview counts without changing saved data")
     args = parser.parse_args()
     report = repair_pages(**vars(args))
+    if not args.dry_run:
+        from app.tasks import refresh_derived
+        for row in report['documents']:
+            if row.get('changed_chunk_count') or row.get('changed_claim_count') or row.get('changed_directory_count'):
+                try:
+                    refresh_derived.apply_async(args=[row['document_id']],queue='extract')
+                except Exception as exc:
+                    row['derived_error'] = f'Queue unavailable ({type(exc).__name__}); run derived maintenance'
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return int(any(row["status"] in {"failed", "missing", "no_pdf_text"} for row in report["documents"]))
 

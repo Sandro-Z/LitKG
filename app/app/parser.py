@@ -96,11 +96,11 @@ def _paragraph_text_and_spans(paragraph):
             parts.append((node.text, pages))
         for child in node:
             # Adjacent <s> elements need a separator even without XML indentation.
-            sentence = child.tag == "{http://www.tei-c.org/ns/1.0}s"
-            if sentence:
+            block = child.tag.rsplit('}',1)[-1] in {'s','p','cell','row','item','head','figDesc'}
+            if block:
                 parts.append((" ", pages))
             visit(child, pages)
-            if sentence:
+            if block:
                 parts.append((" ", pages))
             if child.tail:
                 parts.append((child.tail, pages))
@@ -156,14 +156,24 @@ def parse_tei_sections(tei_xml: str):
     if abstract["text"]:
         sections.append(abstract)
 
-    divs = root.xpath("//tei:text/tei:body//tei:div", namespaces=ns)
-    for div in divs:
-        head_nodes = div.xpath("./tei:head", namespaces=ns)
-        p_nodes = div.xpath("./tei:p", namespaces=ns)
-
-        heading = _text_content(head_nodes) if head_nodes else "Body"
-        section = _section_from_paragraphs(heading, p_nodes)
-        if section["text"]:
+    # Include direct body paragraphs, figure/table captions, lists, and appendix
+    # prose. Selecting only div/p silently omitted these source locations.
+    candidates = root.xpath("//tei:text/tei:body//*[self::tei:p or self::tei:figure or self::tei:table or self::tei:list or self::tei:note] | "
+                            "//tei:text/tei:back//*[self::tei:p or self::tei:figure or self::tei:table or self::tei:list or self::tei:note][not(ancestor::tei:listBibl)]", namespaces=ns)
+    candidate_set = set(candidates)
+    groups = []
+    for node in candidates:
+        if any(parent in candidate_set for parent in node.iterancestors()):
+            continue
+        div = next((parent for parent in node.iterancestors() if parent.tag == '{http://www.tei-c.org/ns/1.0}div'), None)
+        heads = div.xpath('./tei:head', namespaces=ns) if div is not None else []
+        heading = _text_content(heads) if heads else 'Body'
+        if not groups or groups[-1][0] != (heading, div):
+            groups.append(((heading, div), []))
+        groups[-1][1].append(node)
+    for (heading, _), nodes in groups:
+        section = _section_from_paragraphs(heading, nodes)
+        if section['text']:
             sections.append(section)
 
     return metadata, sections

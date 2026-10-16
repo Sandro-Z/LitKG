@@ -12,6 +12,12 @@ def substring_pattern(query: str) -> str:
     return f"%{escaped}%"
 
 
+def current_claim_clause(alias='c'):
+    return f"""EXISTS (SELECT 1 FROM documents source_document WHERE source_document.id={alias}.document_id
+        AND source_document.catalog_status IN ('done','legacy')
+        AND {alias}.catalog_version IS NOT DISTINCT FROM source_document.catalog_version)"""
+
+
 def _entity_search(alias: str) -> str:
     return f"""
         (
@@ -41,16 +47,17 @@ def _scope_clause(
             "Exactly one of knowledge_base_id or document_id must be provided"
         )
 
+    current_version = ' AND ' + current_claim_clause()
     if knowledge_base_id is not None:
         return (
             """
             JOIN knowledge_base_documents kbd
               ON kbd.document_id = c.document_id
             WHERE kbd.knowledge_base_id = %s
-            """,
+            """ + current_version,
             [knowledge_base_id],
         )
-    return ("WHERE c.document_id = %s", [document_id])
+    return ("WHERE c.document_id = %s" + current_version, [document_id])
 
 
 def fetch_graph(
