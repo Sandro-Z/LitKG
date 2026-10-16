@@ -2,16 +2,18 @@
 import hashlib
 import json
 import re
+import unicodedata
 
 from psycopg.types.json import Jsonb
 
 from app.normalization import (
     abbreviation_key, entity_family, entity_identity, extract_abbreviations,
     normalize_alias, normalize_entity_alias, normalize_external_id, identifier_namespace, stable_json,
+    _DASHES,
 )
 
 PROCESSING_VERSION = "litkg-v3.1"
-CATALOG_VERSION = "catalog-v1"
+CATALOG_VERSION = "catalog-v2-grounded-repair"
 EXTRACTION_VERSION = "claims-v3"
 
 
@@ -46,20 +48,129 @@ def segments(chunks, max_chars=12000):
             start = end - overlap
 
 
+class CatalogValidationError(ValueError):
+    """A source-grounding failure eligible for bounded model correction."""
+
+
+def source_span(text, quote):
+    """Locate a literal quote after the same layout normalization as validation.
+
+    Keep offsets into the original text, including whitespace and Unicode
+    ligatures. No fuzzy matching, word expansion, or identity-changing hyphen
+    removal is performed.
+    """
+    if not quote:
+        return None
+    literal = (r'(?<!\w)' if quote[0].isalnum() else '') + re.escape(quote) + (r'(?!\w)' if quote[-1].isalnum() else '')
+    exact = re.search(literal, text)
+    if exact:
+        return exact.span()
+    needle = normalize_alias(quote)
+    normalized, offsets = [], []
+    index = 0
+    while index < len(text):
+        end = index + 1
+        while end < len(text) and unicodedata.combining(text[end]):
+            end += 1
+        for char in unicodedata.normalize('NFKC', text[index:end]).translate(_DASHES).casefold():
+            if char.isspace():
+                if normalized and normalized[-1] == ' ':
+                    offsets[-1] = (offsets[-1][0], end)
+                    continue
+                char = ' '
+            normalized.append(char)
+            offsets.append((index, end))
+        index = end
+    if not needle:
+        return None
+    pattern = (r'(?<!\w)' if needle[0].isalnum() else '') + re.escape(needle) + (r'(?!\w)' if needle[-1].isalnum() else '')
+    match = re.search(pattern, ''.join(normalized))
+    if not match:
+        return None
+    return offsets[match.start()][0], offsets[match.end() - 1][1]
+
+
+def _catalog_sources(segment):
+    return [source for source in segment.get('sources', [segment['text']]) if source]
+
+
+def prepare_catalog(bundle, segment):
+    """Repair only fields that can be anchored to actual source characters.
+
+    Unsupported aliases are discarded with an audit record. A missing or
+    paraphrased evidence sentence is replaced by a source window containing
+    the verified mention. Unsupported core mentions and identifiers still fail.
+    """
+    result = bundle.model_copy(deep=True)
+    repairs = []
+    sources = _catalog_sources(segment)
+
+    def locate(quote):
+        for source in sources:
+            span = source_span(source, quote)
+            if span is not None:
+                return source, span
+        return None
+
+    for index, entity in enumerate(result.entities):
+        mention = entity.mention or entity.text
+        located = locate(mention)
+        if located is None and entity.mention:
+            located = locate(entity.text)
+        if located is None:
+            raise CatalogValidationError(f'Catalog mention is absent from its source segment (entity[{index}])')
+        source, (start, end) = located
+        entity.mention = source[start:end]
+        if entity.mention != mention:
+            repairs.append({'entity_index': index, 'field': 'mention', 'original': mention, 'replacement': entity.mention})
+        grounded_evidence = locate(entity.evidence)
+        if grounded_evidence is not None:
+            evidence_source, (evidence_start, evidence_end) = grounded_evidence
+            evidence = evidence_source[evidence_start:evidence_end]
+        else:
+            evidence = None
+        if evidence is None or not source_contains(evidence, entity.mention):
+            # Use an exact source window, never a synthesized sentence. Newlines
+            # also stop a window from joining a title, heading and body.
+            left = max(source.rfind(mark, 0, start) for mark in '.!?\n') + 1
+            endings = [pos + 1 for mark in '.!?\n' if (pos := source.find(mark, end)) >= 0]
+            right = min(endings) if endings else len(source)
+            left, right = max(left, start - 500), min(right, end + 500)
+            evidence = source[left:right].strip()
+        if entity.evidence != evidence:
+            repairs.append({'entity_index': index, 'field': 'evidence', 'original': entity.evidence, 'replacement': evidence})
+            entity.evidence = evidence
+        aliases = []
+        for alias in entity.aliases:
+            location = locate(alias)
+            if location is None:
+                repairs.append({'entity_index': index, 'field': 'alias', 'original': alias, 'replacement': None})
+                continue
+            alias_source, (alias_start, alias_end) = location
+            grounded_alias = alias_source[alias_start:alias_end]
+            if grounded_alias not in aliases:
+                aliases.append(grounded_alias)
+        entity.aliases = aliases
+    validate_catalog(result, segment)
+    result._catalog_repairs = repairs
+    return result
+
+
 def validate_catalog(bundle, segment):
-    for entity in bundle.entities:
+    sources = _catalog_sources(segment)
+    for index, entity in enumerate(bundle.entities):
         if entity.type == 'Other' and not entity.uncertainty_reason:
             entity.uncertainty_reason = 'insufficient type evidence'
-        if not source_contains(segment["text"], entity.evidence):
-            raise ValueError("Catalog evidence is absent from its source segment")
+        if not any(source_contains(source, entity.evidence) for source in sources):
+            raise CatalogValidationError(f"Catalog evidence is absent from its source segment (entity[{index}])")
         mention = entity.mention or entity.text
         if not source_contains(entity.evidence, mention):
-            raise ValueError("Catalog mention is absent from its evidence")
-        if entity.normalized_id and not source_contains(segment["text"], entity.normalized_id):
+            raise CatalogValidationError(f"Catalog mention is absent from its evidence (entity[{index}])")
+        if entity.normalized_id and not any(source_contains(source, entity.normalized_id) for source in sources):
             # The model must copy the literal identifier; normalization is local.
-            raise ValueError("Catalog standard ID was not explicitly supplied")
-        if any(not source_contains(segment["text"], alias) for alias in entity.aliases):
-            raise ValueError("Catalog alias is absent from its source segment")
+            raise CatalogValidationError(f"Catalog standard ID was not explicitly supplied (entity[{index}])")
+        if any(not any(source_contains(source, alias) for source in sources) for alias in entity.aliases):
+            raise CatalogValidationError(f"Catalog alias is absent from its source segment (entity[{index}])")
 
 
 def merge_catalog(records, abbreviations, document_id):

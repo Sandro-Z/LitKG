@@ -8,10 +8,11 @@ from app.celery_app import celery_app
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, project_existing_claim, store_claim, upsert_entity
-from app.llm import LLM_MODEL, LLM_BASE_URL, LLM_REVISION, extract_claims, extract_catalog
+from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
+    ModelOutputError, extract_claims, extract_catalog)
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, EXTRACTION_VERSION, digest, segments,
-    validate_catalog, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
+    prepare_catalog, CatalogValidationError, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
 from app.normalization import entity_identity
 from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
 from app.normalization import extract_abbreviations
@@ -35,33 +36,57 @@ def processing_lock(key):
                 conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
 
 
-def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, validate=None):
+def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, validate=None,
+                 retry_call=None, max_attempts=1):
+    def checked(result):
+        if validate:
+            validated = validate(result.model_copy(deep=True))
+            if isinstance(validated, schema):
+                return validated
+        return result
+
+    def record_failure(exc, parsed=None, raw_output=None):
+        output = {'parsed': parsed, 'raw': getattr(exc, 'raw', raw_output)}
+        with get_conn() as conn:
+            conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
+                VALUES (%s, %s, %s, %s, 'failed', %s, %s)""",
+                (document_id, chunk_id, stage, key, Jsonb(output), f"{type(exc).__name__}: {exc}"))
+
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM processing_cache WHERE document_id = %s AND stage = %s AND cache_key = %s",
                            (document_id, stage, key)).fetchone()
     if row:
-        result = schema.model_validate(row["payload"])
-        if validate:
-            validate(result.model_copy(deep=True))
-        return result
-    raw = None
-    try:
-        result = model_call()
-        raw = result.model_dump(mode='json')
-        if validate:
-            validate(result.model_copy(deep=True))
-    except Exception as exc:
-        with get_conn() as conn:
-            conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
-                VALUES (%s, %s, %s, %s, 'failed', %s, %s)""",
-                (document_id, chunk_id, stage, key, Jsonb({"raw": exc.raw}) if hasattr(exc, "raw") else Jsonb(raw) if raw is not None else None, f"{type(exc).__name__}: {exc}"))
-        raise
+        try:
+            return checked(schema.model_validate(row["payload"]))
+        except (ValueError, TypeError) as exc:
+            record_failure(exc, row['payload'])
+            with get_conn() as conn:
+                conn.execute('DELETE FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s',
+                             (document_id, stage, key))
+    last_error, original, raw_output = None, None, None
+    attempt_limit = max(1, min(5, max_attempts))
+    for attempt in range(attempt_limit):
+        parsed, raw_output = None, None
+        try:
+            result = model_call() if last_error is None else retry_call(last_error, original)
+            parsed = result.model_dump(mode='json')
+            raw_output = getattr(result, '_raw_output', None)
+            result = checked(result)
+            break
+        except Exception as exc:
+            record_failure(exc, parsed, raw_output)
+            if retry_call is None or not isinstance(exc, (CatalogValidationError, ModelOutputError)) or attempt + 1 >= attempt_limit:
+                raise
+            last_error = exc
+            original = getattr(exc, 'raw', None) or parsed
+    payload = result.model_dump(mode='json')
     with get_conn() as conn:
         conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                     (document_id, stage, key, Jsonb(raw)))
+                     (document_id, stage, key, Jsonb(payload)))
         conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output)
             VALUES (%s, %s, %s, %s, 'done', %s)""", (document_id, chunk_id, stage, key,
-            Jsonb({'parsed':raw,'raw':getattr(result,'_raw_output',None)})))
+            Jsonb({'parsed': payload, 'original_parsed': parsed, 'raw': raw_output,
+                   'repairs': getattr(result, '_catalog_repairs', [])})))
     return result
 
 
@@ -211,7 +236,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             abbreviations = extract_abbreviations('\n'.join([document['title'] or '', *[f"{c['section_title'] or ''}\n{c['text']}" for c in chunks]]))
             content_hash = digest([document['title'], [(c["chunk_index"], c['section_title'], c["text"], c["page_spans"]) for c in chunks]])
             generation = document["pipeline_generation"]
-            version = digest([content_hash, CATALOG_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, document['extraction_epoch']])
+            version = digest([content_hash, CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, document['extraction_epoch']])
             with get_conn() as conn:
                 conn.execute("""UPDATE documents SET status = 'cataloging', catalog_status = 'processing',
                     catalog_version = %s, abbreviation_map = %s, catalog_error = NULL, error = NULL WHERE id = %s""",
@@ -224,11 +249,21 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             records = []
             for segment in segments(chunks, max_chars=int(os.environ.get("CATALOG_SEGMENT_CHARS", "12000"))):
                 heading = f"Document title: {document['title'] or ''}\nSection: {segment['section_title'] or 'Unknown'}"
-                validation_segment = {**segment, 'text':'\n'.join([document['title'] or '',segment['section_title'] or '',segment['text']])}
-                key = digest([CATALOG_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, heading, segment["text"], document['extraction_epoch']])
+                sources = [document['title'] or '', segment['section_title'] or '', segment['text']]
+                validation_segment = {**segment, 'text':'\n'.join(sources), 'sources': sources}
+                key = digest([CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, heading, segment["text"], document['extraction_epoch']])
                 def identify():
                     return extract_catalog(heading, segment["text"])
-                bundle = cached_model(document_id, "catalog", key, identify, CatalogBundle, segment["id"], validate=lambda b:validate_catalog(b,validation_segment))
+                def correct(error, previous_output):
+                    return extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous_output)
+                bundle = cached_model(document_id, "catalog", key, identify, CatalogBundle, segment["id"],
+                    validate=lambda b:prepare_catalog(b, validation_segment), retry_call=correct,
+                    max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
+                if bundle._catalog_repairs:
+                    with get_conn() as conn:
+                        for repair in bundle._catalog_repairs:
+                            add_review(conn.cursor(), document_id, version, 'catalog_repair',
+                                {'chunk_id': segment['id'], 'start': segment['start'], **repair})
                 for entity in bundle.entities:
                     page, page_end = locate_evidence_pages(entity.evidence, next(c for c in chunks if c["id"] == segment["id"]))
                     source_kind = 'text'

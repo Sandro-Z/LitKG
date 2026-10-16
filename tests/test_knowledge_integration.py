@@ -124,6 +124,48 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM claims WHERE document_id=%s',(self.doc,)).fetchone()['n'],0)
 
+    def test_catalog_repair_persists_clean_cache_original_output_and_review(self):
+        text = 'Probe Q reduces IL-6.'
+        self.chunk(self.doc, text)
+        value = CatalogBundle.model_validate({'entities':[{'text':'IL-6','type':'Protein',
+            'aliases':['Invented alias'], 'evidence':'IL-6 was reduced by Probe Q.'}]})
+        value._raw_output = 'original controlled response'
+        with patch.object(self.tasks,'extract_catalog',return_value=value) as model, patch.object(self.tasks.extract_chunk,'apply_async') as publish:
+            self.tasks.build_document_catalog.run(self.doc)
+            self.tasks.build_document_catalog.run(self.doc)
+        model.assert_called_once()
+        self.assertEqual(publish.call_count,2)
+        with self.connect() as conn:
+            payload = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage='catalog'",(self.doc,)).fetchone()['payload']
+            self.assertEqual(payload['entities'][0]['aliases'],[])
+            self.assertEqual(payload['entities'][0]['evidence'],text)
+            audit = conn.execute("SELECT output FROM processing_attempts WHERE document_id=%s AND status='done'",(self.doc,)).fetchone()['output']
+            self.assertEqual(audit['raw'],'original controlled response')
+            self.assertEqual(audit['original_parsed']['entities'][0]['aliases'],['Invented alias'])
+            self.assertGreater(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='catalog_repair'",(self.doc,)).fetchone()['n'],0)
+
+    def test_catalog_semantic_retry_completes_before_relationship_publication(self):
+        text = 'Probe Q reduces IL-6.'
+        self.chunk(self.doc,text)
+        calls = []
+        def model(section,source,**kwargs):
+            calls.append(kwargs)
+            if not kwargs:
+                return CatalogBundle.model_validate({'entities':[{'text':'Invented protein','type':'Protein','evidence':text}]})
+            self.assertIn('entity[0]',kwargs['feedback'])
+            self.assertEqual(kwargs['previous_output']['entities'][0]['text'],'Invented protein')
+            return CatalogBundle.model_validate({'entities':[{'text':'IL-6','type':'Protein','evidence':text}]})
+        def published(*args,**kwargs):
+            with self.connect() as conn:
+                self.assertEqual(conn.execute('SELECT catalog_status FROM documents WHERE id=%s',(self.doc,)).fetchone()['catalog_status'],'done')
+        with patch.dict(os.environ,{'CATALOG_VALIDATION_ATTEMPTS':'3'}), patch.object(self.tasks,'extract_catalog',side_effect=model), patch.object(self.tasks.extract_chunk,'apply_async',side_effect=published) as publish:
+            self.tasks.build_document_catalog.run(self.doc)
+        self.assertEqual(len(calls),2)
+        publish.assert_called_once()
+        with self.connect() as conn:
+            statuses = conn.execute('SELECT status FROM processing_attempts WHERE document_id=%s ORDER BY id',(self.doc,)).fetchall()
+            self.assertEqual([row['status'] for row in statuses],['failed','done'])
+
     def test_title_is_catalogued_with_honest_location_and_old_versions_are_hidden(self):
         sentence='Probe Q reduces IL-6.'
         chunk=self.chunk(self.doc,sentence)
