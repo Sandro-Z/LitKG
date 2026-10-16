@@ -1,5 +1,31 @@
 # LitKG v3 开发与续接记录
 
+## 2026-10-16 目录输出截断修复（最新状态）
+
+工作区以 accdc9c（原文约束修复）、fbc0f67（全文目录/完整事实）为基线。
+当前 .env 的 LLM_MAX_OUTPUT_TOKENS=4096，未显式设置目录分段大小，使用 12000 字符默认值。
+只读取了容量相关配置，没有显示密钥；未改 .env，未操作正式服务或真实模型。
+
+修复：
+- finish_reason=length 单独抛出 ModelOutputTruncatedError，不能接受被截断的完整外观 JSON。
+- 截断不再进入相同输入的语义纠正重试；对当前片段带重叠二分，保持全文覆盖和绝对位置。
+- 分割计划使用 processing_cache 的 catalog_split 阶段，成功子段仍用 catalog 阶段缓存。
+  retry 跳过已知超限父段和已成功子段；原有有效结果缓存键保持兼容。
+- CATALOG_MAX_OUTPUT_TOKENS 单独控制目录输出，默认继承 LLM_MAX_OUTPUT_TOKENS；
+  CATALOG_MIN_SEGMENT_CHARS 默认 500。达到阈值仍超限时明确失败并提示服务端容量检查。
+- 保留原文校验、目录完成门控、原始输出/失败记录。无数据库迁移。
+- README 已提供配置、容器重建和 retry 命令，scripts/catalog-runtime.sha256 已同步。
+
+验证：独立临时 PostgreSQL + 受控模型，完整 123 项测试通过（9.655 秒）；
+compileall、git diff --check、运行文件 sha256 校验通过。未测试真实 LLM 输出容量。
+测试容器 litkg-capacity-check-20261016，端口仅本机 55441，数据使用 tmpfs；已核对完整 ID 后清理并验证不存在。
+Python 环境继续使用 /tmp/litkg-test-venv。没有运行部署脚本、没有构建或重启正式容器。
+
+待用户上线：README“目录输出截断修复”包含 .env 建议值、应用重建及失败文献 retry；
+不能将本次临时验证描述成正式环境已恢复。工作区补丁未提交或推送。
+
+## 初版实现历史记录
+
 更新时间：2026-10-16 UTC。任务要求：直接改当前仓库，最小完整实现；不正式部署。
 本次没有读取或修改正式数据库，没有运行仓库 docker compose，没有调用真实模型。
 用户提供了个人服务器 AGENTS 指令；仓库及其父目录没有找到适用的 AGENTS.md 文件。

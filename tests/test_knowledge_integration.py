@@ -115,6 +115,42 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with patch.object(self.tasks,'extract_claims',side_effect=AssertionError('stale task called model')):
             self.assertEqual(self.tasks.extract_chunk.run(chunks[0],'old-version',-1)['status'],'superseded')
 
+    def test_catalog_truncation_splits_and_child_failure_resumes_before_publication(self):
+        from collections import Counter
+        source='Alpha protein was measured. Beta protein was measured. Gamma protein was measured. Delta protein was measured.'
+        self.chunk(self.doc,source)
+        calls=Counter()
+        failing=[True]
+        def model(heading,text,**kwargs):
+            self.assertEqual(kwargs,{})
+            calls[text]+=1
+            if len(text)>80:
+                raise self.tasks.ModelOutputTruncatedError('controlled capacity limit','partial JSON')
+            if 'Delta' in text and failing[0]:
+                raise ValueError('controlled child failure')
+            from app.catalog import source_contains
+            return CatalogBundle.model_validate({'entities':[{'text':name,'type':'Protein','evidence':name}
+                for name in ['Alpha protein','Beta protein','Gamma protein','Delta protein'] if source_contains(text,name)]})
+        def published(*args,**kwargs):
+            with self.connect() as conn:
+                self.assertEqual(conn.execute('SELECT catalog_status FROM documents WHERE id=%s',(self.doc,)).fetchone()['catalog_status'],'done')
+                self.assertEqual(conn.execute('SELECT count(*) AS n FROM document_entities WHERE document_id=%s',(self.doc,)).fetchone()['n'],4)
+        with patch.dict(os.environ,{'CATALOG_MIN_SEGMENT_CHARS':'20'}),patch.object(self.tasks,'extract_catalog',side_effect=model),patch.object(self.tasks.extract_chunk,'apply_async',side_effect=published) as publish:
+            with self.assertRaisesRegex(ValueError,'child failure'):
+                self.tasks.build_document_catalog.run(self.doc)
+            publish.assert_not_called()
+            cached_texts=[text for text in calls if text!=source and 'Delta' not in text]
+            self.assertTrue(cached_texts)
+            with self.connect() as conn:
+                self.assertEqual(conn.execute('SELECT catalog_status FROM documents WHERE id=%s',(self.doc,)).fetchone()['catalog_status'],'failed')
+                self.assertEqual(conn.execute("SELECT count(*) AS n FROM processing_cache WHERE document_id=%s AND stage='catalog_split'",(self.doc,)).fetchone()['n'],1)
+            failing[0]=False
+            result=self.tasks.build_document_catalog.run(self.doc)
+        self.assertEqual(result['entity_count'],4)
+        publish.assert_called_once()
+        self.assertEqual(calls[source],1)
+        self.assertTrue(all(calls[text]==1 for text in cached_texts))
+
     def test_directory_gate_prevents_direct_relationship_extraction(self):
         chunk = self.chunk(self.doc,'Probe Q reduces IL-6.')
         with patch.object(self.tasks,'extract_claims') as model:

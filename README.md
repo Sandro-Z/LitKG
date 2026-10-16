@@ -480,6 +480,41 @@ python -m unittest discover -s tests -v
 
 ## v3：全文目录、完整事实与证据问答
 
+### 目录输出截断修复
+
+`LLM output truncated` 表示模型返回了 `finish_reason=length`，该输出即使看起来是合法
+JSON 也不能作为完整目录。默认每段 12000 字符与 4096 输出 tokens 在实体密集文献中
+容易不匹配；对同一大段重复纠正也会继续超限。
+
+现将截断与 JSON/原文校验失败分开：截断立即对原文作带重叠的二分，直到子段输出完整；
+全文不会取前半段或限制实体数量。有效子段及分割计划分别持久缓存，失败后 `retry`
+复用已经完成的子段，不重复请求已知超限的父段。已有有效目录缓存仍可复用。
+只有全部子段完成并通过原文校验后，才会发布关系任务。降到最小子段仍截断会显式失败，
+记录原始输出，并提示检查模型服务的输出上限、上下文和 thinking 配置。本次无需数据库迁移。
+
+目录可独立配置输出预算，不影响关系抽取。可先在 `.env` 使用：
+
+```dotenv
+CATALOG_SEGMENT_CHARS=3000
+CATALOG_MIN_SEGMENT_CHARS=500
+CATALOG_MAX_OUTPUT_TOKENS=4096
+```
+
+前两项是初始分段大小和停止继续细分的阈值（字符）；最后一项是目录每次模型请求的输出
+预算，默认继承 `LLM_MAX_OUTPUT_TOKENS`。若模型服务允许，可将目录预算改为 `8192`，
+但它仍受服务端输出和总上下文限制。仅增加 `CATALOG_VALIDATION_ATTEMPTS` 不会解决截断。
+
+代码/环境变量更新后需要重建并重新创建应用容器；仅 `restart` 不会重新读取 `.env`：
+
+```bash
+docker compose up -d --build --force-recreate --no-deps --timeout 330 api worker_parse worker_extract
+```
+
+然后对失败文献使用 `POST /knowledge-bases/{kb}/maintenance`，请求体为
+`{"mode":"retry","document_id":实际文献ID}`；无需重新上传 PDF，也不要用
+`reextract` 强制清掉当前处理代次的缓存。已有部署脚本的运行文件校验清单已同步更新；
+修复开发期间没有执行该部署脚本或重启正式服务。
+
 ### 全文目录鲁棒性修复（2026-10-16）
 
 目录先将 mention/evidence 锚定到真实输入：只处理已有的 Unicode、大小写和空白排版差异，

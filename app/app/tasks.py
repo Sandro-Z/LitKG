@@ -9,10 +9,10 @@ from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, project_existing_claim, store_claim, upsert_entity
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
-    ModelOutputError, extract_claims, extract_catalog)
+    CATALOG_MAX_OUTPUT_TOKENS, ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, EXTRACTION_VERSION, digest, segments,
-    prepare_catalog, CatalogValidationError, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
+    prepare_catalog, CatalogValidationError, split_catalog_segment, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
 from app.normalization import entity_identity
 from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
 from app.normalization import extract_abbreviations
@@ -75,7 +75,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
             break
         except Exception as exc:
             record_failure(exc, parsed, raw_output)
-            if retry_call is None or not isinstance(exc, (CatalogValidationError, ModelOutputError)) or attempt + 1 >= attempt_limit:
+            if isinstance(exc, ModelOutputTruncatedError) or retry_call is None or not isinstance(exc, (CatalogValidationError, ModelOutputError)) or attempt + 1 >= attempt_limit:
                 raise
             last_error = exc
             original = getattr(exc, 'raw', None) or parsed
@@ -88,6 +88,50 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
             Jsonb({'parsed': payload, 'original_parsed': parsed, 'raw': raw_output,
                    'repairs': getattr(result, '_catalog_repairs', [])})))
     return result
+
+
+def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_chars=None):
+    """Persist successful leaves AND split plans, so retries resume the same tree."""
+    if min_chars is None:
+        min_chars = int(os.environ.get('CATALOG_MIN_SEGMENT_CHARS', '500'))
+    if min_chars < 1:
+        raise ValueError('CATALOG_MIN_SEGMENT_CHARS must be positive')
+    heading = f"Document title: {title or ''}\nSection: {segment['section_title'] or 'Unknown'}"
+    sources = [title or '', segment['section_title'] or '', segment['text']]
+    validation_segment = {**segment, 'text':'\n'.join(sources), 'sources':sources}
+    # Keep the successful-result key compatible with existing validated caches.
+    key = digest([CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE,
+                  heading, segment['text'], extraction_epoch])
+    split_key = digest(['catalog-split-v1', key, min_chars])
+    with get_conn() as conn:
+        split = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage='catalog_split' AND cache_key=%s",
+                             (document_id, split_key)).fetchone()
+    if not split:
+        try:
+            bundle = cached_model(document_id, 'catalog', key,
+                lambda:extract_catalog(heading, segment['text']), CatalogBundle, segment['id'],
+                validate=lambda b:prepare_catalog(b, validation_segment),
+                retry_call=lambda error, previous:extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous),
+                max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
+        except ModelOutputTruncatedError as exc:
+            children = split_catalog_segment(segment, min_chars)
+            if not children:
+                raise ModelOutputTruncatedError(
+                    f'Catalog output still truncated at {len(segment["text"])} input characters '
+                    f'(CATALOG_MIN_SEGMENT_CHARS={min_chars}, CATALOG_MAX_OUTPUT_TOKENS={CATALOG_MAX_OUTPUT_TOKENS}). '
+                    'Increase the catalog output budget within the model server limits; check its context/output limits and thinking configuration.', exc.raw) from exc
+            with get_conn() as conn:
+                conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog_split',%s,%s) ON CONFLICT DO NOTHING",
+                             (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v1'})))
+        else:
+            yield segment, bundle
+            return
+    else:
+        children = split_catalog_segment(segment, min_chars)
+    if not children:
+        raise ValueError('Invalid catalog split cache: segment cannot be subdivided')
+    for child in children:
+        yield from catalog_segment_bundles(document_id, title, child, extraction_epoch, min_chars)
 
 
 def update_document_status(
@@ -247,31 +291,21 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                 if document['catalog_version'] != version or force:
                     conn.execute("UPDATE chunks SET status='queued',error=NULL WHERE document_id=%s", (document_id,))
             records = []
-            for segment in segments(chunks, max_chars=int(os.environ.get("CATALOG_SEGMENT_CHARS", "12000"))):
-                heading = f"Document title: {document['title'] or ''}\nSection: {segment['section_title'] or 'Unknown'}"
-                sources = [document['title'] or '', segment['section_title'] or '', segment['text']]
-                validation_segment = {**segment, 'text':'\n'.join(sources), 'sources': sources}
-                key = digest([CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, heading, segment["text"], document['extraction_epoch']])
-                def identify():
-                    return extract_catalog(heading, segment["text"])
-                def correct(error, previous_output):
-                    return extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous_output)
-                bundle = cached_model(document_id, "catalog", key, identify, CatalogBundle, segment["id"],
-                    validate=lambda b:prepare_catalog(b, validation_segment), retry_call=correct,
-                    max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
-                if bundle._catalog_repairs:
-                    with get_conn() as conn:
-                        for repair in bundle._catalog_repairs:
-                            add_review(conn.cursor(), document_id, version, 'catalog_repair',
-                                {'chunk_id': segment['id'], 'start': segment['start'], **repair})
-                for entity in bundle.entities:
-                    page, page_end = locate_evidence_pages(entity.evidence, next(c for c in chunks if c["id"] == segment["id"]))
-                    source_kind = 'text'
-                    if not source_contains(segment['text'], entity.evidence):
-                        source_kind = 'document_title' if source_contains(document['title'] or '',entity.evidence) else 'section_title'
-                        page, page_end = None, None
-                    records.append((entity, {"chunk_id": segment["id"], "start": segment["start"], "end": segment["end"],
-                                            "source_kind":source_kind,"page": page, "page_end": page_end, "evidence": entity.evidence}))
+            for initial_segment in segments(chunks, max_chars=int(os.environ.get("CATALOG_SEGMENT_CHARS", "12000"))):
+                for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
+                    if bundle._catalog_repairs:
+                        with get_conn() as conn:
+                            for repair in bundle._catalog_repairs:
+                                add_review(conn.cursor(), document_id, version, 'catalog_repair',
+                                    {'chunk_id': segment['id'], 'start': segment['start'], **repair})
+                    for entity in bundle.entities:
+                        page, page_end = locate_evidence_pages(entity.evidence, next(c for c in chunks if c["id"] == segment["id"]))
+                        source_kind = 'text'
+                        if not source_contains(segment['text'], entity.evidence):
+                            source_kind = 'document_title' if source_contains(document['title'] or '',entity.evidence) else 'section_title'
+                            page, page_end = None, None
+                        records.append((entity, {"chunk_id": segment["id"], "start": segment["start"], "end": segment["end"],
+                                                "source_kind":source_kind,"page": page,"page_end": page_end,"evidence": entity.evidence}))
             entries = merge_catalog(records, abbreviations, document_id)
             with get_conn() as conn:
                 with conn.cursor() as cur:

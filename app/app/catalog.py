@@ -48,6 +48,27 @@ def segments(chunks, max_chars=12000):
             start = end - overlap
 
 
+def split_catalog_segment(segment, min_chars=500):
+    """Subdivide a capacity-limited segment without dropping any source text."""
+    if min_chars < 1:
+        raise ValueError('CATALOG_MIN_SEGMENT_CHARS must be positive')
+    text = segment['text']
+    length = len(text)
+    if length <= max(1, min_chars):
+        return []
+    middle = length // 2
+    boundaries = [m.end() for m in re.finditer(r'\s+', text)
+                  if length // 3 <= m.end() <= 2 * length // 3]
+    cut = min(boundaries, key=lambda position: abs(position-middle)) if boundaries else middle
+    overlap = min(200, length // 10)
+    left_end, right_start = min(length-1, cut+overlap), max(1, cut-overlap)
+    start = segment.get('start', 0)
+    return [
+        {**segment, 'text':text[:left_end], 'start':start, 'end':start+left_end},
+        {**segment, 'text':text[right_start:], 'start':start+right_start, 'end':start+length},
+    ]
+
+
 class CatalogValidationError(ValueError):
     """A source-grounding failure eligible for bounded model correction."""
 
