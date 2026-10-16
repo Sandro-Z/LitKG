@@ -71,6 +71,13 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             return conn.execute("INSERT INTO chunks (document_id,chunk_index,text,section_title,page_start,page_end,page_spans,status) VALUES (%s,%s,%s,'Results',3,3,%s,'queued') RETURNING id",
                                 (doc,index,text,Jsonb([{'start':0,'end':len(text),'page_start':3,'page_end':3}]))).fetchone()['id']
 
+    def maintenance_job(self, mode='retry'):
+        job_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute('INSERT INTO maintenance_jobs (id,knowledge_base_id,document_id,mode) VALUES (%s,%s,%s,%s)',
+                         (job_id,self.kb,self.doc,mode))
+        return job_id
+
     def store(self, doc, chunk, sentence, **extra):
         data = {'subject':{'text':'Probe Q','type':'Drug'},'predicate':'REDUCES','object':{'text':'IL-6','type':'Protein'},
                 'evidence':{'sentence':sentence,'page':3,'page_end':3},'confidence':.9, **extra}
@@ -201,6 +208,111 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             statuses = conn.execute('SELECT status FROM processing_attempts WHERE document_id=%s ORDER BY id',(self.doc,)).fetchall()
             self.assertEqual([row['status'] for row in statuses],['failed','done'])
+
+    def test_catalog_quarantines_hallucinated_entry_and_resumes_with_visible_review(self):
+        text = 'Agencourt AMPure XP beads (Beckman Coulter) and sequenced. PCSK9 was measured.'
+        chunk = self.chunk(self.doc,text)
+        output = CatalogBundle.model_validate({'entities':[
+            {'text':'Agencourt AMPure XP beads','type':'Compound','mention':'Agencourt AMPure XP beads','evidence':text},
+            {'text':'Beckman Coulson','type':'Other','mention':'Beckman Coulson',
+             'evidence':'Agencourt AMPure XP beads (Beckman Coulson) and sequenced.'},
+            {'text':'PCSK9','type':'Protein','mention':'PCSK9','evidence':'PCSK9 was measured.'}]})
+        output._raw_output = 'original response with Beckman Coulson'
+        def published(*args,**kwargs):
+            self.assertEqual(kwargs['args'][0],chunk)
+            state = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/catalog').json()
+            self.assertEqual(state['catalog_status'],'done')
+            self.assertEqual(state['catalog_quality'], {'status':'needs_review','rejected_candidates':1,'pending_rejections':1})
+            self.assertEqual({e['text'] for e in state['entities']},{'Agencourt AMPure XP beads','PCSK9'})
+        with patch.object(self.tasks,'extract_catalog',return_value=output) as model, patch.object(self.tasks.extract_chunk,'apply_async',side_effect=published) as publish:
+            first = self.tasks.build_document_catalog.run(self.doc)
+            second = self.tasks.build_document_catalog.run(self.doc)
+        self.assertEqual(first,second)
+        model.assert_called_once()
+        self.assertEqual(publish.call_count,2)
+        self.assertEqual(first['rejected_candidates'],1)
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM document_entities WHERE document_id=%s',(self.doc,)).fetchone()['n'],2)
+            attempts = conn.execute('SELECT status,output FROM processing_attempts WHERE document_id=%s',(self.doc,)).fetchall()
+            self.assertEqual(len(attempts),1)
+            self.assertEqual(attempts[0]['status'],'partial')
+            self.assertEqual(attempts[0]['output']['raw'],output._raw_output)
+            self.assertEqual(attempts[0]['output']['rejections'][0]['entity']['text'],'Beckman Coulson')
+        reviews = self.client.get(f'/knowledge-bases/{self.kb}/reviews').json()['reviews']
+        rejected = [r for r in reviews if r['kind']=='catalog_rejection']
+        self.assertEqual(len(rejected),1)
+        self.assertIn('Beckman Coulter',rejected[0]['detail']['sources'][-1])
+        self.assertEqual(rejected[0]['detail']['chunk_id'],chunk)
+        self.assertEqual(rejected[0]['detail']['entity']['text'],'Beckman Coulson')
+        other_kb = self.new_kb()
+        self.assertEqual(self.client.get(f'/knowledge-bases/{other_kb}/reviews').json()['reviews'],[])
+        status = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/processing').json()
+        self.assertEqual(status['catalog_quality']['rejected_candidates'],1)
+
+    def test_all_ungrounded_catalog_entries_still_fail_and_never_publish_relationships(self):
+        self.chunk(self.doc,'PCSK9 was measured.')
+        output = CatalogBundle.model_validate({'entities':[{'text':'Invented protein','type':'Protein','evidence':'Invented protein'}]})
+        with patch.object(self.tasks,'extract_catalog',return_value=output) as model, patch.object(self.tasks.extract_chunk,'apply_async') as publish:
+            with self.assertRaisesRegex(self.tasks.CatalogValidationError,'no grounded catalog entries'):
+                self.tasks.build_document_catalog.run(self.doc)
+        self.assertEqual(model.call_count,3)
+        publish.assert_not_called()
+        status = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/processing').json()
+        self.assertEqual(status['document']['catalog_status'],'failed')
+        self.assertEqual(status['catalog_quality']['status'],'not_complete')
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM processing_cache WHERE document_id=%s',(self.doc,)).fetchone()['n'],0)
+
+    def test_quarantine_metadata_survives_later_segment_failure_and_cache_resume(self):
+        texts = ['PCSK9 was measured.', 'A549 was measured.']
+        for i,text in enumerate(texts):
+            self.chunk(self.doc,text,i)
+        first = CatalogBundle.model_validate({'entities':[
+            {'text':'PCSK9','type':'Protein','evidence':texts[0]},
+            {'text':'Invented protein','type':'Protein','evidence':'Invented protein'}]})
+        with patch.object(self.tasks,'extract_catalog',side_effect=[first, ValueError('controlled later failure')]):
+            with self.assertRaisesRegex(ValueError,'controlled later failure'):
+                self.tasks.build_document_catalog.run(self.doc,publish=False)
+        last = CatalogBundle.model_validate({'entities':[{'text':'A549','type':'CellLine','evidence':texts[1]}]})
+        with patch.object(self.tasks,'extract_catalog',return_value=last) as model:
+            result = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        model.assert_called_once()
+        self.assertEqual(result['entity_count'],2)
+        status = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/catalog').json()
+        self.assertEqual(status['catalog_quality']['rejected_candidates'],1)
+
+    def test_existing_grounded_segment_cache_is_revalidated_without_model_call(self):
+        from app.catalog import digest
+        text = 'PCSK9 was measured.'
+        self.chunk(self.doc,text)
+        payload = CatalogBundle.model_validate({'entities':[{'text':'PCSK9','type':'Protein','evidence':text}]}).model_dump(mode='json')
+        # Exact key used by deployed 17a86d9, before the quarantine policy.
+        key = digest(['catalog-v2-grounded-repair', self.tasks.CATALOG_PROMPT_VERSION,
+                      self.tasks.TYPE_DEFINITIONS,self.tasks.MODEL_SIGNATURE,
+                      'Document title: Controlled study\nSection: Results',text,0])
+        with self.connect() as conn:
+            conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog',%s,%s)",
+                         (self.doc,key,Jsonb(payload)))
+        with patch.object(self.tasks,'extract_catalog',side_effect=AssertionError('Must reuse validated cache')):
+            result = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        self.assertEqual(result['entity_count'],1)
+        self.assertEqual(result['rejected_candidates'],0)
+
+    def test_superseded_maintenance_stops_without_finalizing_the_new_generation(self):
+        for i in range(2):
+            self.chunk(self.doc,f'Protein {i} was measured.',i)
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            self.tasks.build_document_catalog.run(self.doc,publish=False)
+        def supersede(*args,**kwargs):
+            with self.connect() as conn:
+                conn.execute("UPDATE documents SET pipeline_generation=pipeline_generation+1,status='cataloging',catalog_status='pending' WHERE id=%s",(self.doc,))
+            return {'status':'superseded'}
+        with patch.object(self.tasks.extract_chunk,'run',side_effect=supersede) as extract, patch.object(self.tasks,'refresh_document_status',side_effect=AssertionError('Old job must not finalize new generation')):
+            result = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        extract.assert_called_once()
+        self.assertEqual(result['documents'][0]['status'],'superseded')
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'cataloging')
 
     def test_title_is_catalogued_with_honest_location_and_old_versions_are_hidden(self):
         sentence='Probe Q reduces IL-6.'
@@ -377,6 +489,69 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertTrue(any(a['stage']=='claims' and a['status']=='failed' for a in status['attempts']))
         with self.connect() as conn:
             self.assertEqual(conn.execute("SELECT count(*) AS n FROM processing_cache WHERE document_id=%s AND stage='claims'",(self.doc,)).fetchone()['n'],0)
+
+    def test_maintenance_drains_chunks_after_failure_and_finalizes_all_shared_batches(self):
+        texts = [f'At {hour} h, Probe Q reduces IL-6.' for hour in [6,12,24]]
+        chunks = [self.chunk(self.doc,text,i) for i,text in enumerate(texts)]
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            catalog = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        # Reproduce the reported orphan: one failed chunk, remaining queued,
+        # document extracting, no Celery tasks scheduled by this sync path.
+        with self.connect() as conn:
+            conn.execute("UPDATE chunks SET status='failed',error='previous interrupted maintenance' WHERE id=%s",(chunks[0],))
+            batches = []
+            for kb in [self.kb,self.new_kb()]:
+                conn.execute('INSERT INTO knowledge_base_documents (knowledge_base_id,document_id) VALUES (%s,%s) ON CONFLICT DO NOTHING',(kb,self.doc))
+                batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id",(kb,)).fetchone()['id']
+                conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')",(batch,self.doc))
+                batches.append(batch)
+        def valid_claim(section_title,chunk_text,directory):
+            return ClaimBundle.model_validate({'claims':[{'subject':{'text':'Probe Q','type':'Drug'},'predicate':'REDUCES',
+                'object':{'text':'IL-6','type':'Protein'},'evidence':{'sentence':chunk_text},'confidence':.9}]})
+        def fail_first(**kwargs):
+            if kwargs['chunk_text'] == texts[0]:
+                raise ValueError('controlled first chunk failure')
+            return valid_claim(**kwargs)
+        with patch.object(self.tasks,'extract_catalog',side_effect=AssertionError('Must reuse completed directory')), patch.object(self.tasks,'extract_claims',side_effect=fail_first) as model, patch.object(self.tasks.extract_chunk,'apply_async') as publish:
+            first = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        self.assertEqual(model.call_count,3)
+        publish.assert_not_called()
+        self.assertEqual(first['status'],'partial')
+        self.assertEqual([c['status'] for c in first['documents'][0]['result']['chunks']],['failed','done','done'])
+        with self.connect() as conn:
+            before = conn.execute('SELECT catalog_version,extraction_epoch,pipeline_generation,status FROM documents WHERE id=%s',(self.doc,)).fetchone()
+            self.assertEqual(before['status'],'partial')
+            self.assertEqual(conn.execute('SELECT status FROM chunks WHERE document_id=%s ORDER BY chunk_index',(self.doc,)).fetchall(),[{'status':'failed'},{'status':'done'},{'status':'done'}])
+            self.assertEqual({row['status'] for row in conn.execute('SELECT status FROM ingestion_batches WHERE id=ANY(%s)',(batches,)).fetchall()},{'partial'})
+            preserved = conn.execute('SELECT id FROM claims WHERE document_id=%s ORDER BY id',(self.doc,)).fetchall()
+        with patch.object(self.tasks,'extract_catalog',side_effect=AssertionError('Must reuse completed directory')), patch.object(self.tasks,'extract_claims',side_effect=valid_claim) as retry_model:
+            second = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        retry_model.assert_called_once()
+        self.assertEqual(second['status'],'done',str(second))
+        with self.connect() as conn:
+            after = conn.execute('SELECT catalog_version,extraction_epoch,pipeline_generation,status FROM documents WHERE id=%s',(self.doc,)).fetchone()
+            self.assertEqual(after,{**before,'status':'done'})
+            self.assertEqual(after['catalog_version'],catalog['catalog_version'])
+            self.assertEqual({row['status'] for row in conn.execute('SELECT status FROM ingestion_batches WHERE id=ANY(%s)',(batches,)).fetchall()},{'done'})
+            current_ids = conn.execute('SELECT id FROM claims WHERE document_id=%s ORDER BY id',(self.doc,)).fetchall()
+            self.assertTrue(all(row in current_ids for row in preserved))
+
+    def test_maintenance_does_not_finalize_a_chunk_owned_by_a_concurrent_worker(self):
+        chunks = [self.chunk(self.doc,f'Protein {i} was measured.',i) for i in range(2)]
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            self.tasks.build_document_catalog.run(self.doc,publish=False)
+        with self.tasks.processing_lock(f'litkg-chunk:{chunks[0]}') as locked:
+            self.assertTrue(locked)
+            with patch.object(self.tasks,'extract_claims',return_value=ClaimBundle(claims=[])) as model:
+                first = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+            model.assert_called_once()
+        self.assertEqual(first['status'],'partial')
+        self.assertEqual([c['status'] for c in first['documents'][0]['result']['chunks']],['busy','done'])
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'extracting')
+        with patch.object(self.tasks,'extract_claims',return_value=ClaimBundle(claims=[])) as retry:
+            self.assertEqual(self.tasks.maintain_knowledge_base.run(self.maintenance_job())['status'],'done')
+        retry.assert_called_once()
 
     def test_maintenance_reextract_and_retry_reuse_the_same_forced_revision(self):
         sentence='Probe Q reduces IL-6.'

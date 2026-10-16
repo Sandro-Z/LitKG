@@ -83,6 +83,27 @@ class CatalogGroundingTests(unittest.TestCase):
         value = catalog(mention='Target one', aliases=['T1'])
         self.assertEqual(prepare_catalog(value, {'text': SOURCE})._catalog_repairs, [])
 
+    def test_bad_candidates_are_isolated_without_fuzzy_identity_replacement(self):
+        source = 'Agencourt AMPure XP beads (Beckman Coulter) and sequenced. PCSK9 was measured.'
+        value = CatalogBundle(entities=[
+            CatalogEntity(text='Beckman Coulson', type='Other', mention='Beckman Coulson',
+                          evidence='Agencourt AMPure XP beads (Beckman Coulson) and sequenced.'),
+            CatalogEntity(text='PCSK9', type='Protein', evidence='PCSK9 was measured.'),
+            CatalogEntity(text='Agencourt AMPure XP beads', type='Compound', evidence=source,
+                          normalized_id='PubChem:999999999'),
+        ])
+        fixed = prepare_catalog(value, {'text':source}, quarantine=True)
+        self.assertEqual([e.text for e in fixed.entities], ['PCSK9'])
+        self.assertEqual([r['entity_index'] for r in fixed._catalog_rejections], [0,2])
+        self.assertEqual(fixed._catalog_rejections[0]['entity']['text'], 'Beckman Coulson')
+        self.assertIn('standard ID', fixed._catalog_rejections[1]['error'])
+        validate_catalog(fixed, {'text':source})
+        self.assertEqual(len(value.entities), 3)
+
+    def test_quarantine_never_turns_an_invalid_nonempty_response_into_empty_success(self):
+        with self.assertRaisesRegex(CatalogValidationError, 'no grounded catalog entries'):
+            prepare_catalog(catalog('Invented protein'), {'text':SOURCE}, quarantine=True)
+
 
 class MemoryCache:
     """Capture cache and audit transactions, including payloads and invalidation."""

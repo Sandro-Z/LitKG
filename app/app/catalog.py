@@ -12,8 +12,11 @@ from app.normalization import (
     _DASHES,
 )
 
-PROCESSING_VERSION = "litkg-v3.1"
-CATALOG_VERSION = "catalog-v2-grounded-repair"
+PROCESSING_VERSION = "litkg-v3.2"
+CATALOG_VERSION = "catalog-v3-quarantine"
+# The model contract is unchanged. Revalidate existing successful segment
+# caches locally rather than sending the whole literature collection again.
+CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
 EXTRACTION_VERSION = "claims-v3"
 
 
@@ -115,7 +118,35 @@ def _catalog_sources(segment):
     return [source for source in segment.get('sources', [segment['text']]) if source]
 
 
-def prepare_catalog(bundle, segment):
+def prepare_catalog(bundle, segment, *, quarantine=False):
+    """Keep grounded entries and explicitly isolate unsupported candidates.
+
+    Strict callers still get an exception. Pipeline callers may quarantine
+    individual entries, but an entirely invalid nonempty response still fails
+    and is eligible for correction. Exclusions never become entity identities.
+    """
+    if not quarantine:
+        return _prepare_catalog(bundle, segment)
+    result = bundle.model_copy(deep=True)
+    result.entities = []
+    repairs, rejections = [], []
+    for index, entity in enumerate(bundle.entities):
+        try:
+            prepared = _prepare_catalog(type(bundle)(entities=[entity]), segment)
+        except CatalogValidationError as exc:
+            rejections.append({'entity_index': index, 'entity': entity.model_dump(mode='json'),
+                               'error': str(exc).replace('entity[0]', f'entity[{index}]')})
+        else:
+            result.entities.extend(prepared.entities)
+            repairs.extend({**repair, 'entity_index': index} for repair in prepared._catalog_repairs)
+    if rejections and not result.entities:
+        raise CatalogValidationError(rejections[0]['error'] + '; no grounded catalog entries remain')
+    result._catalog_repairs = repairs
+    result._catalog_rejections = rejections
+    return result
+
+
+def _prepare_catalog(bundle, segment):
     """Repair only fields that can be anchored to actual source characters.
 
     Unsupported aliases are discarded with an audit record. A missing or

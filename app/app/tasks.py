@@ -11,7 +11,7 @@ from app.graph_store import lock_graph_projection, project_existing_claim, store
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
     CATALOG_MAX_OUTPUT_TOKENS, ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
 from app.entity_types import TYPE_DEFINITIONS
-from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, EXTRACTION_VERSION, digest, segments,
+from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, CATALOG_CACHE_VERSION, EXTRACTION_VERSION, digest, segments,
     prepare_catalog, CatalogValidationError, split_catalog_segment, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
 from app.normalization import entity_identity
 from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
@@ -57,7 +57,13 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                            (document_id, stage, key)).fetchone()
     if row:
         try:
-            return checked(schema.model_validate(row["payload"]))
+            result = checked(schema.model_validate(row["payload"]))
+            if stage == 'catalog':
+                # Private, server-produced audit metadata survives a resumed
+                # build. It is deliberately outside the model JSON schema.
+                result._catalog_repairs = row['payload'].get('_catalog_repairs', []) + result._catalog_repairs
+                result._catalog_rejections = row['payload'].get('_catalog_rejections', []) + result._catalog_rejections
+            return result
         except (ValueError, TypeError) as exc:
             record_failure(exc, row['payload'])
             with get_conn() as conn:
@@ -80,13 +86,19 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
             last_error = exc
             original = getattr(exc, 'raw', None) or parsed
     payload = result.model_dump(mode='json')
+    rejections = getattr(result, '_catalog_rejections', [])
+    if stage == 'catalog':
+        for name in ('_catalog_repairs', '_catalog_rejections'):
+            if getattr(result, name):
+                payload[name] = getattr(result, name)
+    audit_status = 'partial' if rejections else 'done'
     with get_conn() as conn:
         conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                      (document_id, stage, key, Jsonb(payload)))
-        conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output)
-            VALUES (%s, %s, %s, %s, 'done', %s)""", (document_id, chunk_id, stage, key,
+        conn.execute(f"""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output)
+            VALUES (%s, %s, %s, %s, '{audit_status}', %s)""", (document_id, chunk_id, stage, key,
             Jsonb({'parsed': payload, 'original_parsed': parsed, 'raw': raw_output,
-                   'repairs': getattr(result, '_catalog_repairs', [])})))
+                   'repairs': getattr(result, '_catalog_repairs', []), 'rejections': rejections})))
     return result
 
 
@@ -100,7 +112,7 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
     sources = [title or '', segment['section_title'] or '', segment['text']]
     validation_segment = {**segment, 'text':'\n'.join(sources), 'sources':sources}
     # Keep the successful-result key compatible with existing validated caches.
-    key = digest([CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE,
+    key = digest([CATALOG_CACHE_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE,
                   heading, segment['text'], extraction_epoch])
     split_key = digest(['catalog-split-v1', key, min_chars])
     with get_conn() as conn:
@@ -110,7 +122,7 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
         try:
             bundle = cached_model(document_id, 'catalog', key,
                 lambda:extract_catalog(heading, segment['text']), CatalogBundle, segment['id'],
-                validate=lambda b:prepare_catalog(b, validation_segment),
+                validate=lambda b:prepare_catalog(b, validation_segment, quarantine=True),
                 retry_call=lambda error, previous:extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous),
                 max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
         except ModelOutputTruncatedError as exc:
@@ -291,13 +303,20 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                 if document['catalog_version'] != version or force:
                     conn.execute("UPDATE chunks SET status='queued',error=NULL WHERE document_id=%s", (document_id,))
             records = []
+            rejected_count = 0
             for initial_segment in segments(chunks, max_chars=int(os.environ.get("CATALOG_SEGMENT_CHARS", "12000"))):
                 for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
-                    if bundle._catalog_repairs:
+                    rejected_count += len(bundle._catalog_rejections)
+                    if bundle._catalog_repairs or bundle._catalog_rejections:
                         with get_conn() as conn:
                             for repair in bundle._catalog_repairs:
                                 add_review(conn.cursor(), document_id, version, 'catalog_repair',
                                     {'chunk_id': segment['id'], 'start': segment['start'], **repair})
+                            for rejection in bundle._catalog_rejections:
+                                add_review(conn.cursor(), document_id, version, 'catalog_rejection',
+                                    {'chunk_id': segment['id'], 'start': segment['start'], 'end': segment['end'],
+                                     'sources': [document['title'] or '', segment['section_title'] or '', segment['text']],
+                                     **rejection})
                     for entity in bundle.entities:
                         page, page_end = locate_evidence_pages(entity.evidence, next(c for c in chunks if c["id"] == segment["id"]))
                         source_kind = 'text'
@@ -330,7 +349,8 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             if publish:
                 for chunk in chunks:
                     extract_chunk.apply_async(args=[chunk["id"], version, generation], queue="extract")
-            return {"document_id": document_id, "catalog_version": version, "entity_count": len(entries), "chunk_count": len(chunks)}
+            return {"document_id": document_id, "catalog_version": version, "entity_count": len(entries),
+                    "chunk_count": len(chunks), "rejected_candidates": rejected_count}
         except Exception as exc:
             with get_conn() as conn:
                 conn.execute("UPDATE documents SET catalog_status = 'failed', catalog_error = %s WHERE id = %s", (f"{type(exc).__name__}: {exc}", document_id))
@@ -596,6 +616,7 @@ def maintain_knowledge_base(job_id: str):
                     results.append({"document_id":doc_id,"status":"skipped_active"})
                     continue
                 try:
+                    document_status = 'done'
                     if job["mode"] == "derived":
                         result = refresh_derived.run(doc_id)
                     elif job["mode"] == "reproject":
@@ -623,14 +644,32 @@ def maintain_knowledge_base(job_id: str):
                         with get_conn() as conn:
                             current = conn.execute("SELECT catalog_version,pipeline_generation FROM documents WHERE id=%s", (doc_id,)).fetchone()
                             chunks = conn.execute("SELECT id FROM chunks WHERE document_id=%s AND (%s OR status <> 'done') ORDER BY chunk_index", (doc_id,force)).fetchall()
+                        chunk_results = []
+                        superseded = False
                         for chunk in chunks:
-                            chunk_result = extract_chunk.run(chunk["id"], current["catalog_version"], current["pipeline_generation"], refresh=False)
-                            if chunk_result.get('status') in {'busy','superseded'}:
-                                raise ValueError(f"Chunk {chunk['id']} is {chunk_result['status']}; retry when current work completes")
-                        refresh_document_status(doc_id)
-                        refresh_derived.run(doc_id)
-                        result = {"processed_chunks":len(chunks),"llm_required":True}
-                    results.append({"document_id":doc_id,"status":"done","result":result})
+                            try:
+                                chunk_result = extract_chunk.run(chunk["id"], current["catalog_version"], current["pipeline_generation"], refresh=False)
+                                chunk_result.setdefault('status', 'done')
+                            except Exception as exc:
+                                # extract_chunk has persisted this failure. Keep
+                                # visiting the remaining chunks: no broker tasks
+                                # were published for this synchronous job.
+                                chunk_result = {'status':'failed', 'error':f'{type(exc).__name__}: {exc}'}
+                            chunk_results.append({'chunk_id':chunk['id'], **chunk_result})
+                            if chunk_result.get('status') == 'superseded':
+                                superseded = True
+                                break
+                        if superseded:
+                            # A new generation owns the document now. Do not
+                            # finalize or relabel its chunks from this old job.
+                            document_status = 'superseded'
+                        else:
+                            final_status = refresh_document_status(doc_id)
+                            refresh_derived.run(doc_id)
+                            document_status = final_status if final_status in {'done','partial','failed'} else 'partial'
+                        result = {"processed_chunks":len(chunk_results), "llm_required":True,
+                                  "chunks":chunk_results}
+                    results.append({"document_id":doc_id,"status":document_status,"result":result})
                 except Exception as exc:
                     results.append({"document_id":doc_id,"status":"failed","error":f"{type(exc).__name__}: {exc}"})
             status = "done" if all(r["status"] == "done" for r in results) else "partial"

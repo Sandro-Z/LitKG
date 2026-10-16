@@ -577,7 +577,12 @@ def main():
             doc_id = st.number_input('文献 ID（0 表示维护整个知识库）', min_value=0, value=0, step=1)
             if doc_id and st.button('查看全文实体目录与处理状态'):
                 try:
-                    st.json(api_get(prefix+f'/documents/{doc_id}/processing'))
+                    processing = api_get(prefix+f'/documents/{doc_id}/processing')
+                    quality = processing.get('catalog_quality', {})
+                    if quality.get('rejected_candidates'):
+                        st.warning(f"目录隔离了 {quality['rejected_candidates']} 个无法验证的候选，"
+                                   f"其中 {quality['pending_rejections']} 个待复核。请查看下方复核列表。")
+                    st.json(processing)
                     st.json(api_get(prefix+f'/documents/{doc_id}/catalog'))
                 except Exception as exc:
                     st.error(f'读取失败：{exc}')

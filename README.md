@@ -520,20 +520,63 @@ docker compose up -d --build --force-recreate --no-deps --timeout 330 api worker
 目录先将 mention/evidence 锚定到真实输入：只处理已有的 Unicode、大小写和空白排版差异，
 不进行模糊名称匹配，不删除身份性的数字、物种、突变或连字符。无依据的 aliases 会被移除，
 证据可替换为包含已验证提及的连续原文；原始输出、修复前 JSON 和字段修复记录均保留，
-并产生 `catalog_repair` 复核项。核心提及或标准 ID 无法验证时仍显式失败。
+并产生 `catalog_repair` 复核项。核心提及或标准 ID 无法验证时不进入目录；逐项隔离规则见下一节。
 
 目录 JSON/原文校验失败时，会携带具体错误与上次输出纠正重试。
 `CATALOG_VALIDATION_ATTEMPTS` 默认 `3`（总调用次数，限制为 1–5）；
 传输错误仍使用原有的有限退避。纠正响应不能用空目录掩盖失败。
 缓存保存清洗后的结果，并将目录规则和提示词版本加入键；旧版目录缓存不会被误用。
-已完成的有效分段继续可恢复，全部目录通过前仍不会发布关系抽取任务。
+已完成的有效分段继续可恢复，全文分段处理完成且有效目录落库前不会发布关系抽取任务。
 本次无需数据库结构迁移。
 
 部署：`bash scripts/deploy_catalog_robustness.sh`。脚本先构建，在临时 PostgreSQL 容器中
-运行针对性和数据库回归，通过后更新 API/两个 worker 并验证代码摘要、健康与 worker 响应。
+运行针对性和数据库回归，通过后更新 API/两个 worker/前端并验证代码摘要、健康与 worker 响应。
 测试数据库使用独立网络和 tmpfs，不挂载正式数据或 `.env`，退出时清理测试资源。
 追加 `--retry-failed` 可在验证部署成功后，为知识库 14 中仍失败的文献 25–29 排队 `retry`。
 脚本需要 Docker 权限；普通账号会通过 sudo 交互认证。
+
+### 目录候选隔离与维护续接修复（2026-10-16）
+
+原文 `Beckman Coulter` 被模型写成 `Beckman Coulson`，属于真实的模型改写，不能通过
+放宽字符串校验或模糊匹配接受。目录现在逐项校验：有效项保留；无原文依据的核心名称
+或标准 ID 候选隔离为 `catalog_rejection` 待复核项，保留原候选、错误、chunk、段偏移
+和精确输入。不会把错误名称改猜为另一个实体，也不会把它写入实体表。关系仍须当前
+chunk 支持，可通过原有漏项机制补回目录遗漏的真实实体。
+
+全文所有分段仍必须处理完成后才能发布关系任务。`catalog_status=done` 表示这一阶段完成，
+并不表示没有候选被排除：`catalog` 和 `processing` API 增加 `catalog_quality`，包含
+`rejected_candidates`、`pending_rejections` 与 `needs_review` 状态；Streamlit 查看处理状态时
+显示警告。审计将含隔离项的响应标为 `partial`，保留原始模型输出。隔离记录随缓存保存，
+后续段失败再续接不会丢失复核项，也不会重复创建。整段非空输出若全部无效，仍有限纠正后
+显式失败；JSON/调用失败与最小段仍截断也不伪装成成功空目录。
+
+文档目录规则版本更新为 `catalog-v3-quarantine`。模型输入契约未变，已有有效分段和分割计划
+缓存继续经过本地校验复用，避免重新请求全部已完成分段。无需数据库结构迁移或清空 Redis。
+
+另一个独立问题来自同步维护：旧逻辑第一个 chunk 失败就退出，剩余 queued chunks 没有排入
+Celery，文献和共享它的批次因此一直 processing。现在每个 chunk 独立记录失败并继续后续项，
+最终文献/批次落为 done、partial 或 failed；维护结果包含逐 chunk 状态。并发占用的 chunk
+不会被强行标为完成，过期代次也不会继续写入。已有遗留记录需要主动运行一次 `retry`，
+更新代码本身不会自动重新排队；`derived` 和 `reproject` 不能续接模型抽取。
+
+以下命令供用户在正式环境执行，本次修复没有运行部署脚本或更新正式服务：
+
+```bash
+# 重建 API、两个 worker 和前端；已有脚本会先运行独立测试再更新容器
+bash scripts/deploy_catalog_robustness.sh
+
+# 日志中的文献 25–29 均曾在知识库 14 中维护；逐篇续接，包括 extracting 的文献 25
+for doc in 25 26 27 28 29; do
+  curl --fail-with-body -sS -X POST http://127.0.0.1:8080/knowledge-bases/14/maintenance \
+    -H 'Content-Type: application/json' -d "{\"mode\":\"retry\",\"document_id\":$doc}"
+done
+```
+
+按返回的 `status_url` 查看任务结果，文献的 `/processing` 查看 chunks 和目录质量。
+`retry` 复用已完成目录/分段及成功 chunks，只续接失败和未完成部分；不要先用 `reextract`
+强制更换抽取代次。旧的 `--retry-failed` 脚本选项仅覆盖 failed/partial，不能恢复本例中
+仍为 extracting 的文献 25。复核候选不自动猜测修正；人工复核后如需重新识别，使用
+`reextract`，它会调用 LLM 重抽全文。真实 Qwen 模型的后续输出质量仍需上线小规模核验。
 
 新增处理顺序为 `PDF → 全文目录 → chunk 关系 → 完整事实 → 派生索引/摘要`。
 目录识别覆盖所有已解析 chunks，长片段有重叠分段，包含文章标题和章节标题；

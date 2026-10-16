@@ -66,6 +66,7 @@ class CatalogBundle(BaseModel):
     entities: list[CatalogEntity]
     _raw_output: Optional[str] = PrivateAttr(default=None)
     _catalog_repairs: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _catalog_rejections: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
 
 class QuestionRequest(BaseModel):

@@ -1,6 +1,45 @@
 # LitKG v3 开发与续接记录
 
-## 2026-10-16 目录输出截断修复（最新状态）
+## 2026-10-16 目录候选隔离与维护续接修复（最新状态）
+
+基线 HEAD：17a86d9（之前为 accdc9c、fbc0f67）。本次用户提供了生产诊断，未读取
+正式库、未调用真实模型、未修改 .env、未执行部署脚本或更新正式容器。
+
+已确认并修复的路径：
+- 模型将原文 Beckman Coulter 写成 Beckman Coulson，名称不存在是实际幻觉，不能模糊接受。
+  目录逐项保留有原文依据的实体，将无依据核心名称/标准 ID 的候选隔离为 catalog_rejection，
+  保留完整候选、错误、chunk、偏移及精确输入。审计状态 partial，原始输出保留。
+  全部非空候选都无效仍纠正后失败；JSON/调用/最小段截断失败不伪装为空成功。
+- 隔离/字段修复元数据随 successful processing_cache 保存，后续分段失败后续接不丢失复核项。
+  文档目录策略版本 catalog-v3-quarantine；模型输入契约与缓存键继续兼容 17a86d9 的
+  catalog-v2-grounded-repair 缓存，本地重新校验后复用已完成分段及分割计划。
+- catalog/processing API 新增 catalog_quality：排除候选数量、待复核数量、质量状态；
+  前端显示警告。catalog_status=done 仅表示全文分段阶段已完成，不承诺没有被排除的候选。
+- maintain_knowledge_base 同步循环原来首个 chunk 失败就跳出，后面的 queued 没有 Celery 任务，
+  导致文献 extracting、共享批次 processing。现在逐 chunk 捕获并保留失败，继续其余 chunks，
+  最终文献/批次转为 done/partial/failed；结果有逐 chunk 状态。busy 不假装完成，superseded
+  停止旧代次。用日志形态（1 failed + 多 queued）和两个共享批次复现验证恢复。
+  日志未给文献 25 首个失败 chunk 的具体错误，不能声称已经查明该模型失败的原始原因。
+- README 提供用户上线和对 KB 14 文献 25–29 显式 retry 的命令；旧 --retry-failed 选项
+  只覆盖 failed/partial，不能恢复 extracting 的文献 25。不要先 reextract 更换代次。
+  部署脚本增加前端更新、容量测试，校验清单包含 main.py；本次没有运行部署脚本。
+
+验证：132 项全部通过，12.721 秒，包含独立 PostgreSQL、模型替身和 Streamlit AppTest。
+覆盖坏候选隔离/证据/跨知识库隔离、全无效响应失败、缓存中断续接/17a86d9 缓存兼容、
+目录先于关系门控、首 chunk 失败后继续、共享批次终结、只重试失败 chunk、busy/过期代次。
+compileall、bash -n、git diff --check、sha256sum -c scripts/catalog-runtime.sha256 均通过。
+
+临时数据库：litkg-quarantine-check-20261016，完整容器 ID
+73f3647125c6ff946fe1ecafbe545a80749fd744ecf119cf06d709cbf37b7e32，
+仅监听 127.0.0.1:55443，数据 tmpfs，无生产数据挂载；已核对完整 ID、标签、
+端口及 Mounts=[] 后移除，并通过 docker ps -a 按完整 ID 筛选确认不存在。
+Python 测试环境仍为 /tmp/litkg-test-venv。
+
+交付：无需 SQL 迁移。修改保留工作区，未提交或推送，未正式部署，旧任务也未排队。
+真实 Qwen 输出质量、真实文献覆盖率与真实 Celery/broker 端到端尚未实测；测试只使用
+用户给出的拼写场景/合成原文和模型替身。隔离不会补造真实实体，仍可能有目录漏项待人工复核。
+
+## 2026-10-16 目录输出截断修复（历史记录）
 
 工作区以 accdc9c（原文约束修复）、fbc0f67（全文目录/完整事实）为基线。
 当前 .env 的 LLM_MAX_OUTPUT_TOKENS=4096，未显式设置目录分段大小，使用 12000 字符默认值。

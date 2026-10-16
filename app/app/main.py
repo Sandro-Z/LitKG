@@ -1079,6 +1079,17 @@ def _require_member(cur, knowledge_base_id, document_id):
         raise HTTPException(404, 'Document is not in this knowledge base')
 
 
+def _catalog_quality(cur, document_id, version, catalog_status):
+    cur.execute("""SELECT count(*)::INT AS rejected_candidates,
+        count(*) FILTER (WHERE status='pending')::INT AS pending_rejections
+        FROM review_items WHERE document_id=%s AND version=%s AND kind='catalog_rejection'""",
+        (document_id, version))
+    counts = cur.fetchone()
+    return {**counts, 'status': 'not_complete' if catalog_status != 'done' else
+            'needs_review' if counts['pending_rejections'] else
+            ('reviewed_with_exclusions' if counts['rejected_candidates'] else 'grounded')}
+
+
 @app.get('/knowledge-bases/{knowledge_base_id}/documents/{document_id}/catalog')
 def document_catalog(knowledge_base_id: int, document_id: int):
     with get_conn() as conn:
@@ -1087,7 +1098,8 @@ def document_catalog(knowledge_base_id: int, document_id: int):
             cur.execute('SELECT catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
             document = cur.fetchone()
             entries = load_catalog(cur, document_id, document['catalog_version']) if document['catalog_version'] else []
-    return {**document, 'entities': entries}
+            quality = _catalog_quality(cur, document_id, document['catalog_version'], document['catalog_status'])
+    return {**document, 'entities': entries, 'catalog_quality': quality}
 
 
 @app.get('/knowledge-bases/{knowledge_base_id}/documents/{document_id}/processing')
@@ -1097,11 +1109,12 @@ def processing_status(knowledge_base_id: int, document_id: int):
             _require_member(cur, knowledge_base_id, document_id)
             cur.execute('SELECT id,status,error,catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
             document = cur.fetchone()
+            quality = _catalog_quality(cur, document_id, document['catalog_version'], document['catalog_status'])
             cur.execute('SELECT id,chunk_index,status,error,extraction_version FROM chunks WHERE document_id=%s ORDER BY chunk_index', (document_id,))
             chunks = cur.fetchall()
             cur.execute('SELECT id,stage,version,status,error,created_at FROM processing_attempts WHERE document_id=%s ORDER BY id DESC LIMIT 100', (document_id,))
             attempts = cur.fetchall()
-    return {'document': document, 'chunks': chunks, 'attempts': attempts,
+    return {'document': document, 'catalog_quality': quality, 'chunks': chunks, 'attempts': attempts,
             'upgrade': {'reproject': 'No LLM; rebuilds facts/index/summaries from saved claims; cannot recover unrecorded semantics',
                         'reextract': 'LLM required; full saved text directory followed by all chunks',
                         'retry': 'Resumes failed stages with validated segment caches',
