@@ -40,8 +40,12 @@ class ClaimsRobustnessTests(unittest.TestCase):
 
     def test_schema_invalid_catalog_feedback_has_loc_and_type_without_input(self):
         with patch.object(self.llm,'chat_completion',return_value='{"entities":[{"text":55,"evidence":"source"}]}'):
-            with self.assertRaisesRegex(self.llm.ModelOutputError, 'entities.0.text: string_type'):
-                self.llm.extract_catalog('Results','source')
+            result = self.llm.extract_catalog('Results','source')
+        self.assertFalse(result.entities)
+        self.assertIn('entities.0.text: string_type', result._catalog_rejections[0]['error'])
+        self.assertNotIn('55', result._catalog_rejections[0]['error'])
+        with self.assertRaisesRegex(ValueError, 'no grounded catalog entries'):
+            prepare_catalog(result, {'text':'source'}, quarantine=True)
 
     def test_missing_catalog_evidence_is_locally_anchored_and_audited(self):
         raw = json.dumps({'entities':[{'text':'Probe Q','mention':'Probe Q','type':'Drug'}]})
@@ -84,22 +88,28 @@ class ClaimsRobustnessTests(unittest.TestCase):
                 resolve_bundle(value,[entry],chunk,'v')
                 self.assertEqual(value.claims[0].object.mention,mention)
             else:
-                with self.assertRaises(ValueError):
-                    resolve_bundle(value,[entry],chunk,'v')
+                resolve_bundle(value,[entry],chunk,'v')
+                self.assertEqual(value.claims[0].object.text, mention)
+                self.assertTrue(value.claims[0].object.pending_merge)
+                self.assertIsNone(value.claims[0].object.directory_id)
 
-    def test_wrong_explicit_directory_id_is_not_silently_rebound(self):
+    def test_wrong_explicit_directory_id_is_rematched_with_audit(self):
         entries = merge_catalog([(CatalogEntity(text=n,type='Protein',evidence=n),{}) for n in ['IL-6','AKT1']],{},1)
         row = claim()
         row['object']['directory_id'] = next(e['local_id'] for e in entries if e['text']=='AKT1')
-        with self.assertRaisesRegex(ValueError,'Directory ID'):
-            resolve_bundle(ClaimBundle.model_validate({'claims':[row]}),entries,{'id':1,'text':SOURCE},'v')
+        value, repairs = ClaimBundle.model_validate({'claims':[row]}), []
+        resolve_bundle(value,entries,{'id':1,'text':SOURCE},'v',repairs)
+        self.assertEqual(value.claims[0].object.directory_id, next(e['local_id'] for e in entries if e['text']=='IL-6'))
+        self.assertTrue(any(r['field']=='directory_id' and r['original']==row['object']['directory_id'] for r in repairs))
 
     def test_missing_directory_id_cannot_bypass_source_modifier_check(self):
         entries = merge_catalog([(CatalogEntity(text='IL-6',type='Protein',evidence='IL-6'),{})],{},1)
         row = claim(evidence={'sentence':'Probe Q reduces murine IL-6.'})
         row['object']['mention'] = 'murine IL-6'
-        with self.assertRaisesRegex(ValueError,'modifiers'):
-            resolve_bundle(ClaimBundle.model_validate({'claims':[row]}),entries,{'id':1,'text':row['evidence']['sentence']},'v')
+        value = ClaimBundle.model_validate({'claims':[row]})
+        resolve_bundle(value,entries,{'id':1,'text':row['evidence']['sentence']},'v')
+        self.assertEqual(value.claims[0].object.text, 'murine IL-6')
+        self.assertTrue(value.claims[0].object.pending_merge)
 
     def test_typed_alias_normalization_does_not_relax_source_grounding(self):
         entries = merge_catalog([(CatalogEntity(text='IL-6',type='Protein',evidence='IL-6'),{})],{},1)
@@ -109,7 +119,11 @@ class ClaimsRobustnessTests(unittest.TestCase):
         resolve_bundle(result,entries,{'id':1,'text':row['evidence']['sentence']},'v')
         self.assertEqual(result.claims[0].object.text,'IL-6')
         row['evidence']['sentence'] = 'Probe Q reduces IL-6.'
-        with self.assertRaisesRegex(ValueError,'mention'):
+        value = ClaimBundle.model_validate({'claims':[row]})
+        resolve_bundle(value,entries,{'id':1,'text':'Probe Q reduces IL-6.'},'v')
+        self.assertEqual(value.claims[0].object.mention, 'IL-6')
+        row['object'].update(text='Invented protein',mention='Invented protein')
+        with self.assertRaisesRegex(ValueError, 'mention'):
             resolve_bundle(ClaimBundle.model_validate({'claims':[row]}),entries,{'id':1,'text':'Probe Q reduces IL-6.'},'v')
 
     def test_correction_cannot_hide_omitted_duplicated_or_unlabelled_claims(self):
@@ -165,11 +179,11 @@ class ClaimsRobustnessTests(unittest.TestCase):
             result = list(self.tasks.claim_segment_bundles(1,segment,[],'v'))[0][1]
             self.assertEqual(len(result.claims),2)
             self.assertFalse(result._claim_rejections)
-            # A manual retry must revisit the partial original, not silently
-            # upgrade an earlier quarantine to a complete empty extraction.
+            # Successful siblings and completed repairs are reused together.
             repeated = list(self.tasks.claim_segment_bundles(1,segment,[],'v'))[0][1]
         self.assertEqual(len(repeated.claims),2)
-        self.assertEqual(len([call for call in calls if not call.get('feedback')]),2)
+        self.assertEqual(len([call for call in calls if not call.get('feedback')]),1)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == '__main__':

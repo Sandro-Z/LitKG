@@ -25,6 +25,12 @@ _DASHES = str.maketrans(
         "\u2013": "-",
         "\u2014": "-",
         "\u2212": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u00ad": None,  # PDF soft hyphen, never an identity-bearing dash.
+        "\ufeff": None,
     }
 )
 
@@ -112,6 +118,23 @@ def identifier_namespace(value: str) -> str:
     return normalized.split(":", 1)[0].casefold() if ":" in normalized else "unknown"
 
 
+def identity_modifiers(name):
+    """Conservative identity markers; never strip these through an alias/ID."""
+    text = clean_text(name, '').casefold()
+    return tuple(sorted(set(re.findall(
+        r'\b(?:human|humans|mouse|murine|rat|bovine|porcine|canine|rabbit|chicken|zebrafish|'
+        r'drosophila|yeast|homo sapiens|mus musculus|danio rerio|escherichia coli|'
+        r'mutant|wild[- ]type|phosphorylated|dephosphorylated|phospho|acetylated|methylated|glycosylated|'
+        r'isoform\s*[\w-]+|variant\s*[\w-]+|exon\s*\d+(?:\s*(?:deletion|insertion))?|'
+        r'(?:[a-z]{1,3})\d+(?:[a-z]{1,3}|del|dup)|[styk]\d+|(?:ser|thr|tyr|lys)\d+|cis|trans|[rs](?=\))|[dl](?=-))\b', text))))
+
+
+def identity_identifier_key(identity):
+    key = identity.normalized_id.casefold()
+    modifiers = identity_modifiers(identity.canonical_name)
+    return key + ('|identity:' + stable_json(modifiers) if modifiers else '')
+
+
 def abbreviation_key(value: str) -> str:
     return re.sub(r"[\s_-]+", "", normalize_alias(value).translate(_GREEK))
 
@@ -193,6 +216,7 @@ def entity_identity(
     normalized_id: str | None = None,
     abbreviations: dict[str, str | None] | None = None,
     document_id: int | None = None,
+    pending_merge: bool = False,
 ) -> EntityIdentity:
     original_name = clean_text(text)
     canonical_name = original_name
@@ -214,8 +238,16 @@ def entity_identity(
         if full_name and normalize_entity_alias(full_name, canonical_type) == normalized_name:
             aliases.add(abbreviation)
 
+    pending_id = external_id if pending_merge else None
+    if pending_merge:
+        # Keep the original ID in claim/catalog JSON, without registering an
+        # unresolved identity as the global owner of that ID.
+        external_id = None
     if external_id:
         identity_part = f"id:{external_id.casefold()}"
+        modifiers = identity_modifiers(canonical_name)
+        if modifiers:
+            identity_part += '|identity:' + stable_json(modifiers)
     else:
         identity_part = f"name:{normalized_name}"
     non_specific = normalize_alias(canonical_name) in {
@@ -229,11 +261,15 @@ def entity_identity(
     document_scoped = bool(
         document_id is not None and external_id is None
         and (
-            context_ambiguous or local_label
+            context_ambiguous or local_label or pending_merge
         )
     )
     if document_scoped:
         identity_part = f"document:{document_id}|{identity_part}"
+        if pending_merge:
+            identity_part = 'pending|' + identity_part
+            if pending_id:
+                identity_part += '|supplied-id:' + pending_id.casefold()
 
     return EntityIdentity(
         canonical_key=f"{entity_family(canonical_type).casefold()}|{identity_part}",

@@ -25,6 +25,7 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 - 证据问答结合实体与事实检索、可选语义召回和 0–2 跳扩展，回答逐项关联原文引用。
 - 目录和关系抽取支持长文本分段、截断拆分、成功分段缓存与失败续接；
   无原文依据的候选进入复核，不作为成功结果静默接受。
+- 完成度与结果质量独立统计：局部候选异常保留 `done` 并提示数量，真实处理缺口使用 `partial/failed`。
 
 处理流程：PDF → 全文目录 → chunk 关系 → 完整事实 → 派生索引/摘要。
 
@@ -43,7 +44,7 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 4. Drug / Compound 使用共同的 Chemical 身份，缓解模型类型不一致造成的
    重复节点；Gene / Protein 仍严格分开。
 
-有 ID 的身份键为 `身份类别 + 标准 ID`，无 ID 时为
+有 ID 的身份键为 `身份类别 + 标准 ID`，身份性的物种、突变、修饰位点和异构体信息也参与区分；无 ID 时为
 `身份类别 + 规范化名称`。`compound 1` 等没有全局身份的文献内编号按
 文献隔离，即使带有 ID，也不会仅凭局部编号推断跨数据库 ID 等价。
 
@@ -52,6 +53,8 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 已有节点。不同命名空间的 ID 仅在唯一名称匹配、且无已知 ID 冲突时附加。
 旧节点重建时还可合并规范化名称一致、ID 不冲突的重复节点。
 合并在事务中迁移关系、别名和所有证据，不修改原始 `claim_json`。
+错误目录 ID 可按完整原文提及重新匹配；无法唯一绑定时保留 `pending_merge` 文献内独立节点。
+名称同段共现不证明别名；未确认的身份不参与全局别名归并。
 
 LLM 只能填写片段明确给出的标准 ID，未知 ID 必须为 `null`。
 实体规范化不调用外部实体链接服务，也不上传文献。
@@ -194,10 +197,11 @@ curl http://localhost:8080/ingestion-batches/1
 - `queued`：已登记，等待 worker；
 - `processing`：至少一篇正在解析或抽取；
 - `done`：所有有效输入均成功；
-- `partial`：部分成功，部分失败或被拒绝；
+- `partial`：存在真实处理缺口，或部分输入文件失败/被拒；目录和关系候选隔离单独统计；
 - `failed`：没有文献成功完成。
 
 单篇文献还可能处于 `parsing`、`extracting` 或 `partial`。部分 chunk 失败时显示 `partial`。
+全文片段处理完成后，个别候选被拒、绑定失败或待复核仍为 `done`，并保留警告与数量。
 
 #### 4. 查询统一图谱
 
@@ -451,10 +455,14 @@ POST /knowledge-bases/{kb}/reviews/{review}?status=resolved&note=...
 不同条件的结果不会因此被判为冲突。浏览页面采用有来源链接的抽取式摘要，
 文献/实体页面展示最多 20 条断言，并提供完整事实分页入口；这不是抽取截断。
 
-`retry` 复用已完成目录、分段和成功 chunks，只续接失败及未完成部分；
+`retry` 复用已完成目录、分段和有效关系，只续接失败部分及待解决候选；确认排除的候选不再纠错。
+纠错支持 repaired（修复成功）、excluded（确认无效并排除）、unresolved（仍待解决），
+保留原候选、纠错输出及人工复核历史。空响应不能代替明确结案。
 `reextract` 会重新建立全文目录并调用 LLM 重抽所有 chunks。
 `derived` 和 `reproject` 不会续接模型抽取。按返回的 `status_url` 查询最终结果，
-并通过文献的 `/processing` 查看 chunks 和 `catalog_quality`；
+并通过文献的 `/processing` 查看 chunks、兼容的 `catalog_quality` 及 `processing_quality`。
+文献列表、批次明细和前端同步显示 `rejected_candidates`、`excluded_candidates`、
+`repair_count`（修复记录数）和 `pending_reviews`；这些质量数量不改变完成度。
 `catalog_status=done` 不代表没有被隔离的候选，`needs_review` 表示需要复核。
 
 ### 图谱诊断与重建

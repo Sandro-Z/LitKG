@@ -5,6 +5,20 @@ from app.recovery import reconcile_stalled
 ACTIVE_STATUSES = ("uploaded", "queued", "parsing", "chunked", "cataloging", "extracting")
 
 
+def quality_columns(document='document'):
+    """Quality counters are independent of terminal processing status."""
+    filters = {
+        'rejected_candidates': "kind IN ('catalog_rejection','claim_rejection')",
+        'excluded_candidates': "kind IN ('catalog_rejection','claim_rejection') AND status='dismissed'",
+        'repair_count': "kind IN ('catalog_repair','claim_repair')",
+        'pending_reviews': "status='pending'",
+    }
+    return ', '.join(f"""(SELECT count(*)::INT FROM review_items quality
+        WHERE quality.document_id={document}.id
+          AND quality.version=COALESCE({document}.catalog_version,'legacy') AND {condition}) AS {name}"""
+        for name, condition in filters.items())
+
+
 def sync_batch_status(cur, batch_id: int) -> None:
     reconcile_stalled(cur, batch_id=batch_id)
     cur.execute(

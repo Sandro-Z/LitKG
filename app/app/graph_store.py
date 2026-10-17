@@ -12,6 +12,8 @@ from app.normalization import (
     entity_family,
     entity_identity,
     identifier_namespace,
+    identity_identifier_key,
+    identity_modifiers,
     normalize_alias,
     normalize_entity_alias,
     normalize_external_id,
@@ -127,7 +129,7 @@ def _reconcile_exact_names(cur, existing, identity):
     cur.execute(
         """
         SELECT id, canonical_name, normalized_id, entity_type FROM entities entity
-        WHERE entity_type = ANY(%s::TEXT[])
+        WHERE entity_type = ANY(%s::TEXT[]) AND canonical_key NOT LIKE '%%|pending|%%'
           AND EXISTS (SELECT 1 FROM entity_aliases alias WHERE alias.entity_id = entity.id AND alias.normalized_alias = ANY(%s::TEXT[]))
         ORDER BY id LIMIT 10
         """,
@@ -175,7 +177,7 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
             JOIN entities entity ON entity.id = identifier.entity_id
             WHERE identifier.entity_family = %s AND identifier.identifier_key = %s
             """,
-            (family, identity.normalized_id.casefold()),
+            (family, identity_identifier_key(identity)),
         )
         existing = cur.fetchone()
     if not existing:
@@ -197,13 +199,15 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
             FROM entities entity
             JOIN entity_aliases alias ON alias.entity_id = entity.id
             WHERE entity.entity_type = ANY(%s::TEXT[])
+              AND entity.canonical_key NOT LIKE '%%|pending|%%'
               AND alias.normalized_alias = ANY(%s::TEXT[])
             ORDER BY entity.id
             LIMIT 3
             """,
             (compatible_entity_types(identity.entity_type), sorted(lookup_keys)),
         )
-        alias_candidates = cur.fetchall()
+        alias_candidates = [candidate for candidate in cur.fetchall()
+            if identity_modifiers(candidate['canonical_name']) == identity_modifiers(identity.canonical_name)]
         candidate_ids = [(candidate, _candidate_identifiers(cur, candidate)) for candidate in alias_candidates]
         if identity.normalized_id:
             exact = [candidate for candidate, values in candidate_ids if identity.normalized_id in values]
@@ -256,7 +260,7 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (entity_family, identifier_key) DO NOTHING
             """,
-            (entity_id, family, identity.normalized_id, identity.normalized_id.casefold()),
+            (entity_id, family, identity.normalized_id, identity_identifier_key(identity)),
         )
     for alias in identity.aliases or (identity.canonical_name,):
         keys = {normalize_alias(alias), normalize_entity_alias(alias, identity.entity_type)}
@@ -280,6 +284,7 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
         claim.subject.normalized_id,
         abbreviations=abbreviations,
         document_id=document_id,
+        pending_merge=claim.subject.pending_merge,
     )
     object_ = entity_identity(
         claim.object.text,
@@ -287,10 +292,11 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
         claim.object.normalized_id,
         abbreviations=abbreviations,
         document_id=document_id,
+        pending_merge=claim.object.pending_merge,
     )
     # Acquire both endpoints' locks in a stable order, including aliases, before
     # either upsert. Opposite-direction claims cannot invert the lock order.
-    extra_identities = [(p, entity_identity(p.entity.text, p.entity.type, p.entity.normalized_id, abbreviations, document_id)) for p in normalized_participants(claim)]
+    extra_identities = [(p, entity_identity(p.entity.text, p.entity.type, p.entity.normalized_id, abbreviations, document_id, p.entity.pending_merge)) for p in normalized_participants(claim)]
     keys = _identity_locks(subject) | _identity_locks(object_)
     for _, identity in extra_identities:
         keys |= _identity_locks(identity)
@@ -495,6 +501,7 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
     if source and source['claim_catalog_version'] != source['catalog_version']:
         raise ValueError('Stale extraction version; re-extraction is required')
     if source and source['catalog_status'] == 'done':
+        source['abbreviation_map'] = abbreviations or {}
         entries = load_catalog(cur, document_id, source['catalog_version'])
         resolve_bundle(ClaimBundle(claims=[claim]), entries, source, source['catalog_version'])
     projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=True)

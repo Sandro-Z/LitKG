@@ -25,7 +25,7 @@ class SegmentCache:
             self.row = {'payload':copy.deepcopy(self.rows[key])} if key in self.rows else None
         elif query.startswith('INSERT INTO processing_cache'):
             stage, key, payload = ('catalog_split',params[1],params[2]) if "'catalog_split'" in query else (params[1],params[2],params[3])
-            self.rows.setdefault((stage,key),copy.deepcopy(payload.obj))
+            self.rows[(stage,key)] = copy.deepcopy(payload.obj) if 'DO UPDATE SET payload' in query else self.rows.get((stage,key),copy.deepcopy(payload.obj))
         elif query.startswith('INSERT INTO processing_attempts'):
             self.attempts.append({'status':'failed' if "'failed'" in query else 'done','output':copy.deepcopy(params[4].obj)})
         elif query.startswith('DELETE FROM processing_cache'):

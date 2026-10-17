@@ -469,6 +469,10 @@ def main():
                 col2.metric("已接收", batch["accepted_count"])
                 col3.metric("完成比例", f"{progress * 100:.1f}%")
                 st.progress(progress)
+                quality = batch.get('processing_quality', {})
+                if quality.get('rejected_candidates') or quality.get('pending_reviews'):
+                    st.warning(f"结果质量：隔离候选 {quality.get('rejected_candidates', 0)} 个，"
+                               f"确认排除 {quality.get('excluded_candidates', 0)} 个，待复核 {quality.get('pending_reviews', 0)} 项。")
                 st.dataframe(
                     pd.DataFrame(items),
                     use_container_width=True,
@@ -690,10 +694,10 @@ def main():
             if doc_id and st.button('查看全文实体目录与处理状态'):
                 try:
                     processing = api_get(prefix+f'/documents/{doc_id}/processing')
-                    quality = processing.get('catalog_quality', {})
-                    if quality.get('rejected_candidates'):
-                        st.warning(f"目录隔离了 {quality['rejected_candidates']} 个无法验证的候选，"
-                                   f"其中 {quality['pending_rejections']} 个待复核。请查看下方复核列表。")
+                    quality = processing.get('processing_quality', {})
+                    if quality.get('rejected_candidates') or quality.get('pending_reviews'):
+                        st.warning(f"已隔离 {quality.get('rejected_candidates', 0)} 个候选，"
+                                   f"确认排除 {quality.get('excluded_candidates', 0)} 个，待复核 {quality.get('pending_reviews', 0)} 项。")
                     st.json(processing)
                     st.json(api_get(prefix+f'/documents/{doc_id}/catalog'))
                 except Exception as exc:
@@ -722,8 +726,9 @@ def main():
                 for item in items:
                     st.write(f"#{item['id']} · 文献 {item['document_id']} · {item['kind']}")
                     st.json(item['detail'])
-                    if st.button('标记已复核', key=f"review_{item['id']}"):
-                        api_post_json(prefix+f"/reviews/{item['id']}?status=resolved", {})
+                    review_outcome = st.selectbox('复核结果', ['resolved', 'dismissed', 'pending'], format_func=lambda value: {'resolved':'修复成功 / 已复核', 'dismissed':'确认无效并排除', 'pending':'仍待解决'}[value], key=f"outcome_{item['id']}")
+                    if st.button('保存复核结果', key=f"review_{item['id']}"):
+                        api_post_json(prefix+f"/reviews/{item['id']}?status={review_outcome}", {})
                         st.rerun()
             except Exception as exc:
                 st.error(f'读取复核项失败：{exc}')

@@ -1,6 +1,86 @@
 # LitKG v3 开发与续接记录
 
-## 2026-10-16 目录候选隔离与维护续接修复（最新状态）
+## 2026-10-17 在两个远端提交上重放（最新状态）
+
+用户已确认 pull 完成。本次以 c17c801 为基线重放本地备份提交 efca0de；保留远端
+4fe61f2、c17c801，以及用户已存在的 .gitignore 修改（新增 .env 忽略规则）。
+8 个冲突已逐处适配并标记解决，已结束 cherry-pick 状态，HEAD 仍为 c17c801。
+修改全部保留为未暂存工作区变更；未新增提交、推送、部署或操作正式数据库/模型。
+
+与远端的合并要点：
+- 保留 claims-v4-resumable 的关系分段树、截断拆分、独立输出预算、精简目录提示和 repair_id；
+  将本次逐条校验、三态纠错、成功缓存复用融入原分段流程，不退回整 chunk 模型调用。
+- 片段处理缺口独立记录为 processing_gaps：真实调用/截断/无可用结果失败仍可使 chunk、
+  文献和共享批次 partial/failed；仅候选拒绝、目录漏项和待复核仍为 done 加质量数量。
+  取消汇总保存前重新整包校验，所有候选继续只使用其实际输入片段的原文范围。
+- 保留处理租约、heartbeat、孤立任务恢复、parse 的 publish 参数及维护中的解析恢复，
+  知识库更新/删除及前端创建成功通知完整保留。上游 recovery.py、ingestion.py、retrieval.py、
+  celery_app.py、数据库初始化/租约迁移及知识库前端测试均与 c17c801 完全一致。
+- 支持远端旧缓存/复核项的 original 字段；修复或确认排除会关闭旧记录。人工确认无效后，
+  同 chunk 其他候选继续重试也不会重新纠错该项。成功补齐片段后关闭处理缺口复核记录。
+- README 保留远端精简结构，将详细历史放入 changelog.md；4 份部署校验清单同步更新。
+  本补丁不新增 SQL 迁移，但仍须遵循上游 processing_leases 的迁移要求。
+
+验证：最终 194 项全部通过，无跳过，18.952 秒，包含临时 PostgreSQL、模型替身、
+FastAPI、Streamlit、两份远端提交的回归与新增的跨片段失败续接、人工排除、旧记录结案、
+纠错 ID 防串项检查。compileall、两份部署脚本 bash -n、git diff --check、4 份 SHA256
+清单均通过。测试期间没有连接真实模型、正式 PostgreSQL 或发布 Celery 消息。
+真实文献抽取质量与真实 worker/broker 通信未实测。
+
+测试环境：/tmp/litkg-replay-venv（从官方 PyPI 仅安装 wheel；依赖文件未改变）。
+测试日志：/tmp/litkg-replay/final.log；局部验证日志 focused.log；依赖日志 dependencies.log。
+独立 PostgreSQL：litkg-replay-check-20261017，完整 ID
+37fcfa30133ca3c609ea2e6f0ae3b2eae66450ce2f0258f6614d3740a7f58657，
+仅监听 127.0.0.1:55449，使用 tmpfs，Mounts=[]；核对 ID/标签/端口/挂载后已删除并验证不存在。
+
+原始修改仍由 backup/litkg-partial-quality-20261017T080350Z 分支保留；原补丁和冲突现场位于
+.git/litkg-resume/partial-quality-20261017T080350Z。本次重放后补丁与最新续接记录见
+.git/litkg-resume/LATEST 指向的目录。后续先检查工作区，切勿再次无条件应用 efca0de。
+
+
+## 2026-10-17 完成度、候选隔离与身份匹配（原始实现记录）
+
+基线 HEAD：24aaab3，分支 main；开始时工作区干净。实现和验证已完成，修改保留在
+工作区，未提交、未推送、未部署；未读取或修改 .env、正式数据库，也未调用真实模型。
+
+改动：
+- 新增 claims.py；目录和关系 JSON 逐候选解析、逐候选原文校验。可选字段和冗余证据
+  可修复/移除；主证据、必要参与者、重复角色和嵌套条件不能因纠错被静默删除。
+- cached_model 原来的深拷贝修复结果被丢弃现已修复；取消抽取保存前再次整包 resolve。
+  有效关系逐条保存，局部排除/待复核属于质量，已处理文献、批次和审计使用 done。
+  初始截断、调用失败、全部候选仍无可用结果保留失败；其他 chunk 完成时文献为 partial。
+- source_contains/source_span 使用相同排版归一化、词边界和原文偏移；接受大小写、空白、
+  Unicode 引号/连字符/连字/软连字符、角色格式、显式 ID 的确定性格式差异和已验证别名。
+  同段共现不证明别名。错目录 ID 按完整原文重新匹配；歧义/漏项保留 pending_merge
+  文献内独立节点，全局别名查询不能收养这些节点。保留物种、突变、修饰位点、异构体；
+  带身份修饰的标准 ID 分开索引，原文明示的冲突标准 ID 不被目录覆盖。
+- 单条纠错支持 repaired/excluded/unresolved，原候选和纠错输出均留审计；空列表本身
+  不能结案，损坏的整包 JSON 不能通过 exclusion 伪装为空成功。成功缓存复用，缺口缓存
+  显式带 _processing_gap；retry 只修复失败项及 pending claim_rejection，确认排除后不再纠错。
+  复核项使用稳定候选键，保留人工状态历史；修复后关闭原候选，避免重复待复核记录。
+- 文献列表、批次明细、processing API 与前端增加质量数量，旧 catalog_quality 保留兼容；
+  前端支持三种复核结果。README、部署校验清单及测试列表同步。无需 SQL 迁移；成功目录/
+  关系缓存键保持兼容，服务器重新校验后复用。旧 partial 文献更新代码后需运行 retry。
+
+验证：最终完整 159 项测试全部通过，无跳过，14.244 秒；包括独立 PostgreSQL、受控模型、
+FastAPI 和 Streamlit AppTest。覆盖错 ID 恢复、别名与排版、身份修饰/冲突 ID、无依据事实
+隔离、局部错误不拖累状态、真实片段失败 partial、成功缓存复用、仅失败项纠错、排除结案、
+必要角色/条件保留，以及既有解析、检索、知识库隔离、并发幂等和维护续接。
+compileall、git diff --check、bash -n、sha256sum -c scripts/catalog-runtime.sha256 均通过。
+真实文献的抽取质量和真实模型/消息队列端到端没有实测，不能把受控验证视为正式恢复。
+
+临时 PostgreSQL litkg-completion-check-20261017，完整 ID
+4e27c9f2af1251b0a31aa01cc4faf2f4d4e0776b458472f5f82c89f2fb0a1d27，
+只监听 127.0.0.1:55447，tmpfs、Mounts=[]。核对完整 ID、任务标签、端口和挂载后已移除，
+并验证不存在。测试环境仍为 /tmp/litkg-test-venv；测试日志 /tmp/litkg-completion-all.log，
+临时续接记录 /tmp/litkg-completion-checkpoint.md。两个曾被网络沙箱阻塞的测试进程已中断。
+
+继续工作时先检查 git status/diff 并保留现有改动；新文件 app/app/claims.py 和
+tests/test_claim_robustness.py 也必须纳入交付。重测需新建独立测试库后设置
+LITKG_TEST_DATABASE_URL，运行 PYTHONPATH=app:tests /tmp/litkg-test-venv/bin/python
+-m unittest discover -s tests -v；仅运行无数据库版本会跳过集成测试。
+
+## 2026-10-16 目录候选隔离与维护续接修复（历史记录）
 
 基线 HEAD：17a86d9（之前为 accdc9c、fbc0f67）。本次用户提供了生产诊断，未读取
 正式库、未调用真实模型、未修改 .env、未执行部署脚本或更新正式容器。

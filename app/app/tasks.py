@@ -11,7 +11,7 @@ from app.graph_store import lock_graph_projection, project_existing_claim, store
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
     CATALOG_MAX_OUTPUT_TOKENS, CLAIMS_MAX_OUTPUT_TOKENS, CLAIMS_PROMPT_VERSION,
     ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
-from app.claims import ClaimValidationError, prepare_claims, combine_claims, repair_candidates, merge_correction
+from app.claims import ClaimValidationError, prepare_claims, combine_claims, retains_required_context
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, CATALOG_CACHE_VERSION, EXTRACTION_VERSION, digest, segments,
     prepare_catalog, CatalogValidationError, split_catalog_segment, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
@@ -44,10 +44,11 @@ def processing_lock(key):
 
 
 def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, validate=None,
-                 retry_call=None, max_attempts=1):
+                 retry_call=None, max_attempts=1, retry_pending=False, excluded_candidates=None):
     def checked(result):
+        result = result.model_copy(deep=True)
         if validate:
-            validated = validate(result.model_copy(deep=True))
+            validated = validate(result)
             if isinstance(validated, schema):
                 return validated
         return result
@@ -62,21 +63,25 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM processing_cache WHERE document_id = %s AND stage = %s AND cache_key = %s",
                            (document_id, stage, key)).fetchone()
+    prefix = 'catalog' if stage == 'catalog' else 'claim'
+    repairs_name, rejections_name = f'_{prefix}_repairs', f'_{prefix}_rejections'
+    field, label = ('entities', 'entity') if stage == 'catalog' else ('claims', 'claim')
+    resumed = None
     if row:
         try:
-            result = checked(schema.model_validate(row["payload"]))
+            saved = schema.model_validate(row['payload'])
+            for name in (repairs_name, rejections_name):
+                setattr(saved, name, row['payload'].get(name, []))
             if stage == 'claims':
-                # Partial results are audited, but must remain retryable. Good
-                # sibling leaves use their complete caches on the next retry.
-                if row['payload'].get('_claim_rejections'):
-                    raise ClaimValidationError('Retrying unresolved claim candidates')
-                result._repair_ids = row['payload'].get('_repair_ids', [])
-            if stage == 'catalog':
-                # Private, server-produced audit metadata survives a resumed
-                # build. It is deliberately outside the model JSON schema.
-                result._catalog_repairs = row['payload'].get('_catalog_repairs', []) + result._catalog_repairs
-                result._catalog_rejections = row['payload'].get('_catalog_rejections', []) + result._catalog_rejections
-            return result
+                saved._repair_ids = row['payload'].get('_repair_ids', [])
+                for item in saved._claim_rejections:
+                    if 'claim' not in item:
+                        item['claim'] = item.get('original')
+            result = checked(saved)
+            unresolved = any(r.get('outcome') != 'excluded' for r in getattr(result, rejections_name))
+            if not row['payload'].get('_processing_gap') and not (unresolved and not getattr(result, field)) and not (retry_pending and unresolved):
+                return result
+            resumed = result
         except (ValueError, TypeError) as exc:
             record_failure(exc, row['payload'])
             with get_conn() as conn:
@@ -87,7 +92,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     for attempt in range(attempt_limit):
         parsed, raw_output = None, None
         try:
-            result = model_call() if last_error is None else retry_call(last_error, original)
+            result = resumed if resumed is not None else model_call() if last_error is None else retry_call(last_error, original)
             parsed = result.model_dump(mode='json')
             raw_output = getattr(result, '_raw_output', None)
             result = checked(result)
@@ -98,33 +103,111 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                 raise
             last_error = exc
             original = getattr(exc, 'raw', None) or parsed
+    # Correct only rejected candidates. Valid siblings are retained and never
+    # sent through a second whole-bundle validation/correction pass.
+    repairs = getattr(result, repairs_name)
+    rejections = []
+    for rejection_index, rejected in enumerate(getattr(result, rejections_name)):
+        item = dict(rejected)
+        if label not in item:
+            item[label] = item.get('original')
+        if stage == 'claims' and digest(item[label]) in (excluded_candidates or set()):
+            item.update(outcome='excluded', reason='Confirmed invalid by manual review')
+        if item.get('outcome') == 'excluded':
+            rejections.append(item)
+            continue
+        item['outcome'] = 'unresolved'
+        if retry_call is not None:
+            repair_id = str(rejection_index)
+            candidate = dict(item[label], repair_id=repair_id) if stage == 'claims' and isinstance(item[label], dict) else item[label]
+            previous = {field: [candidate]}
+            history = list(item.get('attempts', []))
+            for correction_index in range(max(0, attempt_limit - 1)):
+                correction = None
+                try:
+                    feedback = (f'repair_id={repair_id}: ' if stage == 'claims' else '') + item['error']
+                    correction = checked(retry_call(CatalogValidationError(feedback), previous))
+                    resolution = correction._resolution or {}
+                    values = getattr(correction, field)
+                    correction_errors = getattr(correction, rejections_name)
+                    history.append({'parsed': correction.model_dump(mode='json'),
+                                    'raw': correction._raw_output, 'resolution': resolution,
+                                    'rejections': correction_errors})
+                    if stage == 'claims' and resolution.get('repair_id') not in {None, repair_id}:
+                        item['error'] = 'Correction resolution repair_id does not match the requested candidate'
+                        continue
+                    if resolution.get('outcome') == 'excluded' and not values and not correction_errors:
+                        item.update(outcome='excluded', reason=resolution['reason'])
+                        break
+                    if len(values) == 1 and not correction_errors:
+                        if stage == 'claims' and any(value is not None for value in correction._repair_ids) and correction._repair_ids != [repair_id]:
+                            item['error'] = 'Correction repair_id does not match the requested candidate'
+                            continue
+                        if stage == 'claims' and isinstance(item[label], dict):
+                            if not retains_required_context(item[label], values[0]):
+                                item['error'] = 'Correction dropped required participants or condition fields; repair them or explicitly exclude the candidate'
+                                continue
+                        getattr(result, field).extend(values)
+                        if stage == 'claims':
+                            result._repair_ids.extend(correction._repair_ids or [None])
+                        repairs.extend(getattr(correction, repairs_name))
+                        repairs.append({f'{label}_index': item.get(f'{label}_index'), 'field': 'candidate',
+                                        'original': item[label], 'replacement': values[0].model_dump(mode='json'),
+                                        'outcome': 'repaired', 'attempts': history})
+                        item = None
+                        break
+                    if resolution.get('outcome') == 'unresolved':
+                        item['reason'] = resolution['reason']
+                        break
+                    item['error'] = correction_errors[0]['error'] if correction_errors else 'Correction must repair one candidate or explicitly confirm exclusion'
+                except Exception as exc:
+                    history.append({'error': f'{type(exc).__name__}: {exc}', 'raw': getattr(exc, 'raw', None)})
+                    # Infrastructure/capacity failures stay visible in quality;
+                    # good siblings are still usable. Never retry truncation.
+                    if not isinstance(exc, (CatalogValidationError, ModelOutputError)) or isinstance(exc, ModelOutputTruncatedError):
+                        break
+                if correction is not None and len(getattr(correction, rejections_name)) == 1:
+                    failed = getattr(correction, rejections_name)[0]
+                    candidate = failed.get(label, failed.get('original'))
+                    if stage == 'claims' and isinstance(candidate, dict):
+                        candidate = dict(candidate, repair_id=repair_id)
+                    previous = {field: [candidate]}
+            if item is not None:
+                item['attempts'] = history
+        if item is not None:
+            rejections.append(item)
+    setattr(result, rejections_name, rejections)
+    gap = not getattr(result, field) and any(r.get('outcome') != 'excluded' for r in rejections)
     payload = result.model_dump(mode='json')
-    rejections = getattr(result, '_catalog_rejections', []) or getattr(result, '_claim_rejections', [])
     if stage == 'claims':
-        payload['_claim_rejections'] = result._claim_rejections
         payload['_repair_ids'] = result._repair_ids
-    if stage == 'catalog':
-        for name in ('_catalog_repairs', '_catalog_rejections'):
-            if getattr(result, name):
-                payload[name] = getattr(result, name)
-    empty_failure = stage == 'claims' and bool(rejections) and not result.claims
-    audit_status = 'failed' if empty_failure else ('partial' if rejections else 'done')
+    for name in (repairs_name, rejections_name):
+        if getattr(result, name):
+            payload[name] = getattr(result, name)
+    if gap:
+        payload['_processing_gap'] = True
+    audit_status = 'failed' if gap else 'done'
     with get_conn() as conn:
-        if not empty_failure:
-            conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                         (document_id, stage, key, Jsonb(payload)))
+        conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT (document_id,stage,cache_key) DO UPDATE SET payload=EXCLUDED.payload",
+                     (document_id, stage, key, Jsonb(payload)))
         conn.execute(f"""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
             VALUES (%s, %s, %s, %s, '{audit_status}', %s, %s)""", (document_id, chunk_id, stage, key,
             Jsonb({'parsed': payload, 'original_parsed': parsed, 'raw': raw_output,
-                   'repairs': getattr(result, '_catalog_repairs', []), 'rejections': rejections}),
-            '; '.join(item['error'] for item in rejections) if rejections else None))
+                   'repairs': repairs, 'rejections': rejections}), rejections[0]['error'] if gap else None))
+    if gap:
+        noun = 'catalog entries' if stage == 'catalog' else 'claims'
+        message = rejections[0]['error'] + f'; no grounded {noun} remain'
+        if stage == 'claims':
+            raise ClaimValidationError(message, result)
+        raise CatalogValidationError(message)
+
     return result
 
 
-def claim_segment_bundles(document_id, segment, entries, version):
+def claim_segment_bundles(document_id, segment, entries, version, retry_pending=False, excluded_candidates=None):
     """Bounded correction + durable split tree; one bad leaf cannot erase others."""
     minimum = int(os.environ.get('CLAIMS_MIN_SEGMENT_CHARS', '500'))
-    attempts = max(1, min(3, int(os.environ.get('CLAIMS_VALIDATION_ATTEMPTS', '2'))))
+    attempts = max(1, min(5, int(os.environ.get('CLAIM_VALIDATION_ATTEMPTS', os.environ.get('CLAIMS_VALIDATION_ATTEMPTS', '2')))))
     key = digest([EXTRACTION_VERSION, CLAIMS_PROMPT_VERSION, MODEL_SIGNATURE, version,
                   segment['section_title'], segment['text'], minimum, CLAIMS_MAX_OUTPUT_TOKENS])
     split_key = digest(['claims-split-v1', key])
@@ -140,22 +223,8 @@ def claim_segment_bundles(document_id, segment, entries, version):
     try:
         if not split:
             bundle = cached_model(document_id, 'claims', key, invoke, ClaimBundle, segment['id'], validate=validate,
-                retry_call=lambda error, previous:invoke(feedback=str(error), previous_output=previous), max_attempts=attempts)
-            for attempt in range(1, attempts):
-                if not bundle._claim_rejections:
-                    break
-                previous = repair_candidates(bundle._claim_rejections)
-                feedback = '; '.join(f"repair_id={i}: {item['error']}" for i,item in enumerate(bundle._claim_rejections))
-                correction_key = digest([key, 'correction', attempt, previous])
-                try:
-                    correction = cached_model(document_id, 'claims', correction_key,
-                        lambda:invoke(feedback=feedback, previous_output=previous), ClaimBundle, segment['id'], validate=validate)
-                except Exception as exc:
-                    # The original passing claims still survive a bad correction.
-                    for rejection in bundle._claim_rejections:
-                        rejection['correction_error'] = f'{type(exc).__name__}: {exc}'
-                    break
-                bundle = merge_correction(bundle, correction)
+                retry_call=lambda error, previous:invoke(feedback=str(error), previous_output=previous),
+                max_attempts=attempts, retry_pending=retry_pending, excluded_candidates=excluded_candidates)
             yield segment, bundle
             return
         children = split_catalog_segment(segment, minimum)
@@ -165,30 +234,46 @@ def claim_segment_bundles(document_id, segment, entries, version):
             bundle = ClaimBundle(claims=[])
             bundle._claim_rejections = [{'error':f'{type(exc).__name__}: {exc}', 'kind':'capacity',
                                          'start':segment['start'], 'end':segment['end']}]
+            bundle._processing_gaps = list(bundle._claim_rejections)
             yield segment, bundle
             return
         with get_conn() as conn:
             conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                          (document_id,'claims_split',split_key,Jsonb({'strategy':'overlapping-halves-v1'})))
+    except ClaimValidationError as exc:
+        bundle = exc.bundle or ClaimBundle(claims=[])
+        bundle._processing_gaps = [{'error': str(exc), 'kind': 'no_usable_claims',
+                                    'start': segment['start'], 'end': segment['end']}]
+        yield segment, bundle
+        return
     except Exception as exc:
         bundle = ClaimBundle(claims=[])
         bundle._claim_rejections = [{'error':f'{type(exc).__name__}: {exc}', 'kind':'segment_failure',
                                      'start':segment['start'], 'end':segment['end']}]
+        bundle._processing_gaps = list(bundle._claim_rejections)
         yield segment, bundle
         return
     if not children:
         raise ClaimValidationError('Invalid claims split cache')
     for child in children:
-        yield from claim_segment_bundles(document_id, child, entries, version)
+        yield from claim_segment_bundles(document_id, child, entries, version, retry_pending, excluded_candidates)
 
 
-def extract_chunk_claims(document_id, chunk, entries, version):
+def extract_chunk_claims(document_id, chunk, entries, version, retry_pending=False):
     bundles = []
+    excluded_candidates = set()
+    if retry_pending:
+        with get_conn() as conn:
+            rows = conn.execute("""SELECT detail FROM review_items WHERE document_id=%s AND version=%s
+                AND kind='claim_rejection' AND status='dismissed' AND detail->>'chunk_id'=%s""",
+                (document_id, version, str(chunk['id']))).fetchall()
+        excluded_candidates = {digest(row['detail'].get('claim', row['detail'].get('original'))) for row in rows}
     maximum = int(os.environ.get('CLAIMS_SEGMENT_CHARS', '3000'))
     for initial in segments([chunk], maximum):
-        for segment, bundle in claim_segment_bundles(document_id, initial, entries, version):
-            for rejected in bundle._claim_rejections:
-                rejected.update(start=segment['start'], end=segment['end'])
+        for segment, bundle in claim_segment_bundles(document_id, initial, entries, version, retry_pending, excluded_candidates):
+            for item in [*bundle._claim_rejections, *bundle._claim_repairs]:
+                item.update(start=segment['start'], end=segment['end'])
+            bundle._claim_rejections = [item for item in bundle._claim_rejections if item.get('kind') not in {'capacity', 'segment_failure'}]
             bundles.append(bundle)
     return combine_claims(bundles)
 
@@ -213,7 +298,7 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
         try:
             bundle = cached_model(document_id, 'catalog', key,
                 lambda:extract_catalog(heading, segment['text']), CatalogBundle, segment['id'],
-                validate=lambda b:prepare_catalog(b, validation_segment, quarantine=True),
+                validate=lambda b:prepare_catalog(b, validation_segment, quarantine=True, allow_empty=True),
                 retry_call=lambda error, previous:extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous),
                 max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
         except ModelOutputTruncatedError as exc:
@@ -404,12 +489,12 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                         with get_conn() as conn:
                             for repair in bundle._catalog_repairs:
                                 add_review(conn.cursor(), document_id, version, 'catalog_repair',
-                                    {'chunk_id': segment['id'], 'start': segment['start'], **repair})
+                                    {'chunk_id': segment['id'], 'start': segment['start'], **repair}, status='resolved')
                             for rejection in bundle._catalog_rejections:
                                 add_review(conn.cursor(), document_id, version, 'catalog_rejection',
                                     {'chunk_id': segment['id'], 'start': segment['start'], 'end': segment['end'],
                                      'sources': [document['title'] or '', segment['section_title'] or '', segment['text']],
-                                     **rejection})
+                                     **rejection}, status='dismissed' if rejection.get('outcome') == 'excluded' else 'pending')
                     for entity in bundle.entities:
                         page, page_end = locate_evidence_pages(entity.evidence, next(c for c in chunks if c["id"] == segment["id"]))
                         source_kind = 'text'
@@ -423,7 +508,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                 with conn.cursor() as cur:
                     lock_graph_projection(cur, True)
                     for entry in entries:
-                        identity = entity_identity(entry["text"], entry["type"], entry["normalized_id"], abbreviations, document_id)
+                        identity = entity_identity(entry["text"], entry["type"], entry["normalized_id"], abbreviations, document_id, entry.get('pending_merge', False))
                         identity = replace(identity,aliases=tuple(entry['aliases']))
                         entity_id = upsert_entity(cur, identity)
                         for identifier in entry.get('identifiers',[]):
@@ -454,7 +539,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
 
 
 @celery_app.task(name="extract_chunk", queue="extract")
-def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation: int | None = None, refresh: bool = True):
+def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation: int | None = None, refresh: bool = True, retry_pending: bool = False):
     document_id = None
     with processing_lock(f"litkg-chunk:{chunk_id}") as acquired:
         if not acquired:
@@ -476,16 +561,20 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                     entries = load_catalog(cur, document_id, version)
             update_chunk_status(chunk_id, "extracting")
             key = digest([EXTRACTION_VERSION, MODEL_SIGNATURE, version, chunk['section_title'], chunk["text"]])
-            bundle = extract_chunk_claims(document_id, chunk, entries, version)
-            rejected = bundle._claim_rejections
-            if rejected:
+            bundle = extract_chunk_claims(document_id, chunk, entries, version, retry_pending=retry_pending)
+            rejected, gaps = bundle._claim_rejections, bundle._processing_gaps
+            if gaps and not bundle.claims:
                 with get_conn() as conn:
-                    for rejection in rejected:
-                        add_review(conn.cursor(), document_id, version, 'claim_rejection', {'chunk_id':chunk_id, **rejection})
-            if rejected and not bundle.claims:
-                raise ClaimValidationError(f'{len(rejected)} unresolved claim/segment errors: ' + '; '.join(r['error'] for r in rejected))
+                    for kind, items in [('claim_rejection', rejected), ('processing_gap', gaps)]:
+                        for item in items:
+                            add_review(conn.cursor(), document_id, version, kind, {'chunk_id': chunk_id, **item},
+                                status='dismissed' if item.get('outcome') == 'excluded' else 'pending')
+                raise ClaimValidationError(f'{len(gaps)} unresolved segment errors: ' + '; '.join(item['error'] for item in gaps))
             raw_claims = [c.model_dump(mode='json') for c in bundle.claims]
-            omissions = resolve_bundle(bundle, entries, chunk, version)
+            omissions = [(entity, {'chunk_id': chunk_id, 'mention': entity.mention or entity.text, 'role': role})
+                for claim in bundle.claims
+                for role, entity in [('subject', claim.subject), ('object', claim.object), *[(p.role, p.entity) for p in claim.participants]]
+                if entity.pending_merge]
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     lock_graph_projection(cur, True)
@@ -494,24 +583,41 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                     if current["catalog_version"] != version or current["catalog_status"] != "done" or current["pipeline_generation"] != chunk["pipeline_generation"]:
                         return {"chunk_id": chunk_id, "status": "superseded"}
                     archive_claims(cur, document_id, chunk_id)
+                    if not gaps:
+                        cur.execute("""UPDATE review_items SET status='resolved',updated_at=now()
+                            WHERE document_id=%s AND version=%s AND status='pending' AND detail->>'chunk_id'=%s
+                              AND (kind='processing_gap' OR (kind='claim_rejection' AND detail->>'kind' IN ('capacity','segment_failure')))""",
+                            (document_id, version, str(chunk_id)))
+                    for kind, items in [('claim_repair', bundle._claim_repairs), ('claim_rejection', rejected), ('processing_gap', gaps)]:
+                        for item in items:
+                            repaired = kind == 'claim_repair' and item.get('field') == 'candidate'
+                            excluded = kind == 'claim_rejection' and item.get('outcome') == 'excluded'
+                            if repaired or excluded:
+                                original = item['original'] if repaired else item.get('claim', item.get('original'))
+                                cur.execute("""UPDATE review_items SET status=%s,updated_at=now()
+                                    WHERE document_id=%s AND version=%s AND kind='claim_rejection' AND status='pending'
+                                      AND detail->>'chunk_id'=%s AND COALESCE(detail->'claim',detail->'original')=%s""",
+                                    ('resolved' if repaired else 'dismissed', document_id, version, str(chunk_id), Jsonb(original)))
+                            add_review(cur, document_id, version, kind, {'chunk_id': chunk_id, **item},
+                                status='dismissed' if item.get('outcome') == 'excluded' else 'resolved' if kind == 'claim_repair' else 'pending')
                     kept = []
                     for claim, raw_claim in zip(bundle.claims, raw_claims):
                         for evidence in [claim.evidence, *claim.additional_evidence]:
                             evidence.page, evidence.page_end = locate_evidence_pages(evidence.sentence, chunk)
-                            evidence.section = evidence.section or chunk["section_title"]
+                            evidence.section = chunk["section_title"]
                         raw_claim['evidence'] = claim.evidence.model_dump(mode='json')
                         raw_claim['additional_evidence'] = [e.model_dump(mode='json') for e in claim.additional_evidence]
                         claim_id, _ = store_claim(cur, document_id=document_id, chunk_id=chunk_id, claim=claim,
                                                  extraction_model=LLM_MODEL, abbreviations=chunk["abbreviation_map"], original_claim_json=raw_claim)
                         kept.append(claim_id)
-                    if not rejected:
+                    if not gaps:
                         cur.execute("DELETE FROM claims WHERE chunk_id = %s AND NOT (id = ANY(%s::BIGINT[]))", (chunk_id, kept))
                     # Missing directory items are appended to this immutable source/
                     # processing version; existing local IDs never change.
                     for entity, location in omissions:
                         raw = CatalogEntity(**entity.model_dump(), aliases=[], evidence=entity.mention or entity.text)
                         entry = merge_catalog([(raw, location)], chunk["abbreviation_map"], document_id)[0]
-                        entity_id = upsert_entity(cur, entity_identity(entry["text"], entry["type"], entry["normalized_id"], chunk["abbreviation_map"], document_id))
+                        entity_id = upsert_entity(cur, entity_identity(entry["text"], entry["type"], entry["normalized_id"], chunk["abbreviation_map"], document_id, entry.get('pending_merge', False)))
                         cur.execute("""INSERT INTO document_entities (document_id,catalog_version,local_id,entity_id,entry)
                             VALUES (%s,%s,%s,%s,%s) ON CONFLICT (document_id,catalog_version,local_id) DO UPDATE
                             SET entry=jsonb_set(jsonb_set(document_entities.entry,'{aliases}',
@@ -519,15 +625,15 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                               '{locations}',(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements((document_entities.entry->'locations') || (EXCLUDED.entry->'locations'))))""",
                             (document_id,version,entry["local_id"],entity_id,Jsonb(entry)))
                         add_review(cur, document_id, version, "catalog_omission", {"entry": entry, "location": location})
-                    chunk_status = 'partial' if rejected else 'done'
-                    error = (f'{len(rejected)} unresolved claim/segment errors: ' + '; '.join(r['error'] for r in rejected)) if rejected else None
+                    chunk_status = 'partial' if gaps else 'done'
+                    error = (f'{len(gaps)} unresolved segment errors: ' + '; '.join(item['error'] for item in gaps)) if gaps else None
                     cur.execute("UPDATE chunks SET status=%s, extraction_version=%s, error=%s, updated_at=now() WHERE id=%s",
                                 (chunk_status, key, error, chunk_id))
             status = refresh_document_status(document_id)
             if refresh and status in {"done", "partial"}:
                 refresh_derived.apply_async(args=[document_id], queue="extract")
             return {"chunk_id": chunk_id, "document_id": document_id, "claim_count": len(bundle.claims),
-                    'status':chunk_status, 'rejected_count':len(rejected)}
+                    'status':chunk_status, 'rejected_count':len(rejected), 'processing_gap_count':len(gaps)}
         except Exception as exc:
             if document_id is not None:
                 with get_conn() as conn:
@@ -752,12 +858,16 @@ def maintain_knowledge_base(job_id: str):
                                 raise ValueError("Document is busy")
                         with get_conn() as conn:
                             current = conn.execute("SELECT catalog_version,pipeline_generation FROM documents WHERE id=%s", (doc_id,)).fetchone()
-                            chunks = conn.execute("SELECT id FROM chunks WHERE document_id=%s AND (%s OR status <> 'done') ORDER BY chunk_index", (doc_id,force)).fetchall()
+                            chunks = conn.execute("""SELECT id FROM chunks WHERE document_id=%s AND (%s OR status <> 'done'
+                                OR EXISTS (SELECT 1 FROM review_items r WHERE r.document_id=chunks.document_id
+                                    AND r.version=%s AND r.kind='claim_rejection' AND r.status='pending'
+                                    AND r.detail->>'chunk_id'=chunks.id::TEXT)) ORDER BY chunk_index""",
+                                (doc_id,force,current['catalog_version'])).fetchall()
                         chunk_results = []
                         superseded = False
                         for chunk in chunks:
                             try:
-                                chunk_result = extract_chunk.run(chunk["id"], current["catalog_version"], current["pipeline_generation"], refresh=False)
+                                chunk_result = extract_chunk.run(chunk["id"], current["catalog_version"], current["pipeline_generation"], refresh=False, retry_pending=job['mode'] == 'retry')
                                 chunk_result.setdefault('status', 'done')
                             except Exception as exc:
                                 # extract_chunk has persisted this failure. Keep

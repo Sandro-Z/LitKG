@@ -10,6 +10,7 @@ from app.normalization import (
     abbreviation_key, entity_family, entity_identity, extract_abbreviations,
     normalize_alias, normalize_entity_alias, normalize_external_id, identifier_namespace, stable_json,
     _DASHES,
+    identity_modifiers,
 )
 
 PROCESSING_VERSION = "litkg-v3.3"
@@ -26,13 +27,7 @@ def digest(value):
 
 def source_contains(text, quote):
     # Whitespace/layout differences are allowed; semantic paraphrases are not.
-    if not quote:
-        return False
-    quote = normalize_alias(quote)
-    if not quote:
-        return False
-    pattern = (r"(?<!\w)" if quote[0].isalnum() else "") + re.escape(quote) + (r"(?!\w)" if quote[-1].isalnum() else "")
-    return re.search(pattern, normalize_alias(text)) is not None
+    return source_span(text, quote) is not None
 
 
 def segments(chunks, max_chars=12000):
@@ -89,7 +84,9 @@ def source_span(text, quote):
     exact = re.search(literal, text)
     if exact:
         return exact.span()
-    needle = normalize_alias(quote)
+    # Unlike entity aliases, source quotations retain their punctuation.
+    from app.normalization import clean_text
+    needle = re.sub(r'\s*-\s*', '-', clean_text(quote, '').casefold())
     normalized, offsets = [], []
     index = 0
     while index < len(text):
@@ -105,6 +102,9 @@ def source_span(text, quote):
             normalized.append(char)
             offsets.append((index, end))
         index = end
+    keep = [i for i, char in enumerate(normalized) if char != ' ' or not (
+        (i and normalized[i-1] == '-') or (i+1 < len(normalized) and normalized[i+1] == '-'))]
+    normalized, offsets = [normalized[i] for i in keep], [offsets[i] for i in keep]
     if not needle:
         return None
     pattern = (r'(?<!\w)' if needle[0].isalnum() else '') + re.escape(needle) + (r'(?!\w)' if needle[-1].isalnum() else '')
@@ -118,7 +118,28 @@ def _catalog_sources(segment):
     return [source for source in segment.get('sources', [segment['text']]) if source]
 
 
-def prepare_catalog(bundle, segment, *, quarantine=False):
+def source_has_identifier(text, identifier):
+    if source_contains(text, identifier):
+        return True
+    expected = normalize_external_id(identifier)
+    explicit = re.findall(r'(?:UniProt(?:KB)?|PubChem(?:\s*CID)?|CHEBI|NCBI\s*Gene|GeneID|Entrez(?:\s*Gene)?|DrugBank|CID)\s*[:_]\s*[A-Z0-9]+(?:-\d+)?|https?://[^\s)\],;]+', text, flags=re.I)
+    return bool(expected) and any((normalize_external_id(value) or '').casefold() == expected.casefold() for value in explicit)
+
+
+def verified_alias(name, alias, entity_type, sources):
+    if normalize_entity_alias(name, entity_type) == normalize_entity_alias(alias, entity_type):
+        return True
+    for source in sources:
+        definitions = extract_abbreviations(source)
+        for short, long in ((name, alias), (alias, name)):
+            expansion = definitions.get(abbreviation_key(short))
+            if expansion and normalize_entity_alias(expansion, entity_type) == normalize_entity_alias(long, entity_type):
+                return True
+    return any(source_contains(source, f'{left} ({right})')
+        for source in sources for left, right in ((name, alias), (alias, name)))
+
+
+def prepare_catalog(bundle, segment, *, quarantine=False, allow_empty=False):
     """Keep grounded entries and explicitly isolate unsupported candidates.
 
     Strict callers still get an exception. Pipeline callers may quarantine
@@ -129,8 +150,10 @@ def prepare_catalog(bundle, segment, *, quarantine=False):
         return _prepare_catalog(bundle, segment)
     result = bundle.model_copy(deep=True)
     result.entities = []
+    result._candidate_indices = []
     repairs, rejections = list(bundle._catalog_repairs), list(bundle._catalog_rejections)
     for index, entity in enumerate(bundle.entities):
+        index = bundle._candidate_indices[index] if bundle._candidate_indices else index
         try:
             prepared = _prepare_catalog(type(bundle)(entities=[entity]), segment)
         except CatalogValidationError as exc:
@@ -138,8 +161,9 @@ def prepare_catalog(bundle, segment, *, quarantine=False):
                                'error': str(exc).replace('entity[0]', f'entity[{index}]')})
         else:
             result.entities.extend(prepared.entities)
+            result._candidate_indices.append(index)
             repairs.extend({**repair, 'entity_index': index} for repair in prepared._catalog_repairs)
-    if rejections and not result.entities:
+    if rejections and not result.entities and not allow_empty:
         raise CatalogValidationError(rejections[0]['error'] + '; no grounded catalog entries remain')
     result._catalog_repairs = repairs
     result._catalog_rejections = rejections
@@ -195,7 +219,7 @@ def _prepare_catalog(bundle, segment):
         aliases = []
         for alias in entity.aliases:
             location = locate(alias)
-            if location is None:
+            if location is None or not verified_alias(entity.mention, alias, entity.type, sources):
                 repairs.append({'entity_index': index, 'field': 'alias', 'original': alias, 'replacement': None})
                 continue
             alias_source, (alias_start, alias_end) = location
@@ -203,6 +227,12 @@ def _prepare_catalog(bundle, segment):
             if grounded_alias not in aliases:
                 aliases.append(grounded_alias)
         entity.aliases = aliases
+        if locate(entity.text) is None or identity_modifiers(entity.text) != identity_modifiers(entity.mention):
+            repairs.append({'entity_index': index, 'field': 'text', 'original': entity.text, 'replacement': entity.mention})
+            entity.text = entity.mention
+        if entity.normalized_id and not any(source_has_identifier(source, entity.normalized_id) for source in sources):
+            repairs.append({'entity_index': index, 'field': 'normalized_id', 'original': entity.normalized_id, 'replacement': None})
+            entity.normalized_id = None
     validate_catalog(result, segment)
     result._catalog_repairs = repairs
     return result
@@ -218,10 +248,11 @@ def validate_catalog(bundle, segment):
         mention = entity.mention or entity.text
         if not source_contains(entity.evidence, mention):
             raise CatalogValidationError(f"Catalog mention is absent from its evidence (entity[{index}])")
-        if entity.normalized_id and not any(source_contains(source, entity.normalized_id) for source in sources):
-            # The model must copy the literal identifier; normalization is local.
+        if entity.normalized_id and not any(source_has_identifier(source, entity.normalized_id) for source in sources):
+            # Only deterministic formatting of an explicit source ID is allowed.
             raise CatalogValidationError(f"Catalog standard ID was not explicitly supplied (entity[{index}])")
-        if any(not any(source_contains(source, alias) for source in sources) for alias in entity.aliases):
+        if any(not any(source_contains(source, alias) for source in sources)
+               or not verified_alias(mention, alias, entity.type, sources) for alias in entity.aliases):
             raise CatalogValidationError(f"Catalog alias is absent from its source segment (entity[{index}])")
 
 
@@ -229,15 +260,16 @@ def merge_catalog(records, abbreviations, document_id):
     """Merge exact identities and unambiguous, document-defined aliases only."""
     entries = {}
     for entity, location in records:
-        identity = entity_identity(entity.text, entity.type, entity.normalized_id, abbreviations, document_id)
+        identity = entity_identity(entity.text, entity.type, entity.normalized_id, abbreviations, document_id, entity.pending_merge)
         key = identity.canonical_key
         local_id = "E" + digest(key)[:24]
         entry = entries.setdefault(local_id, {
             "local_id": local_id, "text": identity.canonical_name, "type": identity.entity_type,
-            "normalized_id": identity.normalized_id, "aliases": [], "locations": [],
+            "normalized_id": normalize_external_id(entity.normalized_id) if entity.pending_merge else identity.normalized_id, "aliases": [], "locations": [],
             "identifiers": [identity.normalized_id] if identity.normalized_id else [],
             "ambiguity": entity.ambiguity or ("ambiguous abbreviation" if identity.context_ambiguous else None),
             "uncertainty_reason": entity.uncertainty_reason,
+            "pending_merge": entity.pending_merge,
         })
         entry["aliases"] = sorted(set(entry["aliases"] + list(identity.aliases) + entity.aliases))
         if location not in entry["locations"]:
@@ -258,9 +290,11 @@ def merge_catalog(records, abbreviations, document_id):
             alias_owners.setdefault(alias_key(entry,alias), set()).add(local_id)
     for local_id,entry in sorted(entries.items()):
         owners = alias_owners.get(alias_key(entry,entry['text']),set())
-        if len(owners) != 2 or entry.get('ambiguity') or (abbreviation_key(entry['text']) in abbreviations and abbreviations[abbreviation_key(entry['text'])] is None):
+        if len(owners) != 2 or entry.get('ambiguity') or entry.get('pending_merge') or (abbreviation_key(entry['text']) in abbreviations and abbreviations[abbreviation_key(entry['text'])] is None):
             continue
-        if any(entries[owner].get('ambiguity') for owner in owners):
+        if any(entries[owner].get('ambiguity') or entries[owner].get('pending_merge') for owner in owners):
+            continue
+        if len({identity_modifiers(entries[owner]['text']) for owner in owners}) > 1:
             continue
         a,b = sorted(root(owner) for owner in owners)
         if a == b:
@@ -345,69 +379,138 @@ def load_catalog(cur, document_id, version):
     return [row["entry"] for row in cur.fetchall()]
 
 
-def add_review(cur, document_id, version, kind, detail):
+def add_review(cur, document_id, version, kind, detail, status='pending'):
+    key = [kind, detail]
+    if kind in {'catalog_rejection', 'claim_rejection'}:
+        label = 'entity' if kind == 'catalog_rejection' else 'claim'
+        key = [kind, detail.get('chunk_id'), detail.get('start'), detail.get(label + '_index'), detail.get(label)]
     cur.execute("""
-        INSERT INTO review_items (document_id, version, item_key, kind, detail)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (document_id, version, item_key) DO UPDATE SET detail = EXCLUDED.detail
-    """, (document_id, version or "legacy", digest([kind, detail]), kind, Jsonb(detail)))
+        INSERT INTO review_items (document_id, version, item_key, kind, detail, status)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (document_id, version, item_key) DO UPDATE
+            SET detail=EXCLUDED.detail || CASE WHEN review_items.detail ? 'review_history'
+                THEN jsonb_build_object('review_history',review_items.detail->'review_history') ELSE '{}'::jsonb END,
+                status=CASE WHEN review_items.status='pending' THEN EXCLUDED.status ELSE review_items.status END
+    """, (document_id, version or "legacy", digest(key), kind, Jsonb(detail), status))
 
 
-def resolve_bundle(bundle, entries, chunk, version):
-    """Directory entries assist identity; each assertion remains chunk grounded."""
-    by_id = {e["local_id"]: e for e in entries}
+def resolve_bundle(bundle, entries, chunk, version, repairs=None):
+    """Resolve identities using complete grounded names, never a supplied ID alone."""
+    from app.facts import normalized_participants
+    from app.normalization import entity_family
+    repairs = repairs if repairs is not None else []
     omissions = []
     for claim in bundle.claims:
-        from app.facts import normalized_participants
         claim.participants = normalized_participants(claim)
-        for evidence in [claim.evidence, *claim.additional_evidence]:
-            if not source_contains(chunk["text"], evidence.sentence):
-                raise ValueError("Claim evidence is absent from the current chunk")
-        for role, entity in [("subject", claim.subject), ("object", claim.object), *[(p.role, p.entity) for p in claim.participants]]:
-            if entity.process and not entity.mention:
-                raise ValueError("Split process requires the original mention")
-            mention = entity.mention or entity.text
-            if not source_contains(chunk["text"], mention):
-                raise ValueError("Participant mention is absent from the current chunk")
-            entry = by_id.get(entity.directory_id)
-            if entity.directory_id and entry is None:
-                raise ValueError("Unknown document directory ID")
-            candidates = [e for e in entries if directory_identity_matches(entity, e, mention)]
-            if not entry and len(candidates) == 1 and not candidates[0]["ambiguity"]:
-                entry = candidates[0]
-            if not entry and not candidates and any(
-                entity_family(entity.type) == entity_family(e['type']) and any(
-                    normalize_entity_alias(entity.text,e['type']) == normalize_entity_alias(a,e['type'])
-                    for a in [e['text'],*e['aliases']]) for e in entries):
-                raise ValueError('Directory identity would discard source mention modifiers')
-            if entry:
-                names = [entry["text"], *entry["aliases"]]
-                if not directory_identity_matches(entity, entry, mention):
-                    raise ValueError("Directory ID does not match the source mention")
-                if entry["ambiguity"] and not source_contains(mention, entry["text"]):
-                    # No guessed interpretation of an ambiguous acronym.
-                    entity.directory_id = None
-                    entity.uncertainty_reason = "ambiguous directory alias"
-                    claim.review_reasons.append("ambiguous directory alias: " + mention)
-                    entry = None
-            if entry:
-                if entity.normalized_id and normalize_external_id(entity.normalized_id) not in entry.get('identifiers',[entry['normalized_id']]):
-                    raise ValueError("Claim ID conflicts with document directory")
-                entity.mention = mention
-                entity.text, entity.type = entry["text"], entry["type"]
-                entity.normalized_id, entity.directory_id = entry["normalized_id"], entry["local_id"]
+        span = source_span(chunk['text'], claim.evidence.sentence)
+        if span is None:
+            raise ValueError('Claim main evidence is absent from the current chunk')
+        claim.evidence.sentence = chunk['text'][span[0]:span[1]]
+        additional = []
+        for evidence in claim.additional_evidence:
+            span = source_span(chunk['text'], evidence.sentence)
+            if span is None:
+                repairs.append({'field': 'additional_evidence', 'original': evidence.model_dump(), 'replacement': None})
             else:
-                if entity.normalized_id and not source_contains(chunk["text"], entity.normalized_id):
-                    raise ValueError("Claim standard ID is absent from chunk and directory")
-                omissions.append((entity, {"chunk_id": chunk["id"], "mention": mention, "role": role}))
+                evidence.sentence = chunk['text'][span[0]:span[1]]
+                if evidence.sentence not in [claim.evidence.sentence, *[e.sentence for e in additional]]:
+                    additional.append(evidence)
+        claim.additional_evidence = additional
+        for evidence in [claim.evidence, *additional]:
+            if evidence.table_or_figure and not source_contains(chunk['text'], evidence.table_or_figure):
+                repairs.append({'field': 'table_or_figure', 'original': evidence.table_or_figure, 'replacement': None})
+                evidence.table_or_figure = None
+        evidence_texts = [claim.evidence.sentence, *[e.sentence for e in additional]]
+        for role, entity in [('subject', claim.subject), ('object', claim.object), *[(p.role, p.entity) for p in claim.participants]]:
             if entity.process and not entity.mention:
-                raise ValueError("Split process requires the original mention")
-            if not entity.process and re.search(r"\b(expression|secretion|activity)\b", entity.text, re.I):
-                claim.review_reasons.append("unsplit process-bearing name: " + entity.text)
-            if not entity.process and re.search(r"\b(expression|secretion|activity)\b", mention, re.I):
-                claim.review_reasons.append("unsplit process-bearing mention: " + mention)
-            if entity.type == "Other":
-                entity.uncertainty_reason = entity.uncertainty_reason or "insufficient type evidence"
+                raise ValueError('Split process requires the original mention')
+            mention = entity.mention or entity.text
+            span = source_span(chunk['text'], mention)
+            if span is None:
+                # A canonical directory name may be absent locally while its
+                # verified abbreviation is quoted in the current evidence.
+                aliases = []
+                for entry in entries:
+                    names = [entry['text'], *entry['aliases']]
+                    if entry.get('ambiguity') or not any(normalize_entity_alias(entity.text, entry['type']) == normalize_entity_alias(name, entry['type']) for name in names):
+                        continue
+                    for alias in names:
+                        replacement = alias
+                        if entity.process:
+                            name_span = source_span(mention, entity.text)
+                            if name_span is None:
+                                continue
+                            replacement = mention[:name_span[0]] + alias + mention[name_span[1]:]
+                        located = source_span(chunk['text'], replacement)
+                        if located and any(source_contains(text, replacement) for text in evidence_texts):
+                            aliases.append((entry['local_id'], replacement, located))
+                if len({entry_id for entry_id, _, _ in aliases}) == 1:
+                    _, replacement, span = max(aliases, key=lambda match: len(match[1]))
+                    repairs.append({'field': 'mention', 'role': role, 'original': mention, 'replacement': replacement, 'source_span': list(span)})
+                    mention = replacement
+            if span is None or not any(source_contains(text, mention) for text in evidence_texts):
+                raise ValueError(f'Participant {role} mention {mention!r} is absent from current chunk evidence')
+            mention = chunk['text'][span[0]:span[1]]
+            entity.mention = mention
+            identity_mention = mention
+            if entity.process:
+                # Strip only the declared process, retaining species/mutations/
+                # modifications in the original complete entity name.
+                identity_mention = re.sub(r'\b(?:increased|decreased|unchanged|of|'+entity.process.kind+r')\b', ' ', mention, flags=re.I)
+                identity_mention = re.sub(r'\s+', ' ', identity_mention).strip()
+                if not identity_mention:
+                    raise ValueError('Split process has no grounded entity name')
+            expanded = entity_identity(identity_mention, entity.type,
+                abbreviations=chunk.get('abbreviation_map', {})).canonical_name
+            candidates = [e for e in entries if not e.get('pending_merge')
+                if (entity.type in {None, 'Other'} or entity_family(e['type']) == entity_family(entity.type))
+                and identity_modifiers(e['text']) == identity_modifiers(expanded)
+                and (any(normalize_entity_alias(identity_mention, e['type']) == normalize_entity_alias(a, e['type'])
+                         for a in [e['text'], *e['aliases']]) or directory_identity_matches(entity, e, mention))]
+            entry = candidates[0] if len(candidates) == 1 else None
+            if entry and entry.get('ambiguity') and normalize_entity_alias(identity_mention, entry['type']) != normalize_entity_alias(entry['text'], entry['type']):
+                entry = None
+            if entry and entity.normalized_id and source_has_identifier(chunk['text'], entity.normalized_id):
+                identifiers = [normalize_external_id(value) for value in entry.get('identifiers', [entry.get('normalized_id')]) if value]
+                if normalize_external_id(entity.normalized_id) not in identifiers:
+                    entry = None
+            old_id = entity.directory_id
+            if entry:
+                if old_id != entry['local_id']:
+                    repairs.append({'field': 'directory_id', 'role': role, 'original': old_id, 'replacement': entry['local_id'], 'mention': mention})
+                if entity.normalized_id and normalize_external_id(entity.normalized_id) not in entry.get('identifiers', [entry['normalized_id']]):
+                    repairs.append({'field': 'normalized_id', 'role': role, 'original': entity.normalized_id, 'replacement': entry['normalized_id']})
+                entity.text, entity.type = entry['text'], entry['type']
+                entity.normalized_id, entity.directory_id = entry['normalized_id'], entry['local_id']
+                entity.pending_merge = entry.get('pending_merge', False)
+            else:
+                # Directory omissions and ambiguous aliases are valid source
+                # entities. Keep their full names as separate pending nodes.
+                entity.directory_id = None
+                if old_id:
+                    repairs.append({'field': 'directory_id', 'role': role, 'original': old_id, 'replacement': None,
+                                    'mention': mention, 'source_span': list(span),
+                                    'candidate_ids': [e['local_id'] for e in candidates]})
+                entity.text = identity_mention
+                if entity.normalized_id and not source_has_identifier(chunk['text'], entity.normalized_id):
+                    repairs.append({'field': 'normalized_id', 'role': role, 'original': entity.normalized_id, 'replacement': None})
+                    entity.normalized_id = None
+                entity.pending_merge = True
+                entity.uncertainty_reason = entity.uncertainty_reason or ('ambiguous directory alias' if candidates else 'pending catalog merge')
+                reason = entity.uncertainty_reason + ': ' + mention
+                if reason not in claim.review_reasons:
+                    claim.review_reasons.append(reason)
+                omissions.append((entity, {'chunk_id': chunk['id'], 'mention': mention, 'role': role}))
+            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', entity.text, re.I):
+                reason = 'unsplit process-bearing name: ' + entity.text
+                if reason not in claim.review_reasons:
+                    claim.review_reasons.append(reason)
+            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', mention, re.I):
+                reason = 'unsplit process-bearing mention: ' + mention
+                if reason not in claim.review_reasons:
+                    claim.review_reasons.append(reason)
+            if entity.type == 'Other':
+                entity.uncertainty_reason = entity.uncertainty_reason or 'insufficient type evidence'
     return omissions
 
 

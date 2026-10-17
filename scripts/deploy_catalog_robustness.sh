@@ -69,7 +69,7 @@ printf 'Running extraction/recovery and PostgreSQL regressions against disposabl
     -v "$root/tests:/verification/tests:ro" -v "$root/db:/verification/db:ro" \
     -w /verification -e PYTHONPATH=/app:/verification/tests -e PYTHONDONTWRITEBYTECODE=1 \
     -e LITKG_TEST_DATABASE_URL=postgresql://litkg_test:litkg_test_only@test-postgres:5432/litkg_test \
-    "$image" sh -ec 'python -m pip install --disable-pip-version-check --quiet httpx; python -m unittest test_api test_claims_robustness test_recovery test_catalog_robustness test_catalog_capacity test_knowledge_integration test_graph_integration test_entity_resolution_integration -q'
+    "$image" sh -ec 'python -m pip install --disable-pip-version-check --quiet httpx; python -m unittest test_api test_claim_robustness test_claims_robustness test_recovery test_catalog_robustness test_catalog_capacity test_knowledge_integration test_graph_integration test_entity_resolution_integration -q'
 cleanup
 trap - EXIT
 

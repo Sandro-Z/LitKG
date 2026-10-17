@@ -47,11 +47,12 @@ class CatalogGroundingTests(unittest.TestCase):
         self.assertEqual(fixed.entities[0].mention, 'Target one')
         self.assertTrue(any(r['field'] == 'mention' for r in fixed._catalog_repairs))
 
-    def test_absent_core_mention_and_invented_identifier_still_fail(self):
-        for value in [catalog('Invented protein'), catalog(normalized_id='UniProt:FAKE123')]:
-            with self.subTest(entity=value.entities[0].text):
-                with self.assertRaises(CatalogValidationError):
-                    prepare_catalog(value, {'text': SOURCE})
+    def test_absent_core_mention_fails_but_invented_optional_identifier_is_removed(self):
+        with self.assertRaises(CatalogValidationError):
+            prepare_catalog(catalog('Invented protein'), {'text': SOURCE})
+        fixed = prepare_catalog(catalog(normalized_id='UniProt:FAKE123'), {'text': SOURCE})
+        self.assertIsNone(fixed.entities[0].normalized_id)
+        self.assertTrue(any(r['field'] == 'normalized_id' for r in fixed._catalog_repairs))
 
     def test_identity_differences_and_subwords_are_not_fuzzy_matched(self):
         for source, name in [('AKT1 was measured.', 'AKT2'), ('cis-platin was used.', 'trans-platin'),
@@ -93,10 +94,11 @@ class CatalogGroundingTests(unittest.TestCase):
                           normalized_id='PubChem:999999999'),
         ])
         fixed = prepare_catalog(value, {'text':source}, quarantine=True)
-        self.assertEqual([e.text for e in fixed.entities], ['PCSK9'])
-        self.assertEqual([r['entity_index'] for r in fixed._catalog_rejections], [0,2])
+        self.assertEqual([e.text for e in fixed.entities], ['PCSK9', 'Agencourt AMPure XP beads'])
+        self.assertEqual([r['entity_index'] for r in fixed._catalog_rejections], [0])
         self.assertEqual(fixed._catalog_rejections[0]['entity']['text'], 'Beckman Coulson')
-        self.assertIn('standard ID', fixed._catalog_rejections[1]['error'])
+        self.assertIsNone(fixed.entities[1].normalized_id)
+        self.assertTrue(any(r['field'] == 'normalized_id' for r in fixed._catalog_repairs))
         validate_catalog(fixed, {'text':source})
         self.assertEqual(len(value.entities), 3)
 

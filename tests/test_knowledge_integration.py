@@ -246,7 +246,10 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         publish.assert_called_once()
         with self.connect() as conn:
             statuses = conn.execute('SELECT status FROM processing_attempts WHERE document_id=%s ORDER BY id',(self.doc,)).fetchall()
-            self.assertEqual([row['status'] for row in statuses],['failed','done'])
+            self.assertEqual([row['status'] for row in statuses],['done'])
+            audit = conn.execute('SELECT output FROM processing_attempts WHERE document_id=%s',(self.doc,)).fetchone()['output']
+            self.assertEqual(audit['repairs'][-1]['outcome'], 'repaired')
+            self.assertEqual(audit['repairs'][-1]['original']['text'], 'Invented protein')
 
     def test_catalog_quarantines_hallucinated_entry_and_resumes_with_visible_review(self):
         text = 'Agencourt AMPure XP beads (Beckman Coulter) and sequenced. PCSK9 was measured.'
@@ -267,14 +270,14 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             first = self.tasks.build_document_catalog.run(self.doc)
             second = self.tasks.build_document_catalog.run(self.doc)
         self.assertEqual(first,second)
-        model.assert_called_once()
+        self.assertEqual(model.call_count,3)
         self.assertEqual(publish.call_count,2)
         self.assertEqual(first['rejected_candidates'],1)
         with self.connect() as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM document_entities WHERE document_id=%s',(self.doc,)).fetchone()['n'],2)
             attempts = conn.execute('SELECT status,output FROM processing_attempts WHERE document_id=%s',(self.doc,)).fetchall()
             self.assertEqual(len(attempts),1)
-            self.assertEqual(attempts[0]['status'],'partial')
+            self.assertEqual(attempts[0]['status'],'done')
             self.assertEqual(attempts[0]['output']['raw'],output._raw_output)
             self.assertEqual(attempts[0]['output']['rejections'][0]['entity']['text'],'Beckman Coulson')
         reviews = self.client.get(f'/knowledge-bases/{self.kb}/reviews').json()['reviews']
@@ -300,7 +303,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertEqual(status['document']['catalog_status'],'failed')
         self.assertEqual(status['catalog_quality']['status'],'not_complete')
         with self.connect() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) AS n FROM processing_cache WHERE document_id=%s',(self.doc,)).fetchone()['n'],0)
+            self.assertTrue(conn.execute('SELECT payload FROM processing_cache WHERE document_id=%s',(self.doc,)).fetchone()['payload']['_processing_gap'])
 
     def test_quarantine_metadata_survives_later_segment_failure_and_cache_resume(self):
         texts = ['PCSK9 was measured.', 'A549 was measured.']
@@ -309,7 +312,11 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         first = CatalogBundle.model_validate({'entities':[
             {'text':'PCSK9','type':'Protein','evidence':texts[0]},
             {'text':'Invented protein','type':'Protein','evidence':'Invented protein'}]})
-        with patch.object(self.tasks,'extract_catalog',side_effect=[first, ValueError('controlled later failure')]):
+        def fail_later(heading, text, **kwargs):
+            if text == texts[1]:
+                raise ValueError('controlled later failure')
+            return first
+        with patch.object(self.tasks,'extract_catalog',side_effect=fail_later):
             with self.assertRaisesRegex(ValueError,'controlled later failure'):
                 self.tasks.build_document_catalog.run(self.doc,publish=False)
         last = CatalogBundle.model_validate({'entities':[{'text':'A549','type':'CellLine','evidence':texts[1]}]})
@@ -527,9 +534,9 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertIn('evidence',status['chunks'][0]['error'])
         self.assertTrue(any(a['stage']=='claims' and a['status']=='failed' for a in status['attempts']))
         with self.connect() as conn:
-            self.assertEqual(conn.execute("SELECT count(*) AS n FROM processing_cache WHERE document_id=%s AND stage='claims'",(self.doc,)).fetchone()['n'],0)
+            self.assertTrue(conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage='claims'",(self.doc,)).fetchone()['payload']['_processing_gap'])
 
-    def test_partial_claims_persist_and_retry_closes_shared_batch(self):
+    def test_local_claim_rejection_is_done_and_retry_repairs_only_pending_candidate(self):
         from app.schemas import Claim
         from test_claims_robustness import claim, SOURCE
         chunk = self.chunk(self.doc,SOURCE)
@@ -545,19 +552,33 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             return bad
         with patch.object(self.tasks,'extract_claims',side_effect=model):
             result = self.tasks.extract_chunk.run(chunk,catalog['catalog_version'],0,refresh=False)
-        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['status'],'done')
+        self.assertEqual(result['processing_gap_count'], 0)
         with self.connect() as conn:
-            self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'partial')
+            self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'done')
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM claims WHERE chunk_id=%s',(chunk,)).fetchone()['n'],1)
             self.assertGreater(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='claim_rejection'",(self.doc,)).fetchone()['n'],0)
-            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'partial')
-        good = ClaimBundle(claims=[Claim.model_validate(claim()), Claim.model_validate(claim('AKT1',predicate='BINDS_TO',evidence={'sentence':'Probe Q binds AKT1.'}))])
-        with patch.object(self.tasks,'extract_claims',return_value=good):
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'done')
+        with self.connect() as conn:
+            payload = conn.execute("SELECT cache_key,payload FROM processing_cache WHERE document_id=%s AND stage='claims'", (self.doc,)).fetchone()
+            for item in payload['payload']['_claim_rejections']:
+                item['original'] = item.pop('claim')
+            conn.execute("UPDATE processing_cache SET payload=%s WHERE document_id=%s AND stage='claims' AND cache_key=%s", (Jsonb(payload['payload']), self.doc, payload['cache_key']))
+            conn.execute("""UPDATE review_items SET detail=(detail-'claim') || jsonb_build_object('original',detail->'claim')
+                WHERE document_id=%s AND kind='claim_rejection'""", (self.doc,))
+        good = ClaimBundle(claims=[Claim.model_validate(claim('AKT1',predicate='BINDS_TO',evidence={'sentence':'Probe Q binds AKT1.'}))])
+        def correction(**kwargs):
+            self.assertIn('feedback', kwargs)
+            self.assertEqual(len(kwargs['previous_output']['claims']), 1)
+            return good
+        with patch.object(self.tasks,'extract_claims',side_effect=correction) as retry_model:
             retried = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        retry_model.assert_called_once()
         self.assertEqual(retried['status'],'done',str(retried))
         with self.connect() as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM claims WHERE chunk_id=%s',(chunk,)).fetchone()['n'],2)
             self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'done')
+            self.assertEqual(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='claim_rejection' AND status='pending'", (self.doc,)).fetchone()['n'],0)
 
     def test_stale_legacy_lock_and_new_heartbeat_protect_live_work(self):
         from app.recovery import reconcile_stalled
@@ -704,3 +725,183 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertTrue(cross)
         pairs={tuple(r['detail']['fact_ids']) for r in cross}
         self.assertEqual(len(pairs),1)  # The 48 h result is a different condition.
+
+    def test_local_rejections_finish_document_and_batch_and_retry_only_pending_candidate(self):
+        sentence = 'Aspirin reduces phosphorylated human AKT1 activity in A549 cells at 5 nM.'
+        chunk = self.chunk(self.doc, sentence)
+        catalog = CatalogBundle.model_validate({'entities': [
+            {'text': name, 'type': typ, 'evidence': sentence} for name, typ in
+            [('Aspirin','Drug'), ('AKT1','Protein'), ('A549','CellLine')]]})
+        with patch.object(self.tasks, 'extract_catalog', return_value=catalog):
+            built = self.tasks.build_document_catalog.run(self.doc, publish=False)
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id", (self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')", (batch, self.doc))
+        from test_claim_robustness import claim
+        valid = claim(additional_evidence=[{'sentence':'Invented redundant evidence.'}])
+        valid['subject']['directory_id'] = 'E_unknown'
+        invalid = claim(evidence={'sentence':'Aspirin cures all diseases.'})
+        output = ClaimBundle.model_validate({'claims': [valid, invalid]})
+        from app.schemas import parse_model_bundle
+        unresolved = parse_model_bundle({'claims': [], 'resolution': {'outcome':'unresolved', 'reason':'Needs a source check'}}, ClaimBundle)
+        with patch.object(self.tasks, 'extract_claims', side_effect=[output, unresolved]) as model:
+            self.tasks.extract_chunk.run(chunk, built['catalog_version'], 0, refresh=False)
+        self.assertEqual(model.call_count, 2)
+        state = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/processing').json()
+        self.assertEqual(state['document']['status'], 'done')
+        self.assertEqual(state['processing_quality']['rejected_candidates'], 1)
+        self.assertGreater(state['processing_quality']['pending_reviews'], 0)
+        batch_state = self.client.get(f'/ingestion-batches/{batch}').json()
+        self.assertEqual(batch_state['status'], 'done')
+        self.assertEqual(batch_state['processing_quality']['rejected_candidates'], 1)
+        docs = self.client.get(f'/knowledge-bases/{self.kb}/documents').json()['documents']
+        self.assertEqual(next(d for d in docs if d['id']==self.doc)['rejected_candidates'], 1)
+        with self.connect() as conn:
+            original = conn.execute('SELECT id,claim_json FROM claims WHERE document_id=%s', (self.doc,)).fetchone()
+            self.assertEqual(original['claim_json']['object']['text'], 'phosphorylated human AKT1')
+            self.assertTrue(original['claim_json']['object']['pending_merge'])
+            self.assertEqual(original['claim_json']['additional_evidence'], [])
+        excluded = parse_model_bundle({'claims': [], 'resolution': {'outcome':'excluded', 'reason':'The claimed cure is absent from the source'}}, ClaimBundle)
+        def correction(**kwargs):
+            self.assertIn('feedback', kwargs)
+            previous = kwargs['previous_output']['claims']
+            self.assertEqual(len(previous), 1)
+            self.assertEqual(previous[0]['evidence']['sentence'], invalid['evidence']['sentence'])
+            return excluded
+        with patch.object(self.tasks, 'extract_claims', side_effect=correction) as model, patch.object(self.tasks, 'extract_catalog', side_effect=AssertionError('Catalog must be reused')):
+            result = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        self.assertEqual(result['status'], 'done')
+        model.assert_called_once()
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT id,claim_json FROM claims WHERE document_id=%s', (self.doc,)).fetchone(), original)
+        state = self.client.get(f'/ingestion-batches/{batch}').json()
+        self.assertEqual(state['status'], 'done')
+        self.assertEqual(state['processing_quality']['excluded_candidates'], 1)
+        with patch.object(self.tasks, 'extract_claims', side_effect=AssertionError('Closed candidates must not be retried')):
+            self.assertEqual(self.tasks.maintain_knowledge_base.run(self.maintenance_job())['status'], 'done')
+        reviews = self.client.get(f'/knowledge-bases/{self.kb}/reviews').json()['reviews']
+        pending = next(r for r in reviews if r['kind']=='catalog_omission')
+        response = self.client.post(f"/knowledge-bases/{self.kb}/reviews/{pending['id']}?status=dismissed&note=manual-check")
+        self.assertEqual(response.status_code, 200)
+        with self.connect() as conn:
+            history = conn.execute('SELECT detail FROM review_items WHERE id=%s', (pending['id'],)).fetchone()['detail']['review_history']
+            self.assertEqual(history[-1]['to'], 'dismissed')
+
+    def test_real_chunk_truncation_remains_partial_even_when_other_chunk_is_done(self):
+        texts = ['Aspirin reduces AKT1.', 'Aspirin reduces EGFR.']
+        chunks = [self.chunk(self.doc, text, i) for i, text in enumerate(texts)]
+        with patch.object(self.tasks, 'extract_catalog', return_value=CatalogBundle(entities=[])):
+            built = self.tasks.build_document_catalog.run(self.doc, publish=False)
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id", (self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')", (batch, self.doc))
+        with patch.object(self.tasks, 'extract_claims', return_value=ClaimBundle(claims=[])):
+            self.tasks.extract_chunk.run(chunks[0], built['catalog_version'], 0, refresh=False)
+        with patch.object(self.tasks, 'extract_claims', side_effect=self.tasks.ModelOutputTruncatedError('controlled truncation','partial JSON')) as model:
+            with self.assertRaisesRegex(self.tasks.ClaimValidationError, 'ModelOutputTruncatedError'):
+                self.tasks.extract_chunk.run(chunks[1], built['catalog_version'], 0, refresh=False)
+        model.assert_called_once()
+        self.assertEqual(self.client.get(f'/ingestion-batches/{batch}').json()['status'], 'partial')
+        state = self.client.get(f'/knowledge-bases/{self.kb}/documents/{self.doc}/processing').json()
+        self.assertEqual(state['document']['status'], 'partial')
+        self.assertEqual([c['status'] for c in state['chunks']], ['done','failed'])
+
+    def test_shared_external_id_does_not_collapse_modified_identity_in_graph(self):
+        names = ['AKT1', 'human AKT1', 'mouse AKT1', 'phosphorylated AKT1', 'AKT1 T790M', 'AKT1 isoform 2']
+        chunk = self.chunk(self.doc, ' '.join('Aspirin reduces '+name+'.' for name in names))
+        for name in names:
+            self.store(self.doc, chunk, 'Aspirin reduces '+name+'.', subject={'text':'Aspirin','type':'Drug'},
+                object={'text':name,'type':'Protein','normalized_id':'UniProt:P12345'})
+        with self.connect() as conn:
+            rows = conn.execute('SELECT object_entity_id,claim_json FROM claims WHERE document_id=%s', (self.doc,)).fetchall()
+            self.assertEqual(len({r['object_entity_id'] for r in rows}), len(names))
+            self.assertEqual({r['claim_json']['object']['text'] for r in rows}, set(names))
+
+    def test_pending_node_is_not_adopted_by_global_alias_lookup(self):
+        name = 'Unregistered target ' + uuid.uuid4().hex
+        sentence = 'Aspirin reduces '+name+'.'
+        chunk = self.chunk(self.doc, sentence)
+        for pending in (True, False):
+            self.store(self.doc, chunk, sentence, subject={'text':'Aspirin','type':'Drug'},
+                object={'text':name,'type':'Protein','pending_merge':pending})
+        with self.connect() as conn:
+            count = conn.execute('SELECT count(DISTINCT object_entity_id) AS n FROM claims WHERE document_id=%s', (self.doc,)).fetchone()['n']
+            self.assertEqual(count, 2)
+
+    def test_failed_child_segment_keeps_siblings_and_retry_uses_split_cache(self):
+        from collections import Counter
+        from app.catalog import source_contains
+        sentences = ['Aspirin reduces AKT1.', 'Aspirin reduces EGFR.']
+        source = sentences[0] + ' ' + 'Background. '*5 + sentences[1]
+        chunk = self.chunk(self.doc, source)
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            built = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id", (self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')", (batch,self.doc))
+        failing, calls = [True], Counter()
+        def model(**kwargs):
+            text = kwargs['chunk_text']
+            calls[text] += 1
+            if len(text) > 80:
+                raise self.tasks.ModelOutputTruncatedError('controlled capacity', 'partial JSON')
+            if 'EGFR' in text and failing[0]:
+                raise ValueError('controlled child invocation failure')
+            return ClaimBundle.model_validate({'claims':[{
+                'subject':{'text':'Aspirin','type':'Drug'},'predicate':'REDUCES',
+                'object':{'text':name,'type':'Protein'},'evidence':{'sentence':sentence},'confidence':.9}
+                for name,sentence in zip(['AKT1','EGFR'], sentences) if source_contains(text,sentence)]})
+        with patch.dict(os.environ, {'CLAIMS_MIN_SEGMENT_CHARS':'25','CLAIMS_SEGMENT_CHARS':'3000'}), patch.object(self.tasks,'extract_claims',side_effect=model):
+            result = self.tasks.extract_chunk.run(chunk,built['catalog_version'],0,refresh=False)
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual(result['rejected_count'], 0)
+            self.assertGreater(result['processing_gap_count'], 0)
+            with self.connect() as conn:
+                kept = conn.execute('SELECT id FROM claims WHERE chunk_id=%s', (chunk,)).fetchall()
+                self.assertEqual(len(kept),1)
+                self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'partial')
+            successful = [text for text in calls if text!=source and 'EGFR' not in text]
+            self.assertTrue(successful)
+            failing[0] = False
+            retried = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        self.assertEqual(retried['status'], 'done',str(retried))
+        self.assertEqual(calls[source],1)
+        self.assertTrue(all(calls[text]==1 for text in successful))
+        with self.connect() as conn:
+            current = conn.execute('SELECT id FROM claims WHERE chunk_id=%s', (chunk,)).fetchall()
+            self.assertEqual(len(current),2)
+            self.assertTrue(all(row in current for row in kept))
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'done')
+            self.assertEqual(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='processing_gap' AND status='pending'",(self.doc,)).fetchone()['n'],0)
+
+    def test_manual_exclusion_is_not_retried_when_another_candidate_still_needs_repair(self):
+        from app.schemas import parse_model_bundle
+        source = 'Aspirin reduces AKT1.'
+        chunk = self.chunk(self.doc,source)
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            built = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        def row(name='AKT1', sentence=source):
+            return {'subject':{'text':'Aspirin','type':'Drug'},'predicate':'REDUCES',
+                'object':{'text':name,'type':'Protein'},'evidence':{'sentence':sentence},'confidence':.9}
+        initial = ClaimBundle.model_validate({'claims':[row(),row(sentence='Aspirin cures every disease.'),row('Imaginary protein')]})
+        unresolved = parse_model_bundle({'claims':[], 'resolution':{'outcome':'unresolved','reason':'Needs review'}},ClaimBundle)
+        with patch.object(self.tasks,'extract_claims',side_effect=[initial,unresolved,unresolved]):
+            self.assertEqual(self.tasks.extract_chunk.run(chunk,built['catalog_version'],0,refresh=False)['status'],'done')
+        with self.connect() as conn:
+            reviews = conn.execute("SELECT id,detail FROM review_items WHERE document_id=%s AND kind='claim_rejection' AND status='pending'",(self.doc,)).fetchall()
+        self.assertEqual(len(reviews),2)
+        dismissed = next(r for r in reviews if r['detail']['claim']['evidence']['sentence']!='Aspirin reduces AKT1.')
+        response = self.client.post(f"/knowledge-bases/{self.kb}/reviews/{dismissed['id']}?status=dismissed")
+        self.assertEqual(response.status_code,200)
+        def correction(**kwargs):
+            self.assertIn('feedback',kwargs)
+            self.assertEqual(len(kwargs['previous_output']['claims']),1)
+            self.assertEqual(kwargs['previous_output']['claims'][0]['object']['text'],'Imaginary protein')
+            return ClaimBundle.model_validate({'claims':[row()]})
+        with patch.object(self.tasks,'extract_claims',side_effect=correction) as model:
+            result = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        self.assertEqual(result['status'],'done',str(result))
+        model.assert_called_once()
+        with self.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='claim_rejection' AND status='pending'",(self.doc,)).fetchone()['n'],0)
+            self.assertEqual(conn.execute('SELECT status FROM review_items WHERE id=%s',(dismissed['id'],)).fetchone()['status'],'dismissed')

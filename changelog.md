@@ -6,6 +6,30 @@
 
 ## v3：全文目录、完整事实与证据问答
 
+### 完成度与结果质量分离（2026-10-17）
+
+完成的 chunk、文献和批次使用 `done`，候选拒绝、绑定失败和待复核项不会单独导致
+`partial`。截断、调用失败、全部候选无效且仍未解决等真实处理缺口继续显示失败或
+`partial`。目录和关系输出均逐项校验；保留必要参与者、条件及主证据，格式错误的可选
+字段和冗余附加证据可单独修复或移除，不再由一个候选丢弃整个 chunk。
+
+大小写、空白、Unicode 排版、角色格式和明确声明的别名采用确定性匹配。错误目录 ID
+可以按完整原文提及重新绑定；歧义或目录漏项保留完整实体，设置 `pending_merge`，使用
+文献内独立节点并进入复核。物种、突变、修饰位点和异构体继续参与身份，冲突标准 ID
+不被目录覆盖。同段出现的两个名称不自动成为别名；主证据和所有必要实体均须定位原文。
+
+`/processing` 新增 `processing_quality`；文献列表、批次明细和前端同步显示
+`rejected_candidates`、`excluded_candidates`、`repair_count`、`pending_reviews`。
+原 `catalog_quality` 保留兼容。纠错支持 repaired、excluded、unresolved 三种结果，
+只发送失败候选，保存原候选、修复和纠错输出；单纯空响应不能结案。重试复用成功结果，
+已确认排除的候选不重复纠错。人工复核保留状态历史，不会自动改写事实或证据。
+
+本补丁不新增 SQL 迁移；上游处理租约表的迁移要求仍按 README 执行。现有成功目录/关系分段缓存
+继续本地复核复用。`CATALOG_VALIDATION_ATTEMPTS` 默认 3；关系沿用
+`CLAIMS_VALIDATION_ATTEMPTS` 默认 2，也接受 `CLAIM_VALIDATION_ATTEMPTS` 别名优先覆盖，
+均限制在 1–5；截断不走语义纠错。
+旧的 `partial` 文献需在更新应用后运行 `retry`，不能仅把数据库状态改成 `done`。
+
 ### 目录输出截断修复
 
 `LLM output truncated` 表示模型返回了 `finish_reason=length`，该输出即使看起来是合法

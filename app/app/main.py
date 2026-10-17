@@ -12,7 +12,7 @@ from fastapi import (
     UploadFile,
 )
 
-from app.batch_status import sync_batch_status
+from app.batch_status import sync_batch_status, quality_columns
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_query import fetch_graph, fetch_relations, substring_pattern, current_claim_clause
@@ -119,7 +119,7 @@ def _batch_payload(
                 )
 
             cur.execute(
-                """
+                f"""
                 SELECT
                     item.id,
                     item.position,
@@ -131,7 +131,8 @@ def _batch_payload(
                     document.title,
                     document.doi,
                     document.created_at AS document_created_at,
-                    document.updated_at AS document_updated_at
+                    document.updated_at AS document_updated_at,
+                    {quality_columns()}
                 FROM ingestion_batch_items item
                 LEFT JOIN documents document ON document.id = item.document_id
                 WHERE item.batch_id = %s
@@ -144,6 +145,8 @@ def _batch_payload(
     if item_metadata:
         for item in items:
             item.update(item_metadata.get(item["position"], {}))
+    batch['processing_quality'] = {name: sum(item.get(name, 0) for item in items)
+        for name in ('rejected_candidates', 'excluded_candidates', 'repair_count', 'pending_reviews')}
     batch["items"] = items
     return batch
 
@@ -488,7 +491,7 @@ def list_knowledge_base_documents(
         with conn.cursor() as cur:
             _get_knowledge_base(cur, knowledge_base_id)
             cur.execute(
-                """
+                f"""
                 SELECT
                     document.id,
                     document.sha256,
@@ -497,6 +500,7 @@ def list_knowledge_base_documents(
                     document.doi,
                     document.status,
                     document.error,
+                    {quality_columns()},
                     document.created_at,
                     document.updated_at,
                     COUNT(DISTINCT chunk.id)::INT AS chunk_count,
@@ -943,7 +947,7 @@ def list_documents(limit: int = Query(50, ge=1, le=500)):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     document.id,
                     document.filename,
@@ -951,6 +955,7 @@ def list_documents(limit: int = Query(50, ge=1, le=500)):
                     document.doi,
                     document.status,
                     document.error,
+                    {quality_columns()},
                     document.created_at,
                     document.updated_at,
                     COUNT(DISTINCT chunk.id)::INT AS chunk_count,
@@ -1161,11 +1166,13 @@ def processing_status(knowledge_base_id: int, document_id: int):
             cur.execute('SELECT id,status,error,catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
             document = cur.fetchone()
             quality = _catalog_quality(cur, document_id, document['catalog_version'], document['catalog_status'])
+            cur.execute(f'SELECT {quality_columns()} FROM documents document WHERE document.id=%s', (document_id,))
+            processing_quality = cur.fetchone()
             cur.execute('SELECT id,chunk_index,status,error,extraction_version FROM chunks WHERE document_id=%s ORDER BY chunk_index', (document_id,))
             chunks = cur.fetchall()
             cur.execute('SELECT id,stage,version,status,error,created_at FROM processing_attempts WHERE document_id=%s ORDER BY id DESC LIMIT 100', (document_id,))
             attempts = cur.fetchall()
-    return {'document': document, 'catalog_quality': quality, 'chunks': chunks, 'attempts': attempts,
+    return {'document': document, 'catalog_quality': quality, 'processing_quality': processing_quality, 'chunks': chunks, 'attempts': attempts,
             'upgrade': {'reproject': 'No LLM; rebuilds facts/index/summaries from saved claims; cannot recover unrecorded semantics',
                         'reextract': 'LLM required; full saved text directory followed by all chunks',
                         'retry': 'Resumes failed stages with validated segment caches',
@@ -1228,10 +1235,12 @@ def reviews(knowledge_base_id: int, status: Literal['pending','resolved','dismis
 @app.post('/knowledge-bases/{knowledge_base_id}/reviews/{review_id}')
 def review_action(knowledge_base_id: int, review_id: int, status: Literal['pending','resolved','dismissed'], note: str = Query('', max_length=2000)):
     with get_conn() as conn:
-        row = conn.execute("""UPDATE review_items r SET status=%s,note=%s,updated_at=now()
+        row = conn.execute("""UPDATE review_items r SET status=%s,note=%s,updated_at=now(),
+            detail=jsonb_set(r.detail,'{review_history}',COALESCE(r.detail->'review_history','[]'::jsonb) ||
+                jsonb_build_array(jsonb_build_object('from',r.status,'to',%s::TEXT,'note',%s::TEXT,'at',now())))
             WHERE r.id=%s AND EXISTS (SELECT 1 FROM knowledge_base_documents m WHERE m.document_id=r.document_id AND m.knowledge_base_id=%s)
             AND (NOT (r.detail ? 'knowledge_base_id') OR r.detail->>'knowledge_base_id'=%s) RETURNING id,status,note""",
-            (status,note,review_id,knowledge_base_id,str(knowledge_base_id))).fetchone()
+            (status,note,status,note,review_id,knowledge_base_id,str(knowledge_base_id))).fetchone()
     if not row:
         raise HTTPException(404, 'Review item not found')
     return row

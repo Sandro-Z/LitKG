@@ -1,26 +1,51 @@
-"""Ground each assertion independently; rejected candidates remain auditable."""
-from app.catalog import digest, resolve_bundle
+"""Candidate-local source validation; incomplete assertions are never projected."""
+from app.catalog import resolve_bundle, digest
 from app.schemas import ClaimBundle
+from app.schemas import Participant
+from collections import Counter
+
+
+def retains_required_context(original, corrected):
+    roles = Counter(Participant.canonical_role(p['role']) for p in original.get('participants', [])
+        if isinstance(p, dict) and isinstance(p.get('role'), str)) if isinstance(original.get('participants', []), list) else Counter()
+    if roles - Counter(p.role for p in corrected.participants):
+        return False
+
+    def retains_fields(before, after):
+        if isinstance(before, dict):
+            return isinstance(after, dict) and all(key in after and retains_fields(value, after[key]) for key, value in before.items())
+        if isinstance(before, list):
+            return isinstance(after, list) and len(after) >= len(before) and all(retains_fields(a, b) for a, b in zip(before, after))
+        return True
+    return retains_fields(original.get('qualifiers') or {}, corrected.qualifiers)
 
 
 class ClaimValidationError(ValueError):
-    pass
+    def __init__(self, message, bundle=None):
+        super().__init__(message)
+        self.bundle = bundle
 
 
-def prepare_claims(bundle, entries, segment, version):
-    result = ClaimBundle(claims=[])
-    result._raw_output = bundle._raw_output
-    result._claim_rejections = list(bundle._claim_rejections)
-    for index, claim in enumerate(bundle.claims):
-        repair_id = bundle._repair_ids[index] if index < len(bundle._repair_ids) else None
+def prepare_claims(bundle, entries, chunk, version):
+    result = bundle.model_copy(deep=True)
+    result.claims = []
+    result._candidate_indices = []
+    result._repair_ids = []
+    for position, claim in enumerate(bundle.claims):
+        index = bundle._candidate_indices[position] if bundle._candidate_indices else position
+        repair_id = bundle._repair_ids[position] if position < len(bundle._repair_ids) else None
+        candidate = ClaimBundle(claims=[claim.model_copy(deep=True)])
+        repairs = []
         try:
-            resolve_bundle(ClaimBundle(claims=[claim.model_copy(deep=True)]), entries, segment, version)
+            resolve_bundle(candidate, entries, chunk, version, repairs)
         except ValueError as exc:
-            result._claim_rejections.append({'claim_index':index, 'repair_id':repair_id,
-                                            'error':str(exc), 'original':claim.model_dump(mode='json')})
+            result._claim_rejections.append({'claim_index': index, 'claim': claim.model_dump(mode='json'),
+                                             'error': str(exc), 'outcome': 'unresolved', 'repair_id': repair_id})
         else:
-            result.claims.append(claim)
+            result.claims.extend(candidate.claims)
+            result._candidate_indices.append(index)
             result._repair_ids.append(repair_id)
+            result._claim_repairs.extend({'claim_index': index, **repair} for repair in repairs)
     return result
 
 
@@ -34,12 +59,14 @@ def combine_claims(bundles):
                 seen.add(key)
                 result.claims.append(claim)
         result._claim_rejections.extend(bundle._claim_rejections)
+        result._claim_repairs.extend(bundle._claim_repairs)
+        result._processing_gaps.extend(bundle._processing_gaps)
     return result
 
 
 def repair_candidates(rejections):
-    return {'claims':[dict(item['original'], repair_id=str(index))
-                      if isinstance(item.get('original'), dict) else {'repair_id':str(index)}
+    return {'claims':[dict(item.get('claim', item.get('original')), repair_id=str(index))
+                      if isinstance(item.get('claim', item.get('original')), dict) else {'repair_id':str(index)}
                       for index,item in enumerate(rejections)]}
 
 
@@ -55,7 +82,8 @@ def merge_correction(original, correction):
         if isinstance(repair_id,str) and repair_id in valid and counts[repair_id] == 1:
             resolved.add(repair_id)
             accepted.append(claim)
-    result = ClaimBundle(claims=[*original.claims, *accepted])
+    result = original.model_copy(deep=True)
+    result.claims.extend(accepted)
     result._claim_rejections = [item for index,item in enumerate(original._claim_rejections)
                                 if str(index) not in resolved]
     return result
