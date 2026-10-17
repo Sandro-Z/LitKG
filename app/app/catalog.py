@@ -5,6 +5,7 @@ import re
 import unicodedata
 
 from psycopg.types.json import Jsonb
+from app.processes import PROCESS_CONTEXT_WORDS, PROCESS_PATTERN
 
 from app.normalization import (
     abbreviation_key, entity_family, entity_identity, extract_abbreviations,
@@ -13,12 +14,12 @@ from app.normalization import (
     identity_modifiers,
 )
 
-PROCESSING_VERSION = "litkg-v3.3"
-CATALOG_VERSION = "catalog-v3-quarantine"
-# The model contract is unchanged. Revalidate existing successful segment
-# caches locally rather than sending the whole literature collection again.
+PROCESSING_VERSION = "litkg-v3.4-microbiome"
+CATALOG_VERSION = "catalog-v4-microbiome"
+# Vocabulary and prompt versions are part of cache keys; the transport stays
+# unchanged, but old extractions must not mask newly supported entity types.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v4-resumable"
+EXTRACTION_VERSION = "claims-v5-controlled-microbiome"
 
 
 def digest(value):
@@ -366,10 +367,7 @@ def directory_identity_matches(entity, entry, mention):
         # stereochemistry and other unknown modifiers part of the identity.
         context = normalize_alias(mention[:span[0]] + ' ' + mention[span[1]:])
         words = re.findall(r'\w+', context)
-        neutral = {'the','a','an','of','level','levels','expression','secretion','activity',
-                   'protein','gene','mrna','serum','plasma','concentration','concentrations',
-                   'increased','decreased','high','low','amount','amounts','proportion','percentage'}
-        if words and all(word in neutral for word in words):
+        if words and all(word in PROCESS_CONTEXT_WORDS for word in words):
             return True
     return False
 
@@ -456,8 +454,14 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
             if entity.process:
                 # Strip only the declared process, retaining species/mutations/
                 # modifications in the original complete entity name.
-                identity_mention = re.sub(r'\b(?:increased|decreased|unchanged|of|'+entity.process.kind+r')\b', ' ', mention, flags=re.I)
-                identity_mention = re.sub(r'\s+', ' ', identity_mention).strip()
+                name_span = source_span(mention, entity.text)
+                if name_span and directory_identity_matches(entity, {'text':entity.text, 'type':entity.type, 'aliases':[]}, mention):
+                    identity_mention = mention[name_span[0]:name_span[1]]
+                else:
+                    kind = re.escape(entity.process.kind)
+                    identity_mention = re.sub(r'\b(?:relative|absolute)\s+(?='+kind+r'\b)', '', mention, flags=re.I)
+                    identity_mention = re.sub(r'\b(?:increased|decreased|unchanged|of|'+kind+r')\b', ' ', identity_mention, flags=re.I)
+                    identity_mention = re.sub(r'\s+', ' ', identity_mention).strip()
                 if not identity_mention:
                     raise ValueError('Split process has no grounded entity name')
             expanded = entity_identity(identity_mention, entity.type,
@@ -501,11 +505,12 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)
                 omissions.append((entity, {'chunk_id': chunk['id'], 'mention': mention, 'role': role}))
-            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', entity.text, re.I):
+            aspect_entity = entity.type not in {'BiologicalProcess', 'MicrobialFunction', 'DiversityMetric', 'Assay', 'Pathway'}
+            if aspect_entity and not entity.process and PROCESS_PATTERN.search(entity.text):
                 reason = 'unsplit process-bearing name: ' + entity.text
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)
-            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', mention, re.I):
+            if aspect_entity and not entity.process and PROCESS_PATTERN.search(mention):
                 reason = 'unsplit process-bearing mention: ' + mention
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)

@@ -71,11 +71,11 @@ def normalize_alias(value: str | None) -> str:
 
 def entity_family(entity_type: str) -> str:
     canonical = normalize_entity_type(entity_type)
-    return "Chemical" if canonical in {"Drug", "Compound"} else canonical
+    return "Chemical" if canonical in {"Drug", "Compound", "Metabolite"} else canonical
 
 
 def compatible_entity_types(entity_type: str) -> list[str]:
-    return ["Drug", "Compound"] if entity_family(entity_type) == "Chemical" else [entity_type]
+    return ["Drug", "Compound", "Metabolite"] if entity_family(entity_type) == "Chemical" else [entity_type]
 
 
 def normalize_entity_alias(value: str | None, entity_type: str) -> str:
@@ -255,8 +255,10 @@ def entity_identity(
         "the compound", "the drug", "the protein", "the gene",
     }
     local_label = non_specific or bool(
-        entity_family(canonical_type) == "Chemical"
-        and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I)
+        canonical_type in {"SequenceFeature", "StudyGroup", "Biospecimen"}
+        or (canonical_type == "Genome" and re.fullmatch(r"(?:MAG|bin|genome)[_ #.-]*\d+[a-z]?", canonical_name, flags=re.I))
+        or (entity_family(canonical_type) == "Chemical"
+            and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I))
     )
     document_scoped = bool(
         document_id is not None and external_id is None

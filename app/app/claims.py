@@ -3,6 +3,7 @@ from app.catalog import resolve_bundle, digest
 from app.schemas import ClaimBundle
 from app.schemas import Participant
 from collections import Counter
+from app.predicate_registry import normalize_registered_claim
 
 
 def retains_required_context(original, corrected):
@@ -38,6 +39,7 @@ def prepare_claims(bundle, entries, chunk, version):
         repairs = []
         try:
             resolve_bundle(candidate, entries, chunk, version, repairs)
+            normalize_registered_claim(candidate.claims[0], repairs)
         except ValueError as exc:
             result._claim_rejections.append({'claim_index': index, 'claim': claim.model_dump(mode='json'),
                                              'error': str(exc), 'outcome': 'unresolved', 'repair_id': repair_id})

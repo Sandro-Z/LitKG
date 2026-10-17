@@ -7,6 +7,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from app.schemas import Claim, ClaimBundle, CatalogBundle, parse_model_bundle
 from pydantic import ValidationError
 from app.entity_types import TYPE_DEFINITIONS
+from app.processes import PROCESS_DEFINITIONS
+from app.predicate_registry import predicate_prompt, EVIDENCE_CATEGORIES
 
 
 LLM_BASE_URL = os.environ["LLM_BASE_URL"]
@@ -16,9 +18,9 @@ LLM_REVISION = os.environ.get("LLM_REVISION", "")
 LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "300"))
 LLM_MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "4096"))
 CATALOG_MAX_OUTPUT_TOKENS = int(os.environ.get("CATALOG_MAX_OUTPUT_TOKENS", str(LLM_MAX_OUTPUT_TOKENS)))
-CATALOG_PROMPT_VERSION = "catalog-prompt-v2"
+CATALOG_PROMPT_VERSION = "catalog-prompt-v3-microbiome"
 CLAIMS_MAX_OUTPUT_TOKENS = int(os.environ.get("CLAIMS_MAX_OUTPUT_TOKENS", "8192"))
-CLAIMS_PROMPT_VERSION = "claims-prompt-v4-grounded"
+CLAIMS_PROMPT_VERSION = "claims-prompt-v5-controlled-microbiome"
 
 client = OpenAI(
     base_url=LLM_BASE_URL,
@@ -92,7 +94,7 @@ def build_extraction_messages(section_title: str, chunk_text: str, directory=Non
         {
             "role": "system",
             "content": (
-                "你是生物医学文献结构化信息抽取器。"
+                "你是肠道微生物组及生物医学文献结构化信息抽取器。"
                 "只根据用户提供的文献片段抽取事实。"
                 "不要使用外部知识。"
                 "不要输出推理过程。"
@@ -108,7 +110,7 @@ def build_extraction_messages(section_title: str, chunk_text: str, directory=Non
 /no_think
 
 任务：
-从下面的文献片段中抽取化合物、药物、蛋白、基因、疾病、细胞系、实验条件之间的结构化关系。
+从下面的肠道微生物组文献片段中抽取微生物、菌群、代谢物、饮食、干预、宿主、疾病及原有生物医药实体之间的结构化关系。
 
 当前 section：
 {section_title}
@@ -119,16 +121,39 @@ def build_extraction_messages(section_title: str, chunk_text: str, directory=Non
 扩展字段与统一类型定义（优先于上面的旧示例）：
 {json.dumps(TYPE_DEFINITIONS, ensure_ascii=False)}
 每个实体还可包含 directory_id、mention（原始完整提及）、uncertainty_reason、
-process: {{"kind":"expression|secretion|activity", "direction":"increased|decreased|unchanged|unspecified"}}。
-text 必须是实体本身的名称；表达、分泌、活性及变化方向放在 process，禁止丢失语义。
+process: {{"kind":"{'|'.join(PROCESS_DEFINITIONS)}", "direction":"increased|decreased|unchanged|unspecified"}}。
+过程定义：{json.dumps(PROCESS_DEFINITIONS, ensure_ascii=False)}
+text 必须是实体本身的名称；表达、丰度、定植、代谢等方面及变化方向放在该实体的 process，禁止丢失语义。
+process 附着到实际改变的实体；例如菌的丰度放在菌上，丁酸浓度放在丁酸上，群落多样性放在群落上。
+主体或参与者的过程也放在其自身 process 中，不能全部归给宾语。
+qualifiers.metric 保留具体指标及 relative/absolute；prevalence 不是 abundance，concentration 不是 production。
 突变、修饰、异构体、立体构型属于身份，必须留在 text 中。
 claim 可增加 participants: [{{"role":"cell_line|species|assay|tissue|...", "entity":{{...}}}}]，
 additional_evidence: [{{"sentence":"exact source quote", "page":null}}]、review_reasons: ["原因"]。
 剂量、时间、数值和单位放 qualifiers；细胞系、物种、方法等具名实体同时作为带角色参与者。
+宿主、肠道部位、样本、饮食、干预、供体/受体和研究组也使用带角色 participants；不要拼入实体名或谓词。
+菌株与物种、ASV/OTU 与分类单元、群落成员与分类包含必须区分。ASV/OTU、研究组和样本标签按文献局部身份处理。
 无法可靠拆分时保留完整名称并填写 review_reasons；Other 须附 uncertainty_reason，禁止强制归类。
 相关全文目录仅辅助身份，不是证据或封闭白名单；目录外实体可以报告，关系必须由当前片段支持。
 仅在原文提及与目录唯一匹配时使用 directory_id，歧义缩写不得猜测。
 目录：{json.dumps(directory or [], ensure_ascii=False)}
+
+受控谓词注册表（仅可使用下列基础谓词；S/O 是允许的实体类型，含其子类型，* 表示不限）：
+{predicate_prompt()}
+不要创建带物种、样本、方向或疾病名的新谓词；不要输出 INCREASES、REDUCES、INCREASED_IN 等方向词作为关系。
+AFFECTS 的实际变化方面和方向必须用 object.process；保留 ACTIVATES/INHIBITS 表示原文明示的调控机制。
+相关、组间差异、预测和生态机制不能互换：正/负相关不是促进/抑制，共现不是竞争、交叉喂养或感染。
+CORRELATED_WITH 使用 qualifiers.association_direction=positive|negative|unspecified。
+DIFFERS_BETWEEN：subject 是被测实体，object 是焦点 StudyGroup；qualifiers 必须含 comparison_group、reference_group、metric、direction。
+direction 是焦点组相对于参照组的 increased|decreased|unchanged|unspecified；若 subject.process 有方向则须一致。
+两组还必须各作为一个 role=comparison_group/reference_group、type=StudyGroup 的具名参与者，标签须与 qualifiers 对应。
+TRANSFORMS 的宾语是底物，产物放 role=product 的参与者；CROSS_FEEDS 的两端是微生物，交叉喂养物质放 role=mediator。
+PREDICTS 使用 qualifiers.prediction_target 描述预测结局；AUC 等性能放 qualifiers，不能声称因果。
+qualifiers.evidence_type 仅按当前片段选择：{json.dumps(EVIDENCE_CATEGORIES, ensure_ascii=False)}。
+预测功能和基因组注释使用 evidence_type=computational_prediction 且 knowledge_level=predicted；实验结果使用 experimental。
+PRODUCES/CONSUMES/TRANSFORMS/ENCODES/CATALYZES 可记录预测，但不能改写为实验验证；生态机制不能由共现网络或功能预测推断。
+当前片段没有交代研究设计时不猜测 evidence_type，省略并在 review_reasons 说明；缺少限定字段也不编造。
+注册表给出的逆关系和对称性只描述语义，不允许据此生成没有原文证据的额外边。
 
 抽取规则：
 1. 只抽取文本中明确支持的事实。
@@ -137,7 +162,7 @@ additional_evidence: [{{"sentence":"exact source quote", "page":null}}]、review
 4. 如果是推测、假设、背景介绍、未来工作，speculative=true。
 5. 不确定时不要抽取。
 6. 只有片段明确给出 ChEBI、PubChem CID、UniProt、NCBI Gene、DrugBank
-   等标准数据库 ID 时才填写 normalized_id；否则填 null，禁止推断或编造。
+   或微生物分类/菌株/基因组等标准数据库 ID 时才填写 normalized_id；否则填 null，禁止推断或编造。
 7. 严格输出 JSON。
 8. 顶层字段必须是 claims。
 9. 不要输出解释。
@@ -261,7 +286,13 @@ def extract_catalog(section_title, text, *, feedback=None, previous_output=None)
 "mention":"原文提及", "aliases":["本段明示别名或缩写"], "normalized_id":null,
 "evidence":"包含提及的精确原文", "ambiguity":null, "uncertainty_reason":null}}]}}。
 类型定义：{json.dumps(TYPE_DEFINITIONS, ensure_ascii=False)}。
-实体与表达/分泌/活性等过程分开，不能把条件放入名称。保留身份性的物种、突变、修饰、异构体和立体构型。
+本文献领域为肠道微生物组，保留原有生物医药类型，同时覆盖分类单元、菌株、菌群、微生物组、ASV/OTU、基因组、代谢物、饮食、FMT 等干预、样本、宿主和研究组。
+分类单元不是群落，菌株不是物种，ASV/OTU 不能推断为菌种；微生物组与 microbiota 按原文区分。
+宿主物种用 Organism，带实验特性的模型用 ExperimentalModel；药物仍用 Drug，具体益生菌菌株用 MicrobialStrain，益生菌治疗用 Intervention。
+实体与过程分开，不能把条件放入名称。必要时加 process: {{"kind":"{'|'.join(PROCESS_DEFINITIONS)}","direction":"increased|decreased|unchanged|unspecified"}}。
+text 保留实体名称，mention 保留原始过程提及；过程种类包括表达、分泌、活性、丰度、检出率、生长、定植、生产、降解、转化、浓度和多样性。
+具体 diversity metric 是 DiversityMetric；群落多样性变化用群落实体的 process.kind=diversity。
+保留身份性的物种、菌株编号、突变、修饰、异构体和立体构型。
 只能复制本段明确给出的标准 ID 字面值，不推断或编造。没有实体时输出 entities 空列表。
 别名必须本段明示；短名称多义时标记 ambiguity。不确定类型保留 Other 并解释。
 严格原文约束：mention 必填，只能逐字复制本段或上述标题中的原始名称，不得展开缩写、改写、翻译、补全或纠正拼写。

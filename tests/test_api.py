@@ -31,6 +31,20 @@ class ApiTests(unittest.TestCase):
         cursor.fetchall.return_value = rows or []
         return context, cursor
 
+    def test_shared_microbiome_vocabularies_are_available_without_database_access(self):
+        with patch.object(self.main, 'get_conn', side_effect=AssertionError('Vocabulary is local')):
+            types = self.client.get('/entity-types')
+            predicates = self.client.get('/predicate-types')
+        self.assertEqual(types.status_code, 200)
+        self.assertIn('Protein', types.json()['types'])
+        self.assertIn('MicrobialStrain', types.json()['types'])
+        self.assertEqual(predicates.status_code, 200)
+        registry = predicates.json()
+        self.assertEqual(registry['type_parents']['MicrobialStrain'], 'MicrobialTaxon')
+        self.assertIn('diversity', registry['process_kinds'])
+        self.assertTrue(registry['predicates']['CORRELATED_WITH']['symmetric'])
+        self.assertIn('metric', registry['predicates']['DIFFERS_BETWEEN']['required_qualifiers'])
+
     def test_both_claims_endpoints_return_document_and_page_metadata(self):
         claim = {
             "id": 99, "document_id": 5, "chunk_id": 8,

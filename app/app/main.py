@@ -25,7 +25,9 @@ from app.ingestion import (
 from app.normalization import normalize_entity_type, normalize_predicate
 from app.provenance import add_claim_location
 from app.schemas import KnowledgeBaseCreate, QuestionRequest, MaintenanceRequest
-from app.entity_types import TYPE_DEFINITIONS
+from app.entity_types import TYPE_DEFINITIONS, TYPE_PARENTS
+from app.predicate_registry import REGISTRY_VERSION, PREDICATES, EVIDENCE_CATEGORIES, QUALIFIER_DEFINITIONS
+from app.processes import PROCESS_DEFINITIONS
 from app.catalog import PROCESSING_VERSION, load_catalog
 from app.recovery import reconcile_stalled
 from app.retrieval import fetch_facts, retrieve, answer_question
@@ -1125,6 +1127,13 @@ def get_document_graph(
 @app.get('/entity-types')
 def entity_types():
     return {"version": PROCESSING_VERSION, "types": TYPE_DEFINITIONS}
+
+
+@app.get('/predicate-types')
+def predicate_types():
+    return {"version": REGISTRY_VERSION, "predicates": PREDICATES,
+            "qualifiers": QUALIFIER_DEFINITIONS, "evidence_categories": EVIDENCE_CATEGORIES,
+            "process_kinds": PROCESS_DEFINITIONS, "type_parents": TYPE_PARENTS}
 
 
 def _require_member(cur, knowledge_base_id, document_id):
