@@ -27,6 +27,7 @@ from app.provenance import add_claim_location
 from app.schemas import KnowledgeBaseCreate, QuestionRequest, MaintenanceRequest
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import PROCESSING_VERSION, load_catalog
+from app.recovery import reconcile_stalled
 from app.retrieval import fetch_facts, retrieve, answer_question
 from app.tasks import (
     parse_document,
@@ -408,6 +409,55 @@ def get_knowledge_base(knowledge_base_id: int):
             )
             knowledge_base["stats"] = cur.fetchone()
     return {"knowledge_base": knowledge_base}
+
+
+@app.put("/knowledge-bases/{knowledge_base_id}")
+def update_knowledge_base(knowledge_base_id: int, payload: KnowledgeBaseCreate):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Knowledge base name cannot be blank")
+    description = (payload.description or "").strip() or None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE knowledge_bases
+                SET name = %s, description = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING id, slug, name, description, created_at, updated_at""",
+                (name, description, knowledge_base_id),
+            )
+            knowledge_base = cur.fetchone()
+            if not knowledge_base:
+                raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return knowledge_base
+
+
+@app.delete("/knowledge-bases/{knowledge_base_id}")
+def delete_knowledge_base(
+    knowledge_base_id: int,
+    confirm_name: str = Query(..., min_length=1, max_length=200),
+):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Serialize renames/deletes and verify the name inside the transaction.
+            cur.execute(
+                "SELECT id, name FROM knowledge_bases WHERE id = %s FOR UPDATE",
+                (knowledge_base_id,),
+            )
+            knowledge_base = cur.fetchone()
+            if not knowledge_base:
+                raise HTTPException(status_code=404, detail="Knowledge base not found")
+            if confirm_name != knowledge_base["name"]:
+                raise HTTPException(status_code=409, detail="知识库名称不匹配，请刷新后输入完整名称。")
+            cur.execute(
+                "DELETE FROM review_items WHERE detail->>'knowledge_base_id' = %s",
+                (str(knowledge_base_id),),
+            )
+            # Foreign keys cascade KB-owned memberships, batches, indices and jobs.
+            # Documents, PDFs and extracted facts are shared across knowledge bases.
+            cur.execute("DELETE FROM knowledge_bases WHERE id = %s", (knowledge_base_id,))
+    return {"status": "deleted", "knowledge_base_id": knowledge_base_id,
+            "name": knowledge_base["name"]}
 
 
 @app.post(
@@ -1107,6 +1157,7 @@ def processing_status(knowledge_base_id: int, document_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
             _require_member(cur, knowledge_base_id, document_id)
+            reconcile_stalled(cur, document_id=document_id)
             cur.execute('SELECT id,status,error,catalog_version,catalog_status,catalog_error,pipeline_generation FROM documents WHERE id=%s', (document_id,))
             document = cur.fetchone()
             quality = _catalog_quality(cur, document_id, document['catalog_version'], document['catalog_status'])
@@ -1197,7 +1248,7 @@ def start_maintenance(knowledge_base_id: int, request: MaintenanceRequest):
             cur.execute('INSERT INTO maintenance_jobs (id,knowledge_base_id,document_id,mode) VALUES (%s::UUID,%s,%s,%s)',
                         (job_id,knowledge_base_id,request.document_id,request.mode))
     try:
-        maintain_knowledge_base.apply_async(args=[job_id], queue='extract')
+        maintain_knowledge_base.apply_async(args=[job_id], queue='extract', task_id=job_id)
     except Exception as exc:
         with get_conn() as conn:
             conn.execute("UPDATE maintenance_jobs SET status='failed',error=%s WHERE id=%s::UUID", (f'Queue publication failed ({type(exc).__name__})',job_id))

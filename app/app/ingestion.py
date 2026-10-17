@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+from app.recovery import reconcile_stalled
 
 
 class UploadRejected(ValueError):
@@ -119,6 +120,10 @@ def register_document(
         )
         row = cur.fetchone()
 
+    if not inserted and row['status'] in {'parsing','cataloging','extracting','chunked'}:
+        if reconcile_stalled(cur, document_id=row['id']):
+            cur.execute('SELECT id,status FROM documents WHERE id=%s', (row['id'],))
+            row = cur.fetchone()
     # Never start a second parse while the same content is already active.
     # force_reprocess applies to a completed document; active work is reused.
     should_queue = (

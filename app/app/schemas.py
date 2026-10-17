@@ -54,6 +54,8 @@ class Claim(BaseModel):
 class ClaimBundle(BaseModel):
     claims: list[Claim]
     _raw_output: Optional[str] = PrivateAttr(default=None)
+    _claim_rejections: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _repair_ids: list[Any] = PrivateAttr(default_factory=list)
 
 
 class CatalogEntity(Entity):

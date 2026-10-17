@@ -107,6 +107,12 @@ def rebuild_derived(cur, kb, document_ids=None):
     Pages are extractive, avoiding another LLM pass; every statement links to
     source assertions. The small overview is a paginated catalog, not evidence.
     """
+    # A queued refresh may outlive its KB. Hold a parent-row lock so deletion
+    # waits for this transaction, and skip stale work after deletion commits.
+    cur.execute("SELECT id FROM knowledge_bases WHERE id=%s FOR KEY SHARE", (kb,))
+    if not cur.fetchone():
+        return {"changed_count": 0, "document_count": 0,
+                "warnings": ["Knowledge base was deleted; skipped derived refresh"]}
     warnings, changed = [], 0
     cur.execute("SELECT document_id FROM knowledge_base_documents WHERE knowledge_base_id=%s ORDER BY document_id", (kb,))
     members = [r["document_id"] for r in cur.fetchall()]

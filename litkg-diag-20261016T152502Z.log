@@ -1,0 +1,1533 @@
+
+=== UTC / checked-out revision ===
+2026年 10月 16日 星期五 15:25:02 UTC
+17a86d9f5e481b45fbcf44e61961d7d2d52124a9
+
+=== Services ===
+NAME                   IMAGE                    COMMAND                   SERVICE          CREATED          STATUS          PORTS
+litkg-api              litkg-api                "uvicorn app.main:ap…"   api              55 minutes ago   Up 55 minutes   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+litkg-frontend         litkg-frontend           "streamlit run /fron…"   frontend         4 hours ago      Up 4 hours      0.0.0.0:8501->8501/tcp, [::]:8501->8501/tcp
+litkg-grobid           lfoppiano/grobid:0.8.0   "/tini -s -- ./grobi…"   grobid           2 months ago     Up 2 days       0.0.0.0:8070->8070/tcp, [::]:8070->8070/tcp
+litkg-postgres         pgvector/pgvector:pg16   "docker-entrypoint.s…"   postgres         2 months ago     Up 2 days       0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp
+litkg-redis            redis:7                  "docker-entrypoint.s…"   redis            2 months ago     Up 2 days       0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp
+litkg-worker-extract   litkg-worker_extract     "celery -A app.celer…"   worker_extract   55 minutes ago   Up 55 minutes   
+litkg-worker-parse     litkg-worker_parse       "celery -A app.celer…"   worker_parse     55 minutes ago   Up 55 minutes   
+
+=== Runtime source hashes (against local manifest) ===
+
+--- api ---
+app/app/catalog.py: OK
+app/app/llm.py: OK
+app/app/schemas.py: OK
+app/app/tasks.py: OK
+
+--- worker_parse ---
+app/app/catalog.py: OK
+app/app/llm.py: OK
+app/app/schemas.py: OK
+app/app/tasks.py: OK
+
+--- worker_extract ---
+app/app/catalog.py: OK
+app/app/llm.py: OK
+app/app/schemas.py: OK
+app/app/tasks.py: OK
+
+=== Database / grounded-output evidence (worker_extract runtime) ===
+
+--- allowlisted configuration (no credentials) ---
+{
+  "LLM_MODEL": "Qwen3.6-35B-A3B-FP8",
+  "LLM_REVISION": "<unset>",
+  "LLM_TIMEOUT_SECONDS": "300",
+  "LLM_MAX_OUTPUT_TOKENS": "4096",
+  "CATALOG_SEGMENT_CHARS": "3000",
+  "CATALOG_MIN_SEGMENT_CHARS": "500",
+  "CATALOG_MAX_OUTPUT_TOKENS": "4096",
+  "CATALOG_VALIDATION_ATTEMPTS": "<unset>",
+  "effective_catalog_output_tokens": 4096,
+  "catalog_version": "catalog-v2-grounded-repair",
+  "prompt_version": "catalog-prompt-v2"
+}
+
+--- recent documents; compare the stuck ID with worker task args ---
+[
+  {
+    "id": 28,
+    "filename": "s41587-021-00933-4.pdf",
+    "status": "failed",
+    "catalog_status": "failed",
+    "error": "Catalog failed: CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+    "catalog_error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+    "pipeline_generation": 5,
+    "updated_at": "2026-10-16 14:39:05.803782+00:00"
+  },
+  {
+    "id": 29,
+    "filename": "s12915-018-0624-2.pdf",
+    "status": "failed",
+    "catalog_status": "failed",
+    "error": "Catalog failed: CatalogValidationError: Catalog mention is absent from its source segment (entity[10])",
+    "catalog_error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[10])",
+    "pipeline_generation": 5,
+    "updated_at": "2026-10-16 14:35:09.635172+00:00"
+  },
+  {
+    "id": 26,
+    "filename": "s41591-025-03508-x.pdf",
+    "status": "failed",
+    "catalog_status": "failed",
+    "error": "Catalog failed: CatalogValidationError: Catalog mention is absent from its source segment (entity[17])",
+    "catalog_error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[17])",
+    "pipeline_generation": 5,
+    "updated_at": "2026-10-16 14:33:41.277520+00:00"
+  },
+  {
+    "id": 27,
+    "filename": "s41586-024-07087-8.pdf",
+    "status": "failed",
+    "catalog_status": "failed",
+    "error": "Catalog failed: CatalogValidationError: Catalog mention is absent from its source segment (entity[7])",
+    "catalog_error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[7])",
+    "pipeline_generation": 5,
+    "updated_at": "2026-10-16 14:30:07.935814+00:00"
+  },
+  {
+    "id": 25,
+    "filename": "NEJMoa2601283.pdf",
+    "status": "extracting",
+    "catalog_status": "done",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 2,
+    "updated_at": "2026-10-16 14:29:41.087237+00:00"
+  },
+  {
+    "id": 22,
+    "filename": "PIIS1535610824003180.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-10-16 11:33:56.325400+00:00"
+  },
+  {
+    "id": 21,
+    "filename": "Osteoarthritis treatment via the GLP-1–mediated gut-joint axis targets intestinal FXR signaling(科研通-ablesci.com).pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-10-16 11:33:56.257103+00:00"
+  },
+  {
+    "id": 3,
+    "filename": "896156a1c972131003db00ecaba31c640682957947320a5b086b0db2c60e6797.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 08:01:52.802339+00:00"
+  },
+  {
+    "id": 6,
+    "filename": "2bebeed5d7499dcce3904071563c0ddeaf5c638b7d37ac5d040312359643e699.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:59:09.532903+00:00"
+  },
+  {
+    "id": 5,
+    "filename": "f654d316a64800d2554b6590a4cdae3bbd7392b669cb7cf7144b6d6f15f2cd9e.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:56:35.007475+00:00"
+  },
+  {
+    "id": 4,
+    "filename": "21c1d8abdabff2fb3e512d1013269d89cbf93f95bdacb518f181b44c93344b76.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:56:24.299774+00:00"
+  },
+  {
+    "id": 13,
+    "filename": "2a3448a92dc89f846a131bc677a3590ed33a5eaf4a015d89d4f1a7ee5688db57.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:54:32.225532+00:00"
+  },
+  {
+    "id": 1,
+    "filename": "ea5b8d7ea61b56b7989363228d834cd7e31c0eacbb8439fbc3e7754b2524d8fe.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:54:32.179729+00:00"
+  },
+  {
+    "id": 2,
+    "filename": "33007dddf6b5a82cd1a5bf4db94be2d83d88847c64ac89928d23e60d1152d5d6.pdf",
+    "status": "done",
+    "catalog_status": "legacy",
+    "error": null,
+    "catalog_error": null,
+    "pipeline_generation": 0,
+    "updated_at": "2026-07-20 07:54:32.038205+00:00"
+  }
+]
+
+--- nonterminal documents, including old stuck records ---
+[
+  {
+    "id": 25,
+    "filename": "NEJMoa2601283.pdf",
+    "status": "extracting",
+    "catalog_status": "done",
+    "error": null,
+    "catalog_error": null,
+    "updated_at": "2026-10-16 14:29:41.087237+00:00"
+  }
+]
+
+--- recent ingestion batches ---
+[
+  {
+    "id": 15,
+    "knowledge_base_id": 18,
+    "status": "processing",
+    "updated_at": "2026-10-16 15:24:53.885884+00:00"
+  },
+  {
+    "id": 14,
+    "knowledge_base_id": 17,
+    "status": "processing",
+    "updated_at": "2026-10-16 14:39:05.823589+00:00"
+  },
+  {
+    "id": 13,
+    "knowledge_base_id": 16,
+    "status": "processing",
+    "updated_at": "2026-10-16 14:39:05.823589+00:00"
+  },
+  {
+    "id": 12,
+    "knowledge_base_id": 14,
+    "status": "processing",
+    "updated_at": "2026-10-16 14:39:05.823589+00:00"
+  },
+  {
+    "id": 11,
+    "knowledge_base_id": 14,
+    "status": "processing",
+    "updated_at": "2026-10-16 14:39:05.823589+00:00"
+  }
+]
+
+--- recent maintenance jobs ---
+[
+  {
+    "id": "1872f8d2-e887-48e8-b3a4-107c8fb6fd8f",
+    "knowledge_base_id": 16,
+    "document_id": null,
+    "mode": "derived",
+    "status": "partial",
+    "result": [
+      {
+        "status": "skipped_active",
+        "document_id": 25
+      },
+      {
+        "result": [
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          },
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          }
+        ],
+        "status": "done",
+        "document_id": 26
+      },
+      {
+        "result": [
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          },
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          }
+        ],
+        "status": "done",
+        "document_id": 27
+      },
+      {
+        "result": [
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          },
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          }
+        ],
+        "status": "done",
+        "document_id": 28
+      },
+      {
+        "result": [
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          },
+          {
+            "warnings": [],
+            "changed_count": 2,
+            "document_count": 1
+          }
+        ],
+        "status": "done",
+        "document_id": 29
+      }
+    ],
+    "error": null,
+    "updated_at": "2026-10-16 14:01:58.106298+00:00"
+  },
+  {
+    "id": "92890d84-1f49-4530-bbd6-ff4e56e46e7e",
+    "knowledge_base_id": 14,
+    "document_id": 29,
+    "mode": "retry",
+    "status": "partial",
+    "result": [
+      {
+        "error": "ModelOutputError: LLM output truncated; reduce segment size or increase LLM_MAX_OUTPUT_TOKENS",
+        "status": "failed",
+        "document_id": 29
+      }
+    ],
+    "error": null,
+    "updated_at": "2026-10-16 13:03:01.961972+00:00"
+  },
+  {
+    "id": "c3927330-a89b-44e4-9379-ef0ccb98bb03",
+    "knowledge_base_id": 14,
+    "document_id": 28,
+    "mode": "retry",
+    "status": "partial",
+    "result": [
+      {
+        "error": "ModelOutputError: LLM output truncated; reduce segment size or increase LLM_MAX_OUTPUT_TOKENS",
+        "status": "failed",
+        "document_id": 28
+      }
+    ],
+    "error": null,
+    "updated_at": "2026-10-16 13:02:52.015130+00:00"
+  },
+  {
+    "id": "df0bacb2-adce-497b-af3a-d2034f58eca9",
+    "knowledge_base_id": 14,
+    "document_id": 25,
+    "mode": "retry",
+    "status": "partial",
+    "result": [
+      {
+        "error": "ModelOutputError: LLM output truncated; reduce segment size or increase LLM_MAX_OUTPUT_TOKENS",
+        "status": "failed",
+        "document_id": 25
+      }
+    ],
+    "error": null,
+    "updated_at": "2026-10-16 13:01:31.031139+00:00"
+  },
+  {
+    "id": "62ca9e5b-e8b2-4ebf-ad60-4ff3742b9ef2",
+    "knowledge_base_id": 14,
+    "document_id": 27,
+    "mode": "retry",
+    "status": "partial",
+    "result": [
+      {
+        "error": "ModelOutputError: LLM output truncated; reduce segment size or increase LLM_MAX_OUTPUT_TOKENS",
+        "status": "failed",
+        "document_id": 27
+      }
+    ],
+    "error": null,
+    "updated_at": "2026-10-16 13:01:21.548445+00:00"
+  }
+]
+
+--- recent completed attempts (not an in-flight request list) ---
+[
+  {
+    "id": 159,
+    "document_id": 28,
+    "chunk_id": 442,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+    "created_at": "2026-10-16 14:39:05.760229+00:00"
+  },
+  {
+    "id": 158,
+    "document_id": 28,
+    "chunk_id": 442,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+    "created_at": "2026-10-16 14:38:48.300577+00:00"
+  },
+  {
+    "id": 157,
+    "document_id": 28,
+    "chunk_id": 442,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+    "created_at": "2026-10-16 14:38:30.806887+00:00"
+  },
+  {
+    "id": 156,
+    "document_id": 28,
+    "chunk_id": 442,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:38:11.450785+00:00"
+  },
+  {
+    "id": 155,
+    "document_id": 28,
+    "chunk_id": 442,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "ModelOutputTruncatedError: LLM output truncated (requested max_tokens=4096)",
+    "created_at": "2026-10-16 14:37:54.260139+00:00"
+  },
+  {
+    "id": 154,
+    "document_id": 28,
+    "chunk_id": 441,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:37:28.923455+00:00"
+  },
+  {
+    "id": 153,
+    "document_id": 28,
+    "chunk_id": 441,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:37:26.267072+00:00"
+  },
+  {
+    "id": 152,
+    "document_id": 28,
+    "chunk_id": 440,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:37:19.909790+00:00"
+  },
+  {
+    "id": 151,
+    "document_id": 28,
+    "chunk_id": 439,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:37:16.635948+00:00"
+  },
+  {
+    "id": 150,
+    "document_id": 28,
+    "chunk_id": 439,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:37:11.730753+00:00"
+  },
+  {
+    "id": 149,
+    "document_id": 28,
+    "chunk_id": 439,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:36:49.987076+00:00"
+  },
+  {
+    "id": 148,
+    "document_id": 28,
+    "chunk_id": 439,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "ModelOutputTruncatedError: LLM output truncated (requested max_tokens=4096)",
+    "created_at": "2026-10-16 14:36:33.378981+00:00"
+  },
+  {
+    "id": 147,
+    "document_id": 28,
+    "chunk_id": 438,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:36:07.956563+00:00"
+  },
+  {
+    "id": 146,
+    "document_id": 28,
+    "chunk_id": 437,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:36:03.478681+00:00"
+  },
+  {
+    "id": 145,
+    "document_id": 28,
+    "chunk_id": 437,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:35:51.350165+00:00"
+  },
+  {
+    "id": 144,
+    "document_id": 28,
+    "chunk_id": 437,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:35:38.510807+00:00"
+  },
+  {
+    "id": 143,
+    "document_id": 28,
+    "chunk_id": 437,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "ModelOutputTruncatedError: LLM output truncated (requested max_tokens=4096)",
+    "created_at": "2026-10-16 14:35:27.687391+00:00"
+  },
+  {
+    "id": 142,
+    "document_id": 29,
+    "chunk_id": 411,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[10])",
+    "created_at": "2026-10-16 14:35:09.591875+00:00"
+  },
+  {
+    "id": 141,
+    "document_id": 28,
+    "chunk_id": 436,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:35:01.889917+00:00"
+  },
+  {
+    "id": 140,
+    "document_id": 29,
+    "chunk_id": 411,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[10])",
+    "created_at": "2026-10-16 14:34:58.849431+00:00"
+  },
+  {
+    "id": 139,
+    "document_id": 29,
+    "chunk_id": 411,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[10])",
+    "created_at": "2026-10-16 14:34:48.063113+00:00"
+  },
+  {
+    "id": 138,
+    "document_id": 28,
+    "chunk_id": 435,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:34:43.601942+00:00"
+  },
+  {
+    "id": 137,
+    "document_id": 29,
+    "chunk_id": 411,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:34:37.088640+00:00"
+  },
+  {
+    "id": 136,
+    "document_id": 28,
+    "chunk_id": 435,
+    "stage": "catalog",
+    "status": "done",
+    "error": null,
+    "created_at": "2026-10-16 14:34:32.790345+00:00"
+  },
+  {
+    "id": 135,
+    "document_id": 29,
+    "chunk_id": 411,
+    "stage": "catalog",
+    "status": "failed",
+    "error": "ModelOutputTruncatedError: LLM output truncated (requested max_tokens=4096)",
+    "created_at": "2026-10-16 14:34:31.836313+00:00"
+  }
+]
+
+--- chunk status counts ---
+[
+  {
+    "document_id": 29,
+    "status": "queued",
+    "count": 29
+  },
+  {
+    "document_id": 28,
+    "status": "queued",
+    "count": 21
+  },
+  {
+    "document_id": 27,
+    "status": "queued",
+    "count": 56
+  },
+  {
+    "document_id": 26,
+    "status": "queued",
+    "count": 33
+  },
+  {
+    "document_id": 25,
+    "status": "failed",
+    "count": 1
+  },
+  {
+    "document_id": 25,
+    "status": "queued",
+    "count": 17
+  },
+  {
+    "document_id": 22,
+    "status": "done",
+    "count": 24
+  },
+  {
+    "document_id": 21,
+    "status": "done",
+    "count": 9
+  },
+  {
+    "document_id": 13,
+    "status": "done",
+    "count": 20
+  },
+  {
+    "document_id": 6,
+    "status": "done",
+    "count": 33
+  },
+  {
+    "document_id": 5,
+    "status": "done",
+    "count": 30
+  },
+  {
+    "document_id": 4,
+    "status": "done",
+    "count": 12
+  },
+  {
+    "document_id": 3,
+    "status": "done",
+    "count": 29
+  },
+  {
+    "document_id": 2,
+    "status": "done",
+    "count": 12
+  },
+  {
+    "document_id": 1,
+    "status": "done",
+    "count": 22
+  }
+]
+
+--- database activity / blockers (current diagnostic session excluded) ---
+[]
+
+--- exact failed audit row (raw model output included) ---
+{
+  "id": 159,
+  "document_id": 28,
+  "chunk_id": 442,
+  "stage": "catalog",
+  "version": "ae82b29f33d38415926d0394524f7def12aa912ec6a8b6a5c15421d0bd3df458",
+  "status": "failed",
+  "output": {
+    "raw": "{\n  \"entities\": [\n    {\n      \"text\": \"TrypLE Express Enzyme\",\n      \"type\": \"Compound\",\n      \"mention\": \"TrypLE Express Enzyme\",\n      \"aliases\": [],\n      \"evidence\": \"Upon detachment using TrypLE Express Enzyme (Thermo Fisher Scientific) for Hepa1-6 and HEK293T cells\"\n    },\n    {\n      \"text\": \"Thermo Fisher Scientific\",\n      \"type\": \"Other\",\n      \"mention\": \"Thermo Fisher Scientific\",\n      \"aliases\": [],\n      \"evidence\": \"TrypLE Express Enzyme (Thermo Fisher Scientific) for Hepa1-6 and HEK293T cells\"\n    },\n    {\n      \"text\": \"Hepa1-6\",\n      \"type\": \"CellLine\",\n      \"mention\": \"Hepa1-6\",\n      \"aliases\": [],\n      \"evidence\": \"for Hepa1-6 and HEK293T cells or Trypsin-EDTA for HepG2 cells\"\n    },\n    {\n      \"text\": \"HEK293T\",\n      \"type\": \"CellLine\",\n      \"mention\": \"HEK293T\",\n      \"aliases\": [],\n      \"evidence\": \"for Hepa1-6 and HEK293T cells or Trypsin-EDTA for HepG2 cells\"\n    },\n    {\n      \"text\": \"Trypsin-EDTA\",\n      \"type\": \"Compound\",\n      \"mention\": \"Trypsin-EDTA\",\n      \"aliases\": [],\n      \"evidence\": \"HEK293T cells or Trypsin-EDTA for HepG2 cells\"\n    },\n    {\n      \"text\": \"HepG2\",\n      \"type\": \"CellLine\",\n      \"mention\": \"HepG2\",\n      \"aliases\": [],\n      \"evidence\": \"Trypsin-EDTA for HepG2 cells\"\n    },\n    {\n      \"text\": \"PBS\",\n      \"type\": \"Compound\",\n      \"mention\": \"PBS\",\n      \"aliases\": [],\n      \"evidence\": \"cells were washed 2× in PBS and distributed for DNA lysis\"\n    },\n    {\n      \"text\": \"DNA\",\n      \"type\": \"Other\",\n      \"mention\": \"DNA\",\n      \"aliases\": [],\n      \"evidence\": \"distributed for DNA lysis, RNA isolation or protein harvest.\"\n    },\n    {\n      \"text\": \"RNA\",\n      \"type\": \"RNA\",\n      \"mention\": \"RNA\",\n      \"aliases\": [],\n      \"evidence\": \"DNA lysis, RNA isolation or protein harvest.\"\n    },\n    {\n      \"text\": \"Tris-HCl\",\n      \"type\": \"Compound\",\n      \"mention\": \"Tris-HCl\",\n      \"aliases\": [],\n      \"evidence\": \"4× lysis buffer (10 mM Tris-HCl at pH 8, 2% Triton X-100\"\n    },\n    {\n      \"text\": \"Triton X-100\",\n      \"type\": \"Compound\",\n      \"mention\": \"Triton X-100\",\n      \"aliases\": [],\n      \"evidence\": \"10 mM Tris-HCl at pH 8, 2% Triton X-100, 1 mM EDTA\"\n    },\n    {\n      \"text\": \"EDTA\",\n      \"type\": \"Compound\",\n      \"mention\": \"EDTA\",\n      \"aliases\": [],\n      \"evidence\": \"2% Triton X-100, 1 mM EDTA, 1% freshly added proteinase K\"\n    },\n    {\n      \"text\": \"proteinase K\",\n      \"type\": \"Protein\",\n      \"mention\": \"proteinase K\",\n      \"aliases\": [],\n      \"evidence\": \"1 mM EDTA, 1% freshly added proteinase K) and incubated\"\n    },\n    {\n      \"text\": \"polymerase chain reaction\",\n      \"type\": \"Assay\",\n      \"mention\": \"polymerase chain reaction\",\n      \"aliases\": [\n        \"PCR\"\n      ],\n      \"evidence\": \"amplified by polymerase chain reaction (PCR) using GoTaq G2 Hot Start Green Master Mix\"\n    },\n    {\n      \"text\": \"PCR\",\n      \"type\": \"Assay\",\n      \"mention\": \"PCR\",\n      \"aliases\": [\n        \"polymerase chain reaction\"\n      ],\n      \"evidence\": \"polymerase chain reaction (PCR) using GoTaq G2 Hot Start Green Master Mix\"\n    },\n    {\n      \"text\": \"GoTaq G2 Hot Start Green Master Mix\",\n      \"type\": \"Compound\",\n      \"mention\": \"GoTaq G2 Hot Start Green Master Mix\",\n      \"aliases\": [],\n      \"evidence\": \"using GoTaq G2 Hot Start Green Master Mix (Promega) and the respective primer pair\"\n    },\n    {\n      \"text\": \"Promega\",\n      \"type\": \"Other\",\n      \"mention\": \"Promega\",\n      \"aliases\": [],\n      \"evidence\": \"GoTaq G2 Hot Start Green Master Mix (Promega) and the respective primer pair (Supplementary Table 5).\"\n    },\n    {\n      \"text\": \"Agencourt AMPure XP beads\",\n      \"type\": \"Compound\",\n      \"mention\": \"Agencourt AMPure XP beads\",\n      \"aliases\": [],\n      \"evidence\": \"purified using Agencourt AMPure XP beads (Beckman Coulson) and sequenced\"\n    },\n    {\n      \"text\": \"Beckman Coulson\",\n      \"type\": \"Other\",\n      \"mention\": \"Beckman Coulson\",\n      \"aliases\": [],\n      \"evidence\": \"Agencourt AMPure XP beads (Beckman Coulson) and sequenced\"\n    },\n    {\n      \"text\": \"Sanger method\",\n      \"type\": \"Assay\",\n      \"mention\": \"Sanger method\",\n      \"aliases\": [],\n      \"evidence\": \"sequenced with the respective in-sequence primers (Supplementary Table 5) via the Sanger method.\"\n    },\n    {\n      \"text\": \"BEAT analysis\",\n      \"type\": \"Assay\",\n      \"mention\": \"BEAT analysis\",\n      \"aliases\": [],\n      \"evidence\": \"Editing efficiency was determined by BEAT analysis 52 .\"\n    },\n    {\n      \"text\": \"RNeasy Kit\",\n      \"type\": \"Compound\",\n      \"mention\": \"RNeasy Kit\",\n      \"aliases\": [],\n      \"evidence\": \"RNA isolation was performed using the RNeasy Kit (Qiagen).\"\n    },\n    {\n      \"text\": \"Qiagen\",\n      \"type\": \"Other\",\n      \"mention\": \"Qiagen\",\n      \"aliases\": [],\n      \"evidence\": \"RNeasy Kit (Qiagen). cDNA was reverse transcribed\"\n    },\n    {\n      \"text\": \"cDNA\",\n      \"type\": \"RNA\",\n      \"mention\": \"cDNA\",\n      \"aliases\": [],\n      \"evidence\": \"Qiagen). cDNA was reverse transcribed using the GoScript Reverse Transcriptase Kit\"\n    },\n    {\n      \"text\": \"GoScript Reverse Transcriptase Kit\",\n      \"type\": \"Compound\",\n      \"mention\": \"GoScript Reverse Transcriptase Kit\",\n      \"aliases\": [],\n      \"evidence\": \"reverse transcribed using the GoScript Reverse Transcriptase Kit (Promega).\"\n    },\n    {\n      \"text\": \"RT-PCR\",\n      \"type\": \"Assay\",\n      \"mention\": \"RT-PCR\",\n      \"aliases\": [],\n      \"evidence\": \"cDNA was reverse transcribed using the GoScript Reverse Transcriptase Kit (Promega). RT-PCR was performed using GoTaq qPCR Master Mix\"\n    },\n    {\n      \"text\": \"GoTaq qPCR Master Mix\",\n      \"type\": \"Compound\",\n      \"mention\": \"GoTaq qPCR Master Mix\",\n      \"aliases\": [],\n      \"evidence\": \"RT-PCR was performed using GoTaq qPCR Master Mix (Promega) with specific primers\"\n    },\n    {\n      \"text\": \"PCSK9\",\n      \"type\": \"Protein\",\n      \"mention\": \"PCSK9\",\n      \"aliases\": [],\n      \"evidence\": \"specific primers for mouse or human PCSK9 and mouse B2M\"\n    },\n    {\n      \"text\": \"B2M\",\n      \"type\": \"Protein\",\n      \"mention\": \"B2M\",\n      \"aliases\": [],\n      \"evidence\": \"human PCSK9 and mouse B2M or human β-actin as housekeeping genes\"\n    },\n    {\n      \"text\": \"β-actin\",\n      \"type\": \"Protein\",\n      \"mention\": \"β-actin\",\n      \"aliases\": [],\n      \"evidence\": \"mouse B2M or human β-actin as housekeeping genes (Supplementary Table 5)\"\n    },\n    {\n      \"text\": \"QuantStudio 5 Real-Time PCR System\",\n      \"type\": \"Assay\",\n      \"mention\": \"QuantStudio 5 Real-Time PCR System\",\n      \"aliases\": [],\n      \"evidence\": \"analyzed by QuantStudio 5 Real-Time PCR System (Thermo Fisher Scientific) or 7900HT Fast Real-Time PCR System\"\n    },\n    {\n      \"text\": \"7900HT Fast Real-Time PCR System\",\n      \"type\": \"Assay\",\n      \"mention\": \"7900HT Fast Real-Time PCR System\",\n      \"aliases\": [],\n      \"evidence\": \"QuantStudio 5 Real-Time PCR System (Thermo Fisher Scientific) or 7900HT Fast Real-Time PCR System (Applied Biosystems).\"\n    },\n    {\n      \"text\": \"Applied Biosystems\",\n      \"type\": \"Other\",\n      \"mention\": \"Applied Biosystems\",\n      \"aliases\": [],\n      \"evidence\": \"7900HT Fast Real-Time PCR System (Applied Biosystems).\"\n    },\n    {\n      \"text\": \"ΔΔCT method\",\n      \"type\": \"Assay\",\n      \"mention\": \"ΔΔCT method\",\n      \"aliases\": [],\n      \"evidence\": \"Fold changes were calculated using the ΔΔCT method.\"\n    },\n    {\n      \"text\": \"RIPA buffer\",\n      \"type\": \"Compound\",\n      \"mention\": \"RIPA buffer\",\n      \"aliases\": [],\n      \"evidence\": \"Harvested Hepa1-6 cells were lysed in RIPA buffer containing protease inhibitor\"\n    },\n    {\n      \"text\": \"protease inhibitor\",\n      \"type\": \"Compound\",\n      \"mention\": \"protease inhibitor\",\n      \"aliases\": [],\n      \"evidence\": \"RIPA buffer containing protease inhibitor and PhosSTOP phosphatase inhibitor\"\n    },\n    {\n      \"text\": \"PhosSTOP phosphatase inhibitor\",\n      \"type\": \"Compound\",\n      \"mention\": \"PhosSTOP phosphatase inhibitor\",\n      \"aliases\": [],\n      \"evidence\": \"protease inhibitor and PhosSTOP phosphatase inhibitor (Sigma-Aldrich).\"\n    },\n    {\n      \"text\": \"Sigma-Aldrich\",\n      \"type\": \"Other\",\n      \"mention\": \"Sigma-Aldrich\",\n      \"aliases\": [],\n      \"evidence\": \"PhosSTOP phosphatase inhibitor (Sigma-Aldrich). Protein amount was determined\"\n    },\n    {\n      \"text\": \"Pierce BCA Protein Assay Kit\",\n      \"type\": \"Assay\",\n      \"mention\": \"Pierce BCA Protein Assay Kit\",\n      \"aliases\": [],\n      \"evidence\": \"determined with the Pierce BCA Protein Assay Kit (T\"\n    }\n  ]\n}",
+    "parsed": {
+      "entities": [
+        {
+          "text": "TrypLE Express Enzyme",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "TrypLE Express Enzyme",
+          "process": null,
+          "evidence": "Upon detachment using TrypLE Express Enzyme (Thermo Fisher Scientific) for Hepa1-6 and HEK293T cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Thermo Fisher Scientific",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Thermo Fisher Scientific",
+          "process": null,
+          "evidence": "TrypLE Express Enzyme (Thermo Fisher Scientific) for Hepa1-6 and HEK293T cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Hepa1-6",
+          "type": "CellLine",
+          "aliases": [],
+          "mention": "Hepa1-6",
+          "process": null,
+          "evidence": "for Hepa1-6 and HEK293T cells or Trypsin-EDTA for HepG2 cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "HEK293T",
+          "type": "CellLine",
+          "aliases": [],
+          "mention": "HEK293T",
+          "process": null,
+          "evidence": "for Hepa1-6 and HEK293T cells or Trypsin-EDTA for HepG2 cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Trypsin-EDTA",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "Trypsin-EDTA",
+          "process": null,
+          "evidence": "HEK293T cells or Trypsin-EDTA for HepG2 cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "HepG2",
+          "type": "CellLine",
+          "aliases": [],
+          "mention": "HepG2",
+          "process": null,
+          "evidence": "Trypsin-EDTA for HepG2 cells",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "PBS",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "PBS",
+          "process": null,
+          "evidence": "cells were washed 2× in PBS and distributed for DNA lysis",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "DNA",
+          "type": "Other",
+          "aliases": [],
+          "mention": "DNA",
+          "process": null,
+          "evidence": "distributed for DNA lysis, RNA isolation or protein harvest.",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "RNA",
+          "type": "RNA",
+          "aliases": [],
+          "mention": "RNA",
+          "process": null,
+          "evidence": "DNA lysis, RNA isolation or protein harvest.",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Tris-HCl",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "Tris-HCl",
+          "process": null,
+          "evidence": "4× lysis buffer (10 mM Tris-HCl at pH 8, 2% Triton X-100",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Triton X-100",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "Triton X-100",
+          "process": null,
+          "evidence": "10 mM Tris-HCl at pH 8, 2% Triton X-100, 1 mM EDTA",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "EDTA",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "EDTA",
+          "process": null,
+          "evidence": "2% Triton X-100, 1 mM EDTA, 1% freshly added proteinase K",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "proteinase K",
+          "type": "Protein",
+          "aliases": [],
+          "mention": "proteinase K",
+          "process": null,
+          "evidence": "1 mM EDTA, 1% freshly added proteinase K) and incubated",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "polymerase chain reaction",
+          "type": "Assay",
+          "aliases": [
+            "PCR"
+          ],
+          "mention": "polymerase chain reaction",
+          "process": null,
+          "evidence": "amplified by polymerase chain reaction (PCR) using GoTaq G2 Hot Start Green Master Mix",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "PCR",
+          "type": "Assay",
+          "aliases": [
+            "polymerase chain reaction"
+          ],
+          "mention": "PCR",
+          "process": null,
+          "evidence": "polymerase chain reaction (PCR) using GoTaq G2 Hot Start Green Master Mix",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "GoTaq G2 Hot Start Green Master Mix",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "GoTaq G2 Hot Start Green Master Mix",
+          "process": null,
+          "evidence": "using GoTaq G2 Hot Start Green Master Mix (Promega) and the respective primer pair",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Promega",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Promega",
+          "process": null,
+          "evidence": "GoTaq G2 Hot Start Green Master Mix (Promega) and the respective primer pair (Supplementary Table 5).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Agencourt AMPure XP beads",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "Agencourt AMPure XP beads",
+          "process": null,
+          "evidence": "purified using Agencourt AMPure XP beads (Beckman Coulson) and sequenced",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Beckman Coulson",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Beckman Coulson",
+          "process": null,
+          "evidence": "Agencourt AMPure XP beads (Beckman Coulson) and sequenced",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Sanger method",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "Sanger method",
+          "process": null,
+          "evidence": "sequenced with the respective in-sequence primers (Supplementary Table 5) via the Sanger method.",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "BEAT analysis",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "BEAT analysis",
+          "process": null,
+          "evidence": "Editing efficiency was determined by BEAT analysis 52 .",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "RNeasy Kit",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "RNeasy Kit",
+          "process": null,
+          "evidence": "RNA isolation was performed using the RNeasy Kit (Qiagen).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Qiagen",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Qiagen",
+          "process": null,
+          "evidence": "RNeasy Kit (Qiagen). cDNA was reverse transcribed",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "cDNA",
+          "type": "RNA",
+          "aliases": [],
+          "mention": "cDNA",
+          "process": null,
+          "evidence": "Qiagen). cDNA was reverse transcribed using the GoScript Reverse Transcriptase Kit",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "GoScript Reverse Transcriptase Kit",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "GoScript Reverse Transcriptase Kit",
+          "process": null,
+          "evidence": "reverse transcribed using the GoScript Reverse Transcriptase Kit (Promega).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "RT-PCR",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "RT-PCR",
+          "process": null,
+          "evidence": "cDNA was reverse transcribed using the GoScript Reverse Transcriptase Kit (Promega). RT-PCR was performed using GoTaq qPCR Master Mix",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "GoTaq qPCR Master Mix",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "GoTaq qPCR Master Mix",
+          "process": null,
+          "evidence": "RT-PCR was performed using GoTaq qPCR Master Mix (Promega) with specific primers",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "PCSK9",
+          "type": "Protein",
+          "aliases": [],
+          "mention": "PCSK9",
+          "process": null,
+          "evidence": "specific primers for mouse or human PCSK9 and mouse B2M",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "B2M",
+          "type": "Protein",
+          "aliases": [],
+          "mention": "B2M",
+          "process": null,
+          "evidence": "human PCSK9 and mouse B2M or human β-actin as housekeeping genes",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "β-actin",
+          "type": "Protein",
+          "aliases": [],
+          "mention": "β-actin",
+          "process": null,
+          "evidence": "mouse B2M or human β-actin as housekeeping genes (Supplementary Table 5)",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "QuantStudio 5 Real-Time PCR System",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "QuantStudio 5 Real-Time PCR System",
+          "process": null,
+          "evidence": "analyzed by QuantStudio 5 Real-Time PCR System (Thermo Fisher Scientific) or 7900HT Fast Real-Time PCR System",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "7900HT Fast Real-Time PCR System",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "7900HT Fast Real-Time PCR System",
+          "process": null,
+          "evidence": "QuantStudio 5 Real-Time PCR System (Thermo Fisher Scientific) or 7900HT Fast Real-Time PCR System (Applied Biosystems).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Applied Biosystems",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Applied Biosystems",
+          "process": null,
+          "evidence": "7900HT Fast Real-Time PCR System (Applied Biosystems).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "ΔΔCT method",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "ΔΔCT method",
+          "process": null,
+          "evidence": "Fold changes were calculated using the ΔΔCT method.",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "RIPA buffer",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "RIPA buffer",
+          "process": null,
+          "evidence": "Harvested Hepa1-6 cells were lysed in RIPA buffer containing protease inhibitor",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "protease inhibitor",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "protease inhibitor",
+          "process": null,
+          "evidence": "RIPA buffer containing protease inhibitor and PhosSTOP phosphatase inhibitor",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "PhosSTOP phosphatase inhibitor",
+          "type": "Compound",
+          "aliases": [],
+          "mention": "PhosSTOP phosphatase inhibitor",
+          "process": null,
+          "evidence": "protease inhibitor and PhosSTOP phosphatase inhibitor (Sigma-Aldrich).",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Sigma-Aldrich",
+          "type": "Other",
+          "aliases": [],
+          "mention": "Sigma-Aldrich",
+          "process": null,
+          "evidence": "PhosSTOP phosphatase inhibitor (Sigma-Aldrich). Protein amount was determined",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        },
+        {
+          "text": "Pierce BCA Protein Assay Kit",
+          "type": "Assay",
+          "aliases": [],
+          "mention": "Pierce BCA Protein Assay Kit",
+          "process": null,
+          "evidence": "determined with the Pierce BCA Protein Assay Kit (T",
+          "ambiguity": null,
+          "directory_id": null,
+          "normalized_id": null,
+          "uncertainty_reason": null
+        }
+      ]
+    }
+  },
+  "error": "CatalogValidationError: Catalog mention is absent from its source segment (entity[18])",
+  "created_at": "2026-10-16 14:39:05.760229+00:00"
+}
+
+--- offending entity; index is zero-based ---
+{
+  "index": 18,
+  "entity": {
+    "text": "Beckman Coulson",
+    "type": "Other",
+    "aliases": [],
+    "mention": "Beckman Coulson",
+    "process": null,
+    "evidence": "Agencourt AMPure XP beads (Beckman Coulson) and sequenced",
+    "ambiguity": null,
+    "directory_id": null,
+    "normalized_id": null,
+    "uncertainty_reason": null
+  }
+}
+
+--- document title and chunk metadata ---
+{
+  "document_id": 28,
+  "title": "In vivo adenine base editing of PCSK9 in macaques reduces LDL cholesterol levels",
+  "chunk_id": 442,
+  "chunk_index": 10,
+  "section_title": "Methods"
+}
+
+--- exact segment (audit cache key matched) ---
+{
+  "start": 1299,
+  "end": 3000,
+  "sources": [
+    "In vivo adenine base editing of PCSK9 in macaques reduces LDL cholesterol levels",
+    "Methods",
+    "e. Upon detachment using TrypLE Express Enzyme (Thermo Fisher Scientific) for Hepa1-6 and HEK293T cells or Trypsin-EDTA for HepG2 cells, the cells were washed 2× in PBS and distributed for DNA lysis, RNA isolation or protein harvest.\nGenomic DNA amplification, Sanger sequencing and BEAT analysis. Next, 30 µl of a cell suspension in PBS was directly lysed using 10 µl of 4× lysis buffer (10 mM Tris-HCl at pH 8, 2% Triton X-100, 1 mM EDTA, 1% freshly added proteinase K) and incubated at 60 °C for 60 min and 95 °C for 10 min. Target sites were amplified by polymerase chain reaction (PCR) using GoTaq G2 Hot Start Green Master Mix (Promega) and the respective primer pair (Supplementary Table 5). Amplification products were purified using Agencourt AMPure XP beads (Beckman Coulter) and sequenced with the respective in-sequence primers (Supplementary Table 5) via the Sanger method. Editing efficiency was determined by BEAT analysis 52 .\nRNA isolation and RT-qPCR. RNA isolation was performed using the RNeasy Kit (Qiagen). cDNA was reverse transcribed using the GoScript Reverse Transcriptase Kit (Promega). RT-PCR was performed using GoTaq qPCR Master Mix (Promega) with specific primers for mouse or human PCSK9 and mouse B2M or human β-actin as housekeeping genes (Supplementary Table 5) and analyzed by QuantStudio 5 Real-Time PCR System (Thermo Fisher Scientific) or 7900HT Fast Real-Time PCR System (Applied Biosystems). Fold changes were calculated using the ΔΔCT method.\nWestern blot. Harvested Hepa1-6 cells were lysed in RIPA buffer containing protease inhibitor and PhosSTOP phosphatase inhibitor (Sigma-Aldrich). Protein amount was determined with the Pierce BCA Protein Assay Kit (T"
+  ]
+}
+
+--- same-runtime span checks ---
+[
+  {
+    "value_repr": "'Beckman Coulson'",
+    "matches": [
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "value_repr": "'Beckman Coulson'",
+    "matches": [
+      null,
+      null,
+      null
+    ]
+  }
+]
+
+=== Celery active / reserved / scheduled (read-only inspection) ===
+
+--- active ---
+->  celery@c45a6fd45eb3: OK
+    - empty -
+->  celery@bf30de8ddb48: OK
+    - empty -
+
+2 nodes online.
+
+--- reserved ---
+->  celery@bf30de8ddb48: OK
+    - empty -
+->  celery@c45a6fd45eb3: OK
+    - empty -
+
+2 nodes online.
+
+--- scheduled ---
+->  celery@c45a6fd45eb3: OK
+    - empty -
+->  celery@bf30de8ddb48: OK
+    - empty -
+
+2 nodes online.
+
+=== Recent worker logs (last four hours, up to 1500 lines per service) ===
+litkg-worker-extract  | 2026-10-16T14:29:20.441613546Z /usr/local/lib/python3.11/site-packages/celery/platforms.py:841: SecurityWarning: You're running the worker with superuser privileges: this is
+litkg-worker-extract  | 2026-10-16T14:29:20.441737737Z absolutely not recommended!
+litkg-worker-extract  | 2026-10-16T14:29:20.441750397Z 
+litkg-worker-extract  | 2026-10-16T14:29:20.441758374Z Please specify a different user using the --uid option.
+litkg-worker-extract  | 2026-10-16T14:29:20.441768871Z 
+litkg-worker-extract  | 2026-10-16T14:29:20.441777740Z User information: uid=0 euid=0 gid=0 egid=0
+litkg-worker-extract  | 2026-10-16T14:29:20.441787643Z 
+litkg-worker-extract  | 2026-10-16T14:29:20.441794647Z   warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+litkg-worker-extract  | 2026-10-16T14:29:20.493835933Z  
+litkg-worker-extract  | 2026-10-16T14:29:20.493892552Z  -------------- celery@c45a6fd45eb3 v5.6.3 (recovery)
+litkg-worker-extract  | 2026-10-16T14:29:20.493902878Z --- ***** ----- 
+litkg-worker-extract  | 2026-10-16T14:29:20.493910324Z -- ******* ---- Linux-6.8.0-147-generic-x86_64-with-glibc2.41 2026-10-16 14:29:20
+litkg-worker-extract  | 2026-10-16T14:29:20.493919358Z - *** --- * --- 
+litkg-worker-extract  | 2026-10-16T14:29:20.493927465Z - ** ---------- [config]
+litkg-worker-extract  | 2026-10-16T14:29:20.493936197Z - ** ---------- .> app:         litkg:0x7262e5cf9590
+litkg-worker-extract  | 2026-10-16T14:29:20.493944225Z - ** ---------- .> transport:   redis://redis:6379/0
+litkg-worker-extract  | 2026-10-16T14:29:20.493952701Z - ** ---------- .> results:     redis://redis:6379/0
+litkg-worker-extract  | 2026-10-16T14:29:20.493960555Z - *** --- * --- .> concurrency: 2 (prefork)
+litkg-worker-extract  | 2026-10-16T14:29:20.493972082Z -- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+litkg-worker-extract  | 2026-10-16T14:29:20.493980026Z --- ***** ----- 
+litkg-worker-extract  | 2026-10-16T14:29:20.493987910Z  -------------- [queues]
+litkg-worker-extract  | 2026-10-16T14:29:20.493997095Z                 .> extract          exchange=extract(direct) key=extract
+litkg-worker-extract  | 2026-10-16T14:29:20.494004923Z                 
+litkg-worker-extract  | 2026-10-16T14:29:20.494011596Z 
+litkg-worker-extract  | 2026-10-16T14:29:20.494018300Z [tasks]
+litkg-worker-extract  | 2026-10-16T14:29:20.494029734Z   . build_document_catalog
+litkg-worker-extract  | 2026-10-16T14:29:20.494036924Z   . extract_chunk
+litkg-worker-extract  | 2026-10-16T14:29:20.494045115Z   . maintain_knowledge_base
+litkg-worker-extract  | 2026-10-16T14:29:20.494053620Z   . parse_document
+litkg-worker-extract  | 2026-10-16T14:29:20.494060647Z   . rebuild_knowledge_graph
+litkg-worker-extract  | 2026-10-16T14:29:20.494068751Z   . refresh_derived
+litkg-worker-extract  | 2026-10-16T14:29:20.494075878Z 
+litkg-worker-extract  | 2026-10-16T14:29:20.614854427Z [2026-10-16 14:29:20,614: INFO/MainProcess] Connected to redis://redis:6379/0
+litkg-worker-extract  | 2026-10-16T14:29:20.616629947Z [2026-10-16 14:29:20,616: INFO/MainProcess] mingle: searching for neighbors
+litkg-worker-extract  | 2026-10-16T14:29:21.622929144Z [2026-10-16 14:29:21,622: INFO/MainProcess] mingle: all alone
+litkg-worker-extract  | 2026-10-16T14:29:21.639438695Z [2026-10-16 14:29:21,639: INFO/MainProcess] celery@c45a6fd45eb3 ready.
+litkg-worker-extract  | 2026-10-16T14:29:49.899840207Z [2026-10-16 14:29:49,899: INFO/MainProcess] Task build_document_catalog[27a381d1-97e9-4d54-8fc2-f8712623cc4f] received
+litkg-worker-extract  | 2026-10-16T14:29:52.694409922Z [2026-10-16 14:29:52,694: INFO/MainProcess] Task build_document_catalog[110fa825-d913-4576-a098-497264fbef12] received
+litkg-worker-extract  | 2026-10-16T14:29:59.046894983Z [2026-10-16 14:29:59,046: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:02.426576924Z [2026-10-16 14:30:02,426: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:07.851514817Z [2026-10-16 14:30:07,851: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:07.908978249Z [2026-10-16 14:30:07,908: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:07.978591419Z [2026-10-16 14:30:07,977: ERROR/ForkPoolWorker-1] Task build_document_catalog[110fa825-d913-4576-a098-497264fbef12] raised unexpected: CatalogValidationError('Catalog mention is absent from its source segment (entity[7])')
+litkg-worker-extract  | 2026-10-16T14:30:07.978627055Z Traceback (most recent call last):
+litkg-worker-extract  | 2026-10-16T14:30:07.978649246Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+litkg-worker-extract  | 2026-10-16T14:30:07.978663164Z     R = retval = fun(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:30:07.978673077Z                  ^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978684780Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+litkg-worker-extract  | 2026-10-16T14:30:07.978694830Z     return self.run(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:30:07.978705744Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978715269Z   File "/app/app/tasks.py", line 295, in build_document_catalog
+litkg-worker-parse    | 2026-10-16T14:29:20.442282046Z /usr/local/lib/python3.11/site-packages/celery/platforms.py:841: SecurityWarning: You're running the worker with superuser privileges: this is
+litkg-worker-parse    | 2026-10-16T14:29:20.442363392Z absolutely not recommended!
+litkg-worker-parse    | 2026-10-16T14:29:20.442373661Z 
+litkg-worker-parse    | 2026-10-16T14:29:20.442383155Z Please specify a different user using the --uid option.
+litkg-worker-parse    | 2026-10-16T14:29:20.442391278Z 
+litkg-worker-parse    | 2026-10-16T14:29:20.442398206Z User information: uid=0 euid=0 gid=0 egid=0
+litkg-worker-parse    | 2026-10-16T14:29:20.442405989Z 
+litkg-worker-parse    | 2026-10-16T14:29:20.442413627Z   warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+litkg-worker-parse    | 2026-10-16T14:29:20.494710484Z  
+litkg-worker-parse    | 2026-10-16T14:29:20.494779944Z  -------------- celery@bf30de8ddb48 v5.6.3 (recovery)
+litkg-worker-parse    | 2026-10-16T14:29:20.494791125Z --- ***** ----- 
+litkg-worker-parse    | 2026-10-16T14:29:20.494799726Z -- ******* ---- Linux-6.8.0-147-generic-x86_64-with-glibc2.41 2026-10-16 14:29:20
+litkg-worker-parse    | 2026-10-16T14:29:20.494810601Z - *** --- * --- 
+litkg-worker-parse    | 2026-10-16T14:29:20.494819414Z - ** ---------- [config]
+litkg-worker-parse    | 2026-10-16T14:29:20.494826805Z - ** ---------- .> app:         litkg:0x7a60080ad110
+litkg-worker-parse    | 2026-10-16T14:29:20.494835016Z - ** ---------- .> transport:   redis://redis:6379/0
+litkg-worker-parse    | 2026-10-16T14:29:20.494842418Z - ** ---------- .> results:     redis://redis:6379/0
+litkg-worker-parse    | 2026-10-16T14:29:20.494849914Z - *** --- * --- .> concurrency: 4 (prefork)
+litkg-worker-parse    | 2026-10-16T14:29:20.494859041Z -- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+litkg-worker-parse    | 2026-10-16T14:29:20.494869307Z --- ***** ----- 
+litkg-worker-parse    | 2026-10-16T14:29:20.494876329Z  -------------- [queues]
+litkg-worker-parse    | 2026-10-16T14:29:20.494885786Z                 .> parse            exchange=parse(direct) key=parse
+litkg-worker-parse    | 2026-10-16T14:29:20.494893533Z                 
+litkg-worker-parse    | 2026-10-16T14:29:20.494902740Z 
+litkg-worker-parse    | 2026-10-16T14:29:20.494910247Z [tasks]
+litkg-worker-parse    | 2026-10-16T14:29:20.494920132Z   . build_document_catalog
+litkg-worker-parse    | 2026-10-16T14:29:20.494928868Z   . extract_chunk
+litkg-worker-parse    | 2026-10-16T14:29:20.494936702Z   . maintain_knowledge_base
+litkg-worker-parse    | 2026-10-16T14:29:20.494944911Z   . parse_document
+litkg-worker-parse    | 2026-10-16T14:29:20.494953901Z   . rebuild_knowledge_graph
+litkg-worker-parse    | 2026-10-16T14:29:20.494961519Z   . refresh_derived
+litkg-worker-parse    | 2026-10-16T14:29:20.494971143Z 
+litkg-worker-parse    | 2026-10-16T14:29:20.708369122Z [2026-10-16 14:29:20,707: INFO/MainProcess] Connected to redis://redis:6379/0
+litkg-worker-parse    | 2026-10-16T14:29:20.710260552Z [2026-10-16 14:29:20,710: INFO/MainProcess] mingle: searching for neighbors
+litkg-worker-parse    | 2026-10-16T14:29:21.717207940Z [2026-10-16 14:29:21,717: INFO/MainProcess] mingle: all alone
+litkg-worker-parse    | 2026-10-16T14:29:21.731488166Z [2026-10-16 14:29:21,731: INFO/MainProcess] celery@bf30de8ddb48 ready.
+litkg-worker-parse    | 2026-10-16T14:29:41.360898458Z [2026-10-16 14:29:41,360: INFO/MainProcess] Task parse_document[fdcd7532-00ee-4600-9248-7d5f77ba2520] received
+litkg-worker-parse    | 2026-10-16T14:29:41.363089014Z [2026-10-16 14:29:41,362: INFO/MainProcess] Task parse_document[751a8c1a-760c-4caa-9a3e-95d14995dcc7] received
+litkg-worker-parse    | 2026-10-16T14:29:41.365972003Z [2026-10-16 14:29:41,365: INFO/MainProcess] Task parse_document[efb0b630-9b7b-4096-b3d9-af2abb1b090e] received
+litkg-worker-parse    | 2026-10-16T14:29:41.367409480Z [2026-10-16 14:29:41,367: INFO/MainProcess] Task parse_document[53b46caf-5961-4543-b08e-55d0e01666c1] received
+litkg-worker-parse    | 2026-10-16T14:29:49.899191508Z [2026-10-16 14:29:49,898: INFO/ForkPoolWorker-1] Task parse_document[53b46caf-5961-4543-b08e-55d0e01666c1] succeeded in 8.53084808800486s: {'document_id': 29, 'chunk_count': 29, 'status': 'cataloging'}
+litkg-worker-parse    | 2026-10-16T14:29:52.694329211Z [2026-10-16 14:29:52,694: INFO/ForkPoolWorker-2] Task parse_document[751a8c1a-760c-4caa-9a3e-95d14995dcc7] succeeded in 11.330226914025843s: {'document_id': 27, 'chunk_count': 56, 'status': 'cataloging'}
+litkg-worker-parse    | 2026-10-16T14:29:52.941934311Z [2026-10-16 14:29:52,941: INFO/ForkPoolWorker-4] Task parse_document[fdcd7532-00ee-4600-9248-7d5f77ba2520] succeeded in 11.577765002992237s: {'document_id': 26, 'chunk_count': 33, 'status': 'cataloging'}
+litkg-worker-parse    | 2026-10-16T14:30:03.536325664Z [2026-10-16 14:30:03,536: INFO/ForkPoolWorker-3] Task parse_document[efb0b630-9b7b-4096-b3d9-af2abb1b090e] succeeded in 22.168860471982043s: {'document_id': 28, 'chunk_count': 21, 'status': 'cataloging'}
+litkg-worker-extract  | 2026-10-16T14:30:07.978726350Z     for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
+litkg-worker-extract  | 2026-10-16T14:30:07.978736863Z   File "/app/app/tasks.py", line 111, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:30:07.978747590Z     bundle = cached_model(document_id, 'catalog', key,
+litkg-worker-extract  | 2026-10-16T14:30:07.978757804Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978768826Z   File "/app/app/tasks.py", line 74, in cached_model
+litkg-worker-extract  | 2026-10-16T14:30:07.978778939Z     result = checked(result)
+litkg-worker-extract  | 2026-10-16T14:30:07.978788485Z              ^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978797767Z   File "/app/app/tasks.py", line 43, in checked
+litkg-worker-extract  | 2026-10-16T14:30:07.978808633Z     validated = validate(result.model_copy(deep=True))
+litkg-worker-extract  | 2026-10-16T14:30:07.978818298Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978827640Z   File "/app/app/tasks.py", line 113, in <lambda>
+litkg-worker-extract  | 2026-10-16T14:30:07.978838841Z     validate=lambda b:prepare_catalog(b, validation_segment),
+litkg-worker-extract  | 2026-10-16T14:30:07.978848713Z                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:30:07.978859759Z   File "/app/app/catalog.py", line 142, in prepare_catalog
+litkg-worker-extract  | 2026-10-16T14:30:07.978894588Z     raise CatalogValidationError(f'Catalog mention is absent from its source segment (entity[{index}])')
+litkg-worker-extract  | 2026-10-16T14:30:07.978903854Z app.catalog.CatalogValidationError: Catalog mention is absent from its source segment (entity[7])
+litkg-worker-extract  | 2026-10-16T14:30:07.991155020Z [2026-10-16 14:30:07,990: INFO/MainProcess] Task build_document_catalog[a245578c-a7c0-49cf-ace8-4c50c415e69e] received
+litkg-worker-extract  | 2026-10-16T14:30:09.821514617Z [2026-10-16 14:30:09,821: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:17.933846415Z [2026-10-16 14:30:17,933: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:28.702950662Z [2026-10-16 14:30:28,702: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:33.856807723Z [2026-10-16 14:30:33,856: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:49.390031353Z [2026-10-16 14:30:49,389: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:30:56.545181756Z [2026-10-16 14:30:56,544: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:00.990430913Z [2026-10-16 14:31:00,990: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:04.858902572Z [2026-10-16 14:31:04,858: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:08.479315342Z [2026-10-16 14:31:08,478: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:21.662094183Z [2026-10-16 14:31:21,661: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:28.022215223Z [2026-10-16 14:31:28,021: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:30.640465388Z [2026-10-16 14:31:30,640: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:32.292128143Z [2026-10-16 14:31:32,291: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:35.974204293Z [2026-10-16 14:31:35,973: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:41.647960707Z [2026-10-16 14:31:41,647: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:31:52.754031115Z [2026-10-16 14:31:52,753: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:03.028051529Z [2026-10-16 14:32:03,027: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:06.803716781Z [2026-10-16 14:32:06,803: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:15.529706880Z [2026-10-16 14:32:15,529: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:30.086449755Z [2026-10-16 14:32:30,086: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:33.138894109Z [2026-10-16 14:32:33,138: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:36.214279656Z [2026-10-16 14:32:36,214: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:36.301225705Z [2026-10-16 14:32:36,300: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:40.766511563Z [2026-10-16 14:32:40,766: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:41.351937623Z [2026-10-16 14:32:41,351: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:49.634145145Z [2026-10-16 14:32:49,633: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:32:51.365056338Z [2026-10-16 14:32:51,364: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:00.951947755Z [2026-10-16 14:33:00,951: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:08.513248299Z [2026-10-16 14:33:08,512: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:09.307881947Z [2026-10-16 14:33:09,307: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:17.865034163Z [2026-10-16 14:33:17,864: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:25.083973890Z [2026-10-16 14:33:25,083: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:29.187012582Z [2026-10-16 14:33:29,186: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:41.147668463Z [2026-10-16 14:33:41,147: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:41.322016633Z [2026-10-16 14:33:41,320: ERROR/ForkPoolWorker-1] Task build_document_catalog[a245578c-a7c0-49cf-ace8-4c50c415e69e] raised unexpected: CatalogValidationError('Catalog mention is absent from its source segment (entity[17])')
+litkg-worker-extract  | 2026-10-16T14:33:41.322073984Z Traceback (most recent call last):
+litkg-worker-extract  | 2026-10-16T14:33:41.322088336Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+litkg-worker-extract  | 2026-10-16T14:33:41.322102289Z     R = retval = fun(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:33:41.322112986Z                  ^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322147120Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+litkg-worker-extract  | 2026-10-16T14:33:41.322156067Z     return self.run(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:33:41.322163559Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322170798Z   File "/app/app/tasks.py", line 295, in build_document_catalog
+litkg-worker-extract  | 2026-10-16T14:33:41.322180511Z     for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
+litkg-worker-extract  | 2026-10-16T14:33:41.322191170Z   File "/app/app/tasks.py", line 111, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:33:41.322199937Z     bundle = cached_model(document_id, 'catalog', key,
+litkg-worker-extract  | 2026-10-16T14:33:41.322207674Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322217278Z   File "/app/app/tasks.py", line 74, in cached_model
+litkg-worker-extract  | 2026-10-16T14:33:41.322225132Z     result = checked(result)
+litkg-worker-extract  | 2026-10-16T14:33:41.322234618Z              ^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322241721Z   File "/app/app/tasks.py", line 43, in checked
+litkg-worker-extract  | 2026-10-16T14:33:41.322251269Z     validated = validate(result.model_copy(deep=True))
+litkg-worker-extract  | 2026-10-16T14:33:41.322258614Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322265984Z   File "/app/app/tasks.py", line 113, in <lambda>
+litkg-worker-extract  | 2026-10-16T14:33:41.322276473Z     validate=lambda b:prepare_catalog(b, validation_segment),
+litkg-worker-extract  | 2026-10-16T14:33:41.322284227Z                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:33:41.322293328Z   File "/app/app/catalog.py", line 142, in prepare_catalog
+litkg-worker-extract  | 2026-10-16T14:33:41.322301372Z     raise CatalogValidationError(f'Catalog mention is absent from its source segment (entity[{index}])')
+litkg-worker-extract  | 2026-10-16T14:33:41.322309446Z app.catalog.CatalogValidationError: Catalog mention is absent from its source segment (entity[17])
+litkg-worker-extract  | 2026-10-16T14:33:41.332105107Z [2026-10-16 14:33:41,331: INFO/MainProcess] Task build_document_catalog[031cfd1f-ec1d-49dc-a744-9c75d0ea017d] received
+litkg-worker-extract  | 2026-10-16T14:33:54.453904160Z [2026-10-16 14:33:54,453: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:55.318573028Z [2026-10-16 14:33:55,318: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:33:57.629944572Z [2026-10-16 14:33:57,629: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:04.595188462Z [2026-10-16 14:34:04,594: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:09.467518494Z [2026-10-16 14:34:09,467: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:17.629814037Z [2026-10-16 14:34:17,629: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:31.823867823Z [2026-10-16 14:34:31,823: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:32.610772743Z [2026-10-16 14:34:32,610: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:37.043171151Z [2026-10-16 14:34:37,042: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:43.559826363Z [2026-10-16 14:34:43,559: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:48.013590418Z [2026-10-16 14:34:48,013: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:34:58.807797291Z [2026-10-16 14:34:58,807: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:35:01.812437593Z [2026-10-16 14:35:01,812: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:35:09.548769404Z [2026-10-16 14:35:09,548: INFO/ForkPoolWorker-2] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:35:09.680215859Z [2026-10-16 14:35:09,678: ERROR/ForkPoolWorker-2] Task build_document_catalog[27a381d1-97e9-4d54-8fc2-f8712623cc4f] raised unexpected: CatalogValidationError('Catalog mention is absent from its source segment (entity[10])')
+litkg-worker-extract  | 2026-10-16T14:35:09.680262416Z Traceback (most recent call last):
+litkg-worker-extract  | 2026-10-16T14:35:09.680274841Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+litkg-worker-extract  | 2026-10-16T14:35:09.680286868Z     R = retval = fun(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:35:09.680296876Z                  ^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680307506Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+litkg-worker-extract  | 2026-10-16T14:35:09.680317640Z     return self.run(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:35:09.680328261Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680337573Z   File "/app/app/tasks.py", line 295, in build_document_catalog
+litkg-worker-extract  | 2026-10-16T14:35:09.680348744Z     for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
+litkg-worker-extract  | 2026-10-16T14:35:09.680358778Z   File "/app/app/tasks.py", line 134, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:35:09.680369796Z     yield from catalog_segment_bundles(document_id, title, child, extraction_epoch, min_chars)
+litkg-worker-extract  | 2026-10-16T14:35:09.680379654Z   File "/app/app/tasks.py", line 111, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:35:09.680390640Z     bundle = cached_model(document_id, 'catalog', key,
+litkg-worker-extract  | 2026-10-16T14:35:09.680400096Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680412856Z   File "/app/app/tasks.py", line 74, in cached_model
+litkg-worker-extract  | 2026-10-16T14:35:09.680423137Z     result = checked(result)
+litkg-worker-extract  | 2026-10-16T14:35:09.680455699Z              ^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680465531Z   File "/app/app/tasks.py", line 43, in checked
+litkg-worker-extract  | 2026-10-16T14:35:09.680474261Z     validated = validate(result.model_copy(deep=True))
+litkg-worker-extract  | 2026-10-16T14:35:09.680481679Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680489182Z   File "/app/app/tasks.py", line 113, in <lambda>
+litkg-worker-extract  | 2026-10-16T14:35:09.680497052Z     validate=lambda b:prepare_catalog(b, validation_segment),
+litkg-worker-extract  | 2026-10-16T14:35:09.680505626Z                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:35:09.680514032Z   File "/app/app/catalog.py", line 142, in prepare_catalog
+litkg-worker-extract  | 2026-10-16T14:35:09.680525979Z     raise CatalogValidationError(f'Catalog mention is absent from its source segment (entity[{index}])')
+litkg-worker-extract  | 2026-10-16T14:35:09.680534611Z app.catalog.CatalogValidationError: Catalog mention is absent from its source segment (entity[10])
+litkg-worker-extract  | 2026-10-16T14:35:27.666448212Z [2026-10-16 14:35:27,666: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:35:38.430790769Z [2026-10-16 14:35:38,430: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:35:51.261750846Z [2026-10-16 14:35:51,261: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:36:03.427114401Z [2026-10-16 14:36:03,426: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:36:07.898983822Z [2026-10-16 14:36:07,898: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:36:33.356886745Z [2026-10-16 14:36:33,356: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:36:49.905528164Z [2026-10-16 14:36:49,905: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:11.643826711Z [2026-10-16 14:37:11,643: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:16.593697055Z [2026-10-16 14:37:16,593: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:19.878443041Z [2026-10-16 14:37:19,878: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:26.204571210Z [2026-10-16 14:37:26,204: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:28.894843972Z [2026-10-16 14:37:28,894: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:37:54.237586601Z [2026-10-16 14:37:54,237: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:38:11.349002412Z [2026-10-16 14:38:11,348: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:38:30.757366212Z [2026-10-16 14:38:30,757: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:38:48.245670044Z [2026-10-16 14:38:48,245: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:39:05.716570749Z [2026-10-16 14:39:05,716: INFO/ForkPoolWorker-1] HTTP Request: POST http://10.181.9.172:11451/v1/chat/completions "HTTP/1.1 200 OK"
+litkg-worker-extract  | 2026-10-16T14:39:05.845316467Z [2026-10-16 14:39:05,843: ERROR/ForkPoolWorker-1] Task build_document_catalog[031cfd1f-ec1d-49dc-a744-9c75d0ea017d] raised unexpected: CatalogValidationError('Catalog mention is absent from its source segment (entity[18])')
+litkg-worker-extract  | 2026-10-16T14:39:05.845367144Z Traceback (most recent call last):
+litkg-worker-extract  | 2026-10-16T14:39:05.845389010Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+litkg-worker-extract  | 2026-10-16T14:39:05.845401427Z     R = retval = fun(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:39:05.845413025Z                  ^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845423489Z   File "/usr/local/lib/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+litkg-worker-extract  | 2026-10-16T14:39:05.845435014Z     return self.run(*args, **kwargs)
+litkg-worker-extract  | 2026-10-16T14:39:05.845444987Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845456265Z   File "/app/app/tasks.py", line 295, in build_document_catalog
+litkg-worker-extract  | 2026-10-16T14:39:05.845466121Z     for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
+litkg-worker-extract  | 2026-10-16T14:39:05.845477517Z   File "/app/app/tasks.py", line 134, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:39:05.845487125Z     yield from catalog_segment_bundles(document_id, title, child, extraction_epoch, min_chars)
+litkg-worker-extract  | 2026-10-16T14:39:05.845498201Z   File "/app/app/tasks.py", line 111, in catalog_segment_bundles
+litkg-worker-extract  | 2026-10-16T14:39:05.845507718Z     bundle = cached_model(document_id, 'catalog', key,
+litkg-worker-extract  | 2026-10-16T14:39:05.845518638Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845528134Z   File "/app/app/tasks.py", line 74, in cached_model
+litkg-worker-extract  | 2026-10-16T14:39:05.845539280Z     result = checked(result)
+litkg-worker-extract  | 2026-10-16T14:39:05.845548436Z              ^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845559099Z   File "/app/app/tasks.py", line 43, in checked
+litkg-worker-extract  | 2026-10-16T14:39:05.845568450Z     validated = validate(result.model_copy(deep=True))
+litkg-worker-extract  | 2026-10-16T14:39:05.845579160Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845588463Z   File "/app/app/tasks.py", line 113, in <lambda>
+litkg-worker-extract  | 2026-10-16T14:39:05.845599862Z     validate=lambda b:prepare_catalog(b, validation_segment),
+litkg-worker-extract  | 2026-10-16T14:39:05.845610007Z                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litkg-worker-extract  | 2026-10-16T14:39:05.845621031Z   File "/app/app/catalog.py", line 142, in prepare_catalog
+litkg-worker-extract  | 2026-10-16T14:39:05.845689663Z     raise CatalogValidationError(f'Catalog mention is absent from its source segment (entity[{index}])')
+litkg-worker-extract  | 2026-10-16T14:39:05.845704629Z app.catalog.CatalogValidationError: Catalog mention is absent from its source segment (entity[18])

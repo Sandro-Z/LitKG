@@ -104,6 +104,51 @@ class ApiTests(unittest.TestCase):
                     response = self.client.get(path)
                 self.assertEqual(response.status_code, 404)
 
+    def test_knowledge_base_update_trims_fields_and_preserves_identity(self):
+        row = {"id": 3, "slug": "kb-original", "name": "新名称", "description": None}
+        connection, cursor = self.connection(row=row)
+        with patch.object(self.main, "get_conn", return_value=connection):
+            response = self.client.put("/knowledge-bases/3", json={"name": " 新名称 ", "description": "  "})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), row)
+        self.assertEqual(cursor.execute.call_args.args[1], ("新名称", None, 3))
+        self.assertIn("updated_at = now()", cursor.execute.call_args.args[0])
+
+    def test_knowledge_base_update_rejects_invalid_fields(self):
+        with patch.object(self.main, "get_conn") as connect:
+            for payload in [{"name": ""}, {"name": "   "}, {"name": "x" * 201},
+                            {"name": "valid", "description": "x" * 2001}, {}]:
+                with self.subTest(payload=payload):
+                    self.assertEqual(self.client.put("/knowledge-bases/3", json=payload).status_code, 422)
+            connect.assert_not_called()
+
+    def test_knowledge_base_mutations_return_404_for_missing_id(self):
+        for method, kwargs in [(self.client.put, {"json": {"name": "name"}}),
+                               (self.client.delete, {"params": {"confirm_name": "name"}})]:
+            connection, cursor = self.connection()
+            with patch.object(self.main, "get_conn", return_value=connection):
+                self.assertEqual(method("/knowledge-bases/999", **kwargs).status_code, 404)
+            self.assertEqual(cursor.execute.call_count, 1)
+
+    def test_delete_requires_current_name_and_does_not_write_on_mismatch(self):
+        connection, cursor = self.connection(row={"id": 3, "name": "renamed"})
+        with patch.object(self.main, "get_conn", return_value=connection):
+            self.assertEqual(self.client.delete("/knowledge-bases/3").status_code, 422)
+            self.assertEqual(self.client.delete("/knowledge-bases/3", params={"confirm_name": "old name"}).status_code, 409)
+        self.assertEqual(cursor.execute.call_count, 1)
+        self.assertIn("FOR UPDATE", cursor.execute.call_args.args[0])
+
+    def test_delete_removes_only_knowledge_base_and_scoped_reviews(self):
+        connection, cursor = self.connection(row={"id": 3, "name": "测试库"})
+        with patch.object(self.main, "get_conn", return_value=connection):
+            response = self.client.delete("/knowledge-bases/3", params={"confirm_name": "测试库"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "deleted", "knowledge_base_id": 3, "name": "测试库"})
+        writes = [(call.args[0], call.args[1]) for call in cursor.execute.call_args_list[1:]]
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[0][1], ("3",))
+        self.assertEqual(writes[1], ("DELETE FROM knowledge_bases WHERE id = %s", (3,)))
+
     def test_extraction_replaces_model_page_guesses_with_parser_pages(self):
         from app import tasks
         from app.schemas import ClaimBundle
@@ -130,7 +175,7 @@ class ApiTests(unittest.TestCase):
                 ), patch.object(tasks, "refresh_document_status"), patch.object(
                     tasks, "extract_claims", return_value=bundle
                 ), patch.object(tasks, "load_catalog", return_value=[]), patch.object(
-                    tasks, "cached_model", return_value=bundle
+                    tasks, "extract_chunk_claims", return_value=bundle
                 ), patch.object(tasks, "store_claim", return_value=(1, 1)) as store:
                     tasks.extract_chunk.run(8)
                 evidence = store.call_args.kwargs["claim"].evidence

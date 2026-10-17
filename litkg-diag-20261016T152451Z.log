@@ -1,0 +1,35 @@
+
+=== UTC / checked-out revision ===
+2026年 10月 16日 星期五 15:24:51 UTC
+17a86d9f5e481b45fbcf44e61961d7d2d52124a9
+
+=== Services ===
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+=== Runtime source hashes (against local manifest) ===
+
+--- api ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+--- worker_parse ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+--- worker_extract ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+=== Database / grounded-output evidence (worker_extract runtime) ===
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+=== Celery active / reserved / scheduled (read-only inspection) ===
+
+--- active ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+--- reserved ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+--- scheduled ---
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+
+=== Recent worker logs (last four hours, up to 1500 lines per service) ===
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock

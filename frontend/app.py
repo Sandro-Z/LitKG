@@ -52,6 +52,99 @@ def api_post_json(path: str, payload: dict):
     return response.json()
 
 
+def api_put_json(path: str, payload: dict):
+    response = requests.put(f"{API_BASE_URL}{path}", json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def api_delete(path: str, params: dict):
+    response = requests.delete(f"{API_BASE_URL}{path}", params=params, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def knowledge_base_error(exc):
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        try:
+            detail = exc.response.json().get("detail")
+            if isinstance(detail, str):
+                return detail
+        except ValueError:
+            pass
+    return str(exc)
+
+
+def create_knowledge_base():
+    state = st.session_state
+    state.pop("knowledge_base_success", None)
+    name = state["new_knowledge_base_name"].strip()
+    if not name:
+        state["knowledge_base_create_error"] = "请输入知识库名称。"
+        return
+    try:
+        created = api_post_json("/knowledge-bases", {
+            "name": name,
+            "description": state["new_knowledge_base_description"].strip() or None,
+        })
+    except Exception as exc:
+        state["knowledge_base_create_error"] = f"创建失败：{knowledge_base_error(exc)}"
+        return
+    # Form callbacks run before the next render, so widget state can be reset
+    # safely. The success banner survives both this render and auto-refreshes.
+    state["new_knowledge_base_name"] = ""
+    state["new_knowledge_base_description"] = ""
+    state["knowledge_base_create_open"] = False
+    state["selected_knowledge_base_id"] = created["id"]
+    state.pop("knowledge_base_create_error", None)
+    state["knowledge_base_success"] = f"知识库「{created['name']}」已创建。"
+
+
+def update_knowledge_base(knowledge_base_id):
+    state = st.session_state
+    state.pop("knowledge_base_success", None)
+    name = state[f"edit_knowledge_base_name_{knowledge_base_id}"].strip()
+    if not name:
+        state[f"knowledge_base_edit_error_{knowledge_base_id}"] = "请输入知识库名称。"
+        return
+    try:
+        updated = api_put_json(f"/knowledge-bases/{knowledge_base_id}", {
+            "name": name,
+            "description": state[f"edit_knowledge_base_description_{knowledge_base_id}"].strip() or None,
+        })
+    except Exception as exc:
+        state[f"knowledge_base_edit_error_{knowledge_base_id}"] = f"保存失败：{knowledge_base_error(exc)}"
+        return
+    state.pop(f"knowledge_base_edit_error_{knowledge_base_id}", None)
+    state[f"edit_knowledge_base_name_{knowledge_base_id}"] = updated["name"]
+    state[f"edit_knowledge_base_description_{knowledge_base_id}"] = updated.get("description") or ""
+    state["knowledge_base_success"] = f"知识库「{updated['name']}」已更新。"
+
+
+def delete_knowledge_base(knowledge_base_id, name):
+    state = st.session_state
+    state.pop("knowledge_base_success", None)
+    confirmation = state[f"delete_knowledge_base_name_{knowledge_base_id}"]
+    if confirmation != name:
+        state[f"knowledge_base_delete_error_{knowledge_base_id}"] = "名称不匹配，请输入当前知识库的完整名称。"
+        return
+    try:
+        api_delete(f"/knowledge-bases/{knowledge_base_id}", {"confirm_name": confirmation})
+    except Exception as exc:
+        state[f"knowledge_base_delete_error_{knowledge_base_id}"] = f"删除失败：{knowledge_base_error(exc)}"
+        return
+    state.pop("selected_knowledge_base_id", None)
+    scoped_keys = {f"{prefix}_{knowledge_base_id}" for prefix in (
+        "normalization", "diagnostics", "answer", "maintenance", "edit_knowledge_base_name",
+        "edit_knowledge_base_description", "delete_knowledge_base_name",
+        "knowledge_base_edit_error", "knowledge_base_delete_error",
+    )}
+    for key in list(state):
+        if key in scoped_keys or key.startswith(f"kg_search_{knowledge_base_id}_"):
+            del state[key]
+    state["knowledge_base_success"] = f"知识库「{name}」已删除。"
+
+
 def api_upload_batch(
     knowledge_base_id: int,
     uploaded_files,
@@ -193,6 +286,8 @@ def main():
     st.caption(
         "批量摄取 PDF，跨文献合并实体与关系，并保留逐篇、逐句证据来源"
     )
+    if st.session_state.get("knowledge_base_success"):
+        st.success(st.session_state["knowledge_base_success"])
 
     try:
         knowledge_bases = load_knowledge_bases()
@@ -215,30 +310,47 @@ def main():
                 )
                 for item in knowledge_bases
             }
+            if st.session_state.get("selected_knowledge_base_id") not in labels:
+                st.session_state["selected_knowledge_base_id"] = next(iter(labels))
             selected_knowledge_base_id = st.selectbox(
                 "当前知识库",
                 options=list(labels),
                 format_func=lambda item_id: labels[item_id],
+                key="selected_knowledge_base_id",
             )
 
-        with st.expander("新建知识库"):
+        if st.button("新建知识库", use_container_width=True):
+            st.session_state["knowledge_base_create_open"] = not st.session_state.get("knowledge_base_create_open", False)
+            st.session_state.pop("knowledge_base_create_error", None)
+        if st.session_state.get("knowledge_base_create_open"):
             with st.form("create_knowledge_base"):
-                new_name = st.text_input("名称")
-                new_description = st.text_area("说明")
-                create_clicked = st.form_submit_button("创建")
-            if create_clicked:
-                try:
-                    api_post_json(
-                        "/knowledge-bases",
-                        {
-                            "name": new_name,
-                            "description": new_description or None,
-                        },
-                    )
-                    st.success("知识库已创建。")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"创建失败：{exc}")
+                st.text_input("名称", key="new_knowledge_base_name", max_chars=200)
+                st.text_area("说明", key="new_knowledge_base_description", max_chars=2000)
+                st.form_submit_button("创建", on_click=create_knowledge_base)
+            if st.session_state.get("knowledge_base_create_error"):
+                st.error(st.session_state["knowledge_base_create_error"])
+
+        if selected_knowledge_base_id is not None:
+            current = next(item for item in knowledge_bases if item["id"] == selected_knowledge_base_id)
+            with st.expander("编辑当前知识库"):
+                st.session_state.setdefault(f"edit_knowledge_base_name_{selected_knowledge_base_id}", current["name"])
+                st.session_state.setdefault(f"edit_knowledge_base_description_{selected_knowledge_base_id}", current.get("description") or "")
+                with st.form(f"edit_knowledge_base_{selected_knowledge_base_id}"):
+                    st.text_input("知识库名称", max_chars=200,
+                                  key=f"edit_knowledge_base_name_{selected_knowledge_base_id}")
+                    st.text_area("知识库说明", max_chars=2000,
+                                 key=f"edit_knowledge_base_description_{selected_knowledge_base_id}")
+                    st.form_submit_button("保存修改", on_click=update_knowledge_base, args=(selected_knowledge_base_id,))
+                if st.session_state.get(f"knowledge_base_edit_error_{selected_knowledge_base_id}"):
+                    st.error(st.session_state[f"knowledge_base_edit_error_{selected_knowledge_base_id}"])
+            with st.expander("删除当前知识库"):
+                st.warning(f"将删除「{current['name']}」及其全部文献关联、批次、索引和维护记录。此操作无法撤销。原始 PDF 和共享文献保留。")
+                with st.form(f"delete_knowledge_base_{selected_knowledge_base_id}"):
+                    st.text_input("输入知识库名称以确认删除", key=f"delete_knowledge_base_name_{selected_knowledge_base_id}", max_chars=200)
+                    st.form_submit_button("确认删除整个知识库", on_click=delete_knowledge_base,
+                                          args=(selected_knowledge_base_id, current["name"]), type="primary")
+                if st.session_state.get(f"knowledge_base_delete_error_{selected_knowledge_base_id}"):
+                    st.error(st.session_state[f"knowledge_base_delete_error_{selected_knowledge_base_id}"])
 
         st.divider()
         auto_refresh = st.checkbox("自动刷新", value=True)

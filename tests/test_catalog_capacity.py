@@ -28,6 +28,8 @@ class SegmentCache:
             self.rows.setdefault((stage,key),copy.deepcopy(payload.obj))
         elif query.startswith('INSERT INTO processing_attempts'):
             self.attempts.append({'status':'failed' if "'failed'" in query else 'done','output':copy.deepcopy(params[4].obj)})
+        elif query.startswith('DELETE FROM processing_cache'):
+            self.rows.pop((params[1],params[2]),None)
         else:
             raise AssertionError(query)
         return self
@@ -74,7 +76,7 @@ class CatalogCapacityTests(unittest.TestCase):
             self.assertEqual(chat.call_args.kwargs['max_tokens'],1234)
         with patch.object(self.llm,'chat_completion',return_value='{"claims":[]}',) as chat:
             self.llm.extract_claims('Results','Source text.')
-            self.assertEqual(chat.call_args.kwargs,{})
+            self.assertEqual(chat.call_args.kwargs,{'max_tokens':self.llm.CLAIMS_MAX_OUTPUT_TOKENS})
 
     def test_truncation_subdivides_once_and_completed_tree_is_reused(self):
         cache=SegmentCache()

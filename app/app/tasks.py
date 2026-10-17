@@ -9,7 +9,9 @@ from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, project_existing_claim, store_claim, upsert_entity
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
-    CATALOG_MAX_OUTPUT_TOKENS, ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
+    CATALOG_MAX_OUTPUT_TOKENS, CLAIMS_MAX_OUTPUT_TOKENS, CLAIMS_PROMPT_VERSION,
+    ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
+from app.claims import ClaimValidationError, prepare_claims, combine_claims, repair_candidates, merge_correction
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, CATALOG_CACHE_VERSION, EXTRACTION_VERSION, digest, segments,
     prepare_catalog, CatalogValidationError, split_catalog_segment, merge_catalog, relevant_entries, load_catalog, resolve_bundle, add_review, archive_claims, source_contains)
@@ -18,6 +20,7 @@ from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
 from app.normalization import extract_abbreviations
 from app.parser import parse_pdf_to_chunks
 from app.provenance import locate_evidence_pages
+from app.recovery import heartbeat_lease
 
 MODEL_SIGNATURE = digest([LLM_BASE_URL, LLM_MODEL, LLM_REVISION])
 
@@ -30,7 +33,11 @@ def processing_lock(key):
         conn.autocommit = True
         acquired = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS acquired", (key,)).fetchone()["acquired"]
         try:
-            yield acquired
+            if acquired:
+                with heartbeat_lease(conn, get_conn, key):
+                    yield True
+            else:
+                yield False
         finally:
             if acquired:
                 conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
@@ -58,6 +65,12 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     if row:
         try:
             result = checked(schema.model_validate(row["payload"]))
+            if stage == 'claims':
+                # Partial results are audited, but must remain retryable. Good
+                # sibling leaves use their complete caches on the next retry.
+                if row['payload'].get('_claim_rejections'):
+                    raise ClaimValidationError('Retrying unresolved claim candidates')
+                result._repair_ids = row['payload'].get('_repair_ids', [])
             if stage == 'catalog':
                 # Private, server-produced audit metadata survives a resumed
                 # build. It is deliberately outside the model JSON schema.
@@ -86,20 +99,98 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
             last_error = exc
             original = getattr(exc, 'raw', None) or parsed
     payload = result.model_dump(mode='json')
-    rejections = getattr(result, '_catalog_rejections', [])
+    rejections = getattr(result, '_catalog_rejections', []) or getattr(result, '_claim_rejections', [])
+    if stage == 'claims':
+        payload['_claim_rejections'] = result._claim_rejections
+        payload['_repair_ids'] = result._repair_ids
     if stage == 'catalog':
         for name in ('_catalog_repairs', '_catalog_rejections'):
             if getattr(result, name):
                 payload[name] = getattr(result, name)
-    audit_status = 'partial' if rejections else 'done'
+    empty_failure = stage == 'claims' and bool(rejections) and not result.claims
+    audit_status = 'failed' if empty_failure else ('partial' if rejections else 'done')
     with get_conn() as conn:
-        conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                     (document_id, stage, key, Jsonb(payload)))
-        conn.execute(f"""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output)
-            VALUES (%s, %s, %s, %s, '{audit_status}', %s)""", (document_id, chunk_id, stage, key,
+        if not empty_failure:
+            conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                         (document_id, stage, key, Jsonb(payload)))
+        conn.execute(f"""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
+            VALUES (%s, %s, %s, %s, '{audit_status}', %s, %s)""", (document_id, chunk_id, stage, key,
             Jsonb({'parsed': payload, 'original_parsed': parsed, 'raw': raw_output,
-                   'repairs': getattr(result, '_catalog_repairs', []), 'rejections': rejections})))
+                   'repairs': getattr(result, '_catalog_repairs', []), 'rejections': rejections}),
+            '; '.join(item['error'] for item in rejections) if rejections else None))
     return result
+
+
+def claim_segment_bundles(document_id, segment, entries, version):
+    """Bounded correction + durable split tree; one bad leaf cannot erase others."""
+    minimum = int(os.environ.get('CLAIMS_MIN_SEGMENT_CHARS', '500'))
+    attempts = max(1, min(3, int(os.environ.get('CLAIMS_VALIDATION_ATTEMPTS', '2'))))
+    key = digest([EXTRACTION_VERSION, CLAIMS_PROMPT_VERSION, MODEL_SIGNATURE, version,
+                  segment['section_title'], segment['text'], minimum, CLAIMS_MAX_OUTPUT_TOKENS])
+    split_key = digest(['claims-split-v1', key])
+    with get_conn() as conn:
+        split = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s",
+                             (document_id, 'claims_split', split_key)).fetchone()
+    directory = relevant_entries(entries, segment['text'])
+    def invoke(**kwargs):
+        return extract_claims(section_title=segment['section_title'] or 'Unknown',
+                              chunk_text=segment['text'], directory=directory, **kwargs)
+    def validate(bundle):
+        return prepare_claims(bundle, entries, segment, version)
+    try:
+        if not split:
+            bundle = cached_model(document_id, 'claims', key, invoke, ClaimBundle, segment['id'], validate=validate,
+                retry_call=lambda error, previous:invoke(feedback=str(error), previous_output=previous), max_attempts=attempts)
+            for attempt in range(1, attempts):
+                if not bundle._claim_rejections:
+                    break
+                previous = repair_candidates(bundle._claim_rejections)
+                feedback = '; '.join(f"repair_id={i}: {item['error']}" for i,item in enumerate(bundle._claim_rejections))
+                correction_key = digest([key, 'correction', attempt, previous])
+                try:
+                    correction = cached_model(document_id, 'claims', correction_key,
+                        lambda:invoke(feedback=feedback, previous_output=previous), ClaimBundle, segment['id'], validate=validate)
+                except Exception as exc:
+                    # The original passing claims still survive a bad correction.
+                    for rejection in bundle._claim_rejections:
+                        rejection['correction_error'] = f'{type(exc).__name__}: {exc}'
+                    break
+                bundle = merge_correction(bundle, correction)
+            yield segment, bundle
+            return
+        children = split_catalog_segment(segment, minimum)
+    except ModelOutputTruncatedError as exc:
+        children = split_catalog_segment(segment, minimum)
+        if not children:
+            bundle = ClaimBundle(claims=[])
+            bundle._claim_rejections = [{'error':f'{type(exc).__name__}: {exc}', 'kind':'capacity',
+                                         'start':segment['start'], 'end':segment['end']}]
+            yield segment, bundle
+            return
+        with get_conn() as conn:
+            conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                         (document_id,'claims_split',split_key,Jsonb({'strategy':'overlapping-halves-v1'})))
+    except Exception as exc:
+        bundle = ClaimBundle(claims=[])
+        bundle._claim_rejections = [{'error':f'{type(exc).__name__}: {exc}', 'kind':'segment_failure',
+                                     'start':segment['start'], 'end':segment['end']}]
+        yield segment, bundle
+        return
+    if not children:
+        raise ClaimValidationError('Invalid claims split cache')
+    for child in children:
+        yield from claim_segment_bundles(document_id, child, entries, version)
+
+
+def extract_chunk_claims(document_id, chunk, entries, version):
+    bundles = []
+    maximum = int(os.environ.get('CLAIMS_SEGMENT_CHARS', '3000'))
+    for initial in segments([chunk], maximum):
+        for segment, bundle in claim_segment_bundles(document_id, initial, entries, version):
+            for rejected in bundle._claim_rejections:
+                rejected.update(start=segment['start'], end=segment['end'])
+            bundles.append(bundle)
+    return combine_claims(bundles)
 
 
 def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_chars=None):
@@ -190,11 +281,12 @@ def refresh_document_status(document_id: int) -> str:
                     COUNT(*)::INT AS total,
                     COUNT(*) FILTER (WHERE status = 'done')::INT AS done,
                     COUNT(*) FILTER (WHERE status = 'failed')::INT AS failed,
+                    COUNT(*) FILTER (WHERE status = 'partial')::INT AS partial,
                     COUNT(*) FILTER (
                         WHERE status IN ('queued', 'extracting')
                     )::INT AS active,
                     STRING_AGG(error, '; ' ORDER BY id)
-                        FILTER (WHERE status = 'failed' AND error IS NOT NULL)
+                        FILTER (WHERE status IN ('failed','partial') AND error IS NOT NULL)
                         AS errors
                 FROM chunks
                 WHERE document_id = %s
@@ -209,10 +301,10 @@ def refresh_document_status(document_id: int) -> str:
             elif stats["active"] > 0:
                 status = "extracting"
                 error = None
-            elif stats["failed"] == 0:
+            elif stats["failed"] == 0 and stats["partial"] == 0:
                 status = "done"
                 error = None
-            elif stats["done"] == 0:
+            elif stats["done"] == 0 and stats["partial"] == 0:
                 status = "failed"
                 error = stats["errors"]
             else:
@@ -233,7 +325,7 @@ def refresh_document_status(document_id: int) -> str:
 
 
 @celery_app.task(name="parse_document", queue="parse")
-def parse_document(document_id: int):
+def parse_document(document_id: int, publish: bool = True):
     with processing_lock(f"litkg-document:{document_id}") as acquired:
         if not acquired:
             return {"document_id": document_id, "status": "busy"}
@@ -267,7 +359,8 @@ def parse_document(document_id: int):
                             (document_id, index, chunk.get("section_title"), chunk.get("page_start"), chunk.get("page_end"),
                              Jsonb(chunk.get("page_spans", [])), chunk["text"], chunk.get("token_estimate")))
                     cur.execute("DELETE FROM chunks WHERE document_id = %s AND chunk_index >= %s", (document_id, len(parsed_chunks)))
-            build_document_catalog.apply_async(args=[document_id], queue="extract")
+            if publish:
+                build_document_catalog.apply_async(args=[document_id], queue="extract")
             return {"document_id": document_id, "chunk_count": len(parsed_chunks), "status": "cataloging"}
         except Exception as exc:
             update_document_status(document_id, "failed", f"Parse failed: {type(exc).__name__}: {exc}")
@@ -383,9 +476,14 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                     entries = load_catalog(cur, document_id, version)
             update_chunk_status(chunk_id, "extracting")
             key = digest([EXTRACTION_VERSION, MODEL_SIGNATURE, version, chunk['section_title'], chunk["text"]])
-            def identify():
-                return extract_claims(section_title=chunk["section_title"] or "Unknown", chunk_text=chunk["text"], directory=relevant_entries(entries, chunk["text"]))
-            bundle = cached_model(document_id, "claims", key, identify, ClaimBundle, chunk_id, validate=lambda b:resolve_bundle(b,entries,chunk,version))
+            bundle = extract_chunk_claims(document_id, chunk, entries, version)
+            rejected = bundle._claim_rejections
+            if rejected:
+                with get_conn() as conn:
+                    for rejection in rejected:
+                        add_review(conn.cursor(), document_id, version, 'claim_rejection', {'chunk_id':chunk_id, **rejection})
+            if rejected and not bundle.claims:
+                raise ClaimValidationError(f'{len(rejected)} unresolved claim/segment errors: ' + '; '.join(r['error'] for r in rejected))
             raw_claims = [c.model_dump(mode='json') for c in bundle.claims]
             omissions = resolve_bundle(bundle, entries, chunk, version)
             with get_conn() as conn:
@@ -406,7 +504,8 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                         claim_id, _ = store_claim(cur, document_id=document_id, chunk_id=chunk_id, claim=claim,
                                                  extraction_model=LLM_MODEL, abbreviations=chunk["abbreviation_map"], original_claim_json=raw_claim)
                         kept.append(claim_id)
-                    cur.execute("DELETE FROM claims WHERE chunk_id = %s AND NOT (id = ANY(%s::BIGINT[]))", (chunk_id, kept))
+                    if not rejected:
+                        cur.execute("DELETE FROM claims WHERE chunk_id = %s AND NOT (id = ANY(%s::BIGINT[]))", (chunk_id, kept))
                     # Missing directory items are appended to this immutable source/
                     # processing version; existing local IDs never change.
                     for entity, location in omissions:
@@ -420,11 +519,15 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                               '{locations}',(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements((document_entities.entry->'locations') || (EXCLUDED.entry->'locations'))))""",
                             (document_id,version,entry["local_id"],entity_id,Jsonb(entry)))
                         add_review(cur, document_id, version, "catalog_omission", {"entry": entry, "location": location})
-                    cur.execute("UPDATE chunks SET status = 'done', extraction_version = %s, error = NULL, updated_at = now() WHERE id = %s", (key, chunk_id))
+                    chunk_status = 'partial' if rejected else 'done'
+                    error = (f'{len(rejected)} unresolved claim/segment errors: ' + '; '.join(r['error'] for r in rejected)) if rejected else None
+                    cur.execute("UPDATE chunks SET status=%s, extraction_version=%s, error=%s, updated_at=now() WHERE id=%s",
+                                (chunk_status, key, error, chunk_id))
             status = refresh_document_status(document_id)
             if refresh and status in {"done", "partial"}:
                 refresh_derived.apply_async(args=[document_id], queue="extract")
-            return {"chunk_id": chunk_id, "document_id": document_id, "claim_count": len(bundle.claims)}
+            return {"chunk_id": chunk_id, "document_id": document_id, "claim_count": len(bundle.claims),
+                    'status':chunk_status, 'rejected_count':len(rejected)}
         except Exception as exc:
             if document_id is not None:
                 with get_conn() as conn:
@@ -637,7 +740,13 @@ def maintain_knowledge_base(job_id: str):
                         refresh_derived.run(doc_id)
                     else:
                         force = job["mode"] == "reextract"
-                        if force or document["catalog_status"] != "done":
+                        with get_conn() as conn:
+                            saved = conn.execute('SELECT count(*) AS n FROM chunks WHERE document_id=%s', (doc_id,)).fetchone()['n']
+                        if not saved:
+                            parsed = parse_document.run(doc_id, publish=False)
+                            if parsed.get('status') == 'busy':
+                                raise ValueError('Document is busy')
+                        if not saved or force or document["catalog_status"] != "done":
                             result = build_document_catalog.run(doc_id, force=force, publish=False)
                             if result.get("status") == "busy":
                                 raise ValueError("Document is busy")

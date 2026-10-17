@@ -739,3 +739,33 @@ expected_document_ids。评估输出类型/Other 分布、同名候选重复实�
 [来源约束与派生页面](https://github.com/nashsu/llm_wiki/blob/main/src/lib/ingest.ts)、
 [HyperGraphRAG 的实体/完整事实召回和原文组合](https://github.com/LHRLAB/HyperGraphRAG/blob/main/hypergraphrag/operate.py)。
 没有移植其图数据库、桌面应用或代理系统。
+
+### 2026-10-17 关系抽取与遗留任务恢复
+
+关系抽取默认按 3000 字符、带重叠分段，单次输出预算独立为 8192 tokens。
+截断后递归拆分到 500 字符下限；缓存拆分计划和成功子段。不能把截断前缀当作完整结果。
+`CLAIMS_SEGMENT_CHARS`、`CLAIMS_MIN_SEGMENT_CHARS`、`CLAIMS_MAX_OUTPUT_TOKENS`
+和 `CLAIMS_VALIDATION_ATTEMPTS`（默认 2，最多 3）可覆盖这些默认值。
+目录提示只传身份及当前段落别名，不传全文证据。关系逐条检查 Schema、提及、证据和身份；
+失败条目带字段路径反馈纠错。正确条目独立保存，未修复条目进入 `claim_rejection` 审阅记录，
+chunk/document/batch 显示 `partial`；没有正确条目时明确失败。重试会复用成功子段。
+
+处理锁持有期间每 30 秒更新 `processing_leases`。批次/处理详情轮询会检查遗留活动状态：
+默认超过 1800 秒没有实际阶段进展（`PIPELINE_STALE_SECONDS`，最少 300），且 Redis 队列、
+未确认任务均空、没有活动租约、能够获取旧版处理锁时，才将遗留任务转为可重试失败。
+Redis 不可访问或任何任务仍忙时保守等待。上传和轮询不会充当阶段心跳。
+`retry` 从已保存阶段恢复，未解析的文档也能恢复解析，不会因第一段失败跳过剩余段落。
+
+现有数据库必须先执行 `db/migrations/20261017_processing_leases.sql`。
+部署脚本会先构建镜像、在独立临时 PostgreSQL 容器运行回归、执行这一增量迁移，
+然后重建 API、两个 worker 和前端，核对源码摘要、健康检查与 Celery 响应。
+脚本保存旧镜像标签供回滚；新增租约表可保留，旧代码不使用它。
+
+```bash
+bash scripts/deploy_catalog_robustness.sh --retry-failed \
+  --knowledge-base 19 --documents 25,26,27,28,29
+```
+
+这些 ID 对应本次排障的五篇共享文档；换批次时显式传入目标。
+脚本只提交失败/部分完成文档的恢复任务，运行中的文档会跳过。
+恢复任务已提交不代表文献重跑已完成，应在任务状态页确认最终结果。

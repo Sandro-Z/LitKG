@@ -1,10 +1,12 @@
 from app.db import get_conn
+from app.recovery import reconcile_stalled
 
 
 ACTIVE_STATUSES = ("uploaded", "queued", "parsing", "chunked", "cataloging", "extracting")
 
 
 def sync_batch_status(cur, batch_id: int) -> None:
+    reconcile_stalled(cur, batch_id=batch_id)
     cur.execute(
         """
         UPDATE ingestion_batch_items item

@@ -84,6 +84,45 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             return store_claim(conn.cursor(),document_id=doc,chunk_id=chunk,claim=Claim.model_validate(data),extraction_model='controlled')
 
+    def test_knowledge_base_rename_and_delete_cascade_preserve_shared_documents(self):
+        other = self.new_kb()
+        graph_job = str(uuid.uuid4())
+        maintenance_job = str(uuid.uuid4())
+        with self.connect() as conn:
+            original = conn.execute('SELECT slug FROM knowledge_bases WHERE id=%s', (self.kb,)).fetchone()
+            conn.execute('INSERT INTO knowledge_base_documents (knowledge_base_id,document_id) VALUES (%s,%s)', (other,self.doc))
+            batch = conn.execute('INSERT INTO ingestion_batches (knowledge_base_id,name) VALUES (%s,\'delete test\') RETURNING id', (self.kb,)).fetchone()['id']
+            conn.execute('INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id) VALUES (%s,0,\'shared.pdf\',%s)', (batch,self.doc))
+            conn.execute('INSERT INTO graph_rebuild_jobs (id,knowledge_base_id) VALUES (%s,%s)', (graph_job,self.kb))
+            conn.execute('INSERT INTO maintenance_jobs (id,knowledge_base_id,mode) VALUES (%s,%s,\'derived\')', (maintenance_job,self.kb))
+            for key, detail in [('delete-review', {'knowledge_base_id':self.kb}),
+                                ('keep-review', {'knowledge_base_id':other}), ('global-review', {})]:
+                conn.execute("INSERT INTO review_items (document_id,version,item_key,kind,detail) VALUES (%s,'test',%s,'semantic_conflict',%s)",
+                             (self.doc,key,Jsonb(detail)))
+            rebuild_derived(conn.cursor(), self.kb)
+            rebuild_derived(conn.cursor(), other)
+        renamed = self.client.put(f'/knowledge-bases/{self.kb}', json={'name':' 修改后的库 ', 'description':' 新说明 '})
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()['slug'], original['slug'])
+        self.assertEqual(renamed.json()['description'], '新说明')
+        mismatch = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'test knowledge'})
+        self.assertEqual(mismatch.status_code, 409)
+        response = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(f'/knowledge-bases/{self.kb}').status_code, 404)
+        with self.connect() as conn:
+            for table in ['knowledge_base_documents','ingestion_batches','graph_rebuild_jobs','maintenance_jobs','derived_content']:
+                self.assertEqual(conn.execute(f'SELECT count(*) AS n FROM {table} WHERE knowledge_base_id=%s', (self.kb,)).fetchone()['n'], 0)
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM ingestion_batch_items WHERE batch_id=%s', (batch,)).fetchone()['n'], 0)
+            self.assertIsNotNone(conn.execute('SELECT id FROM documents WHERE id=%s', (self.doc,)).fetchone())
+            self.assertIsNotNone(conn.execute('SELECT 1 FROM knowledge_base_documents WHERE knowledge_base_id=%s AND document_id=%s', (other,self.doc)).fetchone())
+            self.assertGreater(conn.execute('SELECT count(*) AS n FROM derived_content WHERE knowledge_base_id=%s', (other,)).fetchone()['n'], 0)
+            self.assertEqual(conn.execute("SELECT count(*) AS n FROM review_items WHERE item_key='delete-review'").fetchone()['n'], 0)
+            self.assertEqual(conn.execute("SELECT count(*) AS n FROM review_items WHERE item_key IN ('keep-review','global-review')").fetchone()['n'], 2)
+            # A queued worker must skip a deleted KB instead of failing on its FK.
+            self.assertEqual(rebuild_derived(conn.cursor(), self.kb)['changed_count'], 0)
+        self.assertEqual(self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'}).status_code, 404)
+
     def test_catalog_failure_resumes_segments_before_any_relationship_is_queued(self):
         texts = ['Interleukin-6 (IL-6) was studied.', 'Probe Q was used in the final paragraph.']
         chunks = [self.chunk(self.doc,t,i) for i,t in enumerate(texts)]
@@ -489,6 +528,61 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertTrue(any(a['stage']=='claims' and a['status']=='failed' for a in status['attempts']))
         with self.connect() as conn:
             self.assertEqual(conn.execute("SELECT count(*) AS n FROM processing_cache WHERE document_id=%s AND stage='claims'",(self.doc,)).fetchone()['n'],0)
+
+    def test_partial_claims_persist_and_retry_closes_shared_batch(self):
+        from app.schemas import Claim
+        from test_claims_robustness import claim, SOURCE
+        chunk = self.chunk(self.doc,SOURCE)
+        with patch.object(self.tasks,'extract_catalog',return_value=CatalogBundle(entities=[])):
+            catalog = self.tasks.build_document_catalog.run(self.doc,publish=False)
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id",(self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')",(batch,self.doc))
+        bad = ClaimBundle.model_validate({'claims':[claim(),claim('Imaginary protein')]})
+        def model(**kwargs):
+            if kwargs.get('feedback'):
+                raise self.tasks.ModelOutputError('controlled failed correction','{}')
+            return bad
+        with patch.object(self.tasks,'extract_claims',side_effect=model):
+            result = self.tasks.extract_chunk.run(chunk,catalog['catalog_version'],0,refresh=False)
+        self.assertEqual(result['status'],'partial')
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'partial')
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM claims WHERE chunk_id=%s',(chunk,)).fetchone()['n'],1)
+            self.assertGreater(conn.execute("SELECT count(*) AS n FROM review_items WHERE document_id=%s AND kind='claim_rejection'",(self.doc,)).fetchone()['n'],0)
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'partial')
+        good = ClaimBundle(claims=[Claim.model_validate(claim()), Claim.model_validate(claim('AKT1',predicate='BINDS_TO',evidence={'sentence':'Probe Q binds AKT1.'}))])
+        with patch.object(self.tasks,'extract_claims',return_value=good):
+            retried = self.tasks.maintain_knowledge_base.run(self.maintenance_job())
+        self.assertEqual(retried['status'],'done',str(retried))
+        with self.connect() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM claims WHERE chunk_id=%s',(chunk,)).fetchone()['n'],2)
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'],'done')
+
+    def test_stale_legacy_lock_and_new_heartbeat_protect_live_work(self):
+        from app.recovery import reconcile_stalled
+        chunk = self.chunk(self.doc,'Probe Q reduces IL-6.')
+        with self.connect() as conn:
+            conn.execute("UPDATE documents SET status='extracting',created_at=now()-interval '2 hours' WHERE id=%s",(self.doc,))
+            conn.execute("UPDATE chunks SET updated_at=now()-interval '2 hours' WHERE id=%s",(chunk,))
+        with patch('app.recovery.broker_is_idle',return_value=True):
+            with self.tasks.processing_lock(f'litkg-chunk:{chunk}') as acquired:
+                self.assertTrue(acquired)
+                with self.connect() as conn:
+                    self.assertEqual(reconcile_stalled(conn.cursor(),document_id=self.doc),[])
+                    self.assertEqual(conn.execute('SELECT count(*) AS n FROM processing_leases').fetchone()['n'],1)
+            # Reproduce an older worker that holds only the advisory lock.
+            with self.connect() as legacy:
+                legacy.execute('SELECT pg_advisory_lock(hashtextextended(%s,0))',(f'litkg-chunk:{chunk}',))
+                try:
+                    with self.connect() as conn:
+                        self.assertEqual(reconcile_stalled(conn.cursor(),document_id=self.doc),[])
+                finally:
+                    legacy.execute('SELECT pg_advisory_unlock(hashtextextended(%s,0))',(f'litkg-chunk:{chunk}',))
+            with self.connect() as conn:
+                self.assertEqual(reconcile_stalled(conn.cursor(),document_id=self.doc),[self.doc])
+                self.assertEqual(conn.execute('SELECT status FROM chunks WHERE id=%s',(chunk,)).fetchone()['status'],'failed')
+                self.assertEqual(conn.execute('SELECT status FROM documents WHERE id=%s',(self.doc,)).fetchone()['status'],'failed')
 
     def test_maintenance_drains_chunks_after_failure_and_finalizes_all_shared_batches(self):
         texts = [f'At {hour} h, Probe Q reduces IL-6.' for hour in [6,12,24]]

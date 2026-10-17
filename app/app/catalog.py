@@ -12,12 +12,12 @@ from app.normalization import (
     _DASHES,
 )
 
-PROCESSING_VERSION = "litkg-v3.2"
+PROCESSING_VERSION = "litkg-v3.3"
 CATALOG_VERSION = "catalog-v3-quarantine"
 # The model contract is unchanged. Revalidate existing successful segment
 # caches locally rather than sending the whole literature collection again.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v3"
+EXTRACTION_VERSION = "claims-v4-resumable"
 
 
 def digest(value):
@@ -129,7 +129,7 @@ def prepare_catalog(bundle, segment, *, quarantine=False):
         return _prepare_catalog(bundle, segment)
     result = bundle.model_copy(deep=True)
     result.entities = []
-    repairs, rejections = [], []
+    repairs, rejections = list(bundle._catalog_repairs), list(bundle._catalog_rejections)
     for index, entity in enumerate(bundle.entities):
         try:
             prepared = _prepare_catalog(type(bundle)(entities=[entity]), segment)
@@ -154,7 +154,7 @@ def _prepare_catalog(bundle, segment):
     the verified mention. Unsupported core mentions and identifiers still fail.
     """
     result = bundle.model_copy(deep=True)
-    repairs = []
+    repairs = list(bundle._catalog_repairs)
     sources = _catalog_sources(segment)
 
     def locate(quote):
@@ -301,9 +301,43 @@ def merge_catalog(records, abbreviations, document_id):
 
 
 def relevant_entries(entries, text):
-    return [entry for entry in entries if any(
-        source_contains(text, alias) for alias in [entry["text"], *entry["aliases"]]
-    )]
+    # Identity hints only. Whole-document quotes/locations are neither necessary
+    # for matching nor admissible evidence for this extraction segment.
+    result = []
+    for entry in entries:
+        aliases = [alias for alias in [entry['text'], *entry['aliases']] if source_contains(text, alias)]
+        if aliases:
+            result.append({key:entry.get(key) for key in
+                           ('local_id','text','type','normalized_id','ambiguity')}
+                          | {'aliases':sorted(set(aliases))})
+    return result
+
+
+def directory_identity_matches(entity, entry, mention):
+    names = [entry['text'], *entry['aliases']]
+    identity = entity.text
+    if entity_family(entity.type) != entity_family(entry['type']):
+        return False
+    if not any(normalize_entity_alias(identity, entry['type']) == normalize_entity_alias(name, entry['type']) for name in names):
+        return False
+    for name in names:
+        if normalize_entity_alias(mention, entry['type']) == normalize_entity_alias(name, entry['type']):
+            return True
+        span = source_span(mention, name)
+        if span is None:
+            continue
+        if normalize_alias(mention) == normalize_alias(name):
+            return True
+        # Permit grammatical/process context, while keeping species, mutations,
+        # stereochemistry and other unknown modifiers part of the identity.
+        context = normalize_alias(mention[:span[0]] + ' ' + mention[span[1]:])
+        words = re.findall(r'\w+', context)
+        neutral = {'the','a','an','of','level','levels','expression','secretion','activity',
+                   'protein','gene','mrna','serum','plasma','concentration','concentrations',
+                   'increased','decreased','high','low','amount','amounts','proportion','percentage'}
+        if words and all(word in neutral for word in words):
+            return True
+    return False
 
 
 def load_catalog(cur, document_id, version):
@@ -338,13 +372,17 @@ def resolve_bundle(bundle, entries, chunk, version):
             entry = by_id.get(entity.directory_id)
             if entity.directory_id and entry is None:
                 raise ValueError("Unknown document directory ID")
-            identity_mention = entity.text if entity.process else mention
-            candidates = [e for e in entries if any(normalize_alias(identity_mention) == normalize_alias(a) for a in [e["text"], *e["aliases"]])]
+            candidates = [e for e in entries if directory_identity_matches(entity, e, mention)]
             if not entry and len(candidates) == 1 and not candidates[0]["ambiguity"]:
                 entry = candidates[0]
+            if not entry and not candidates and any(
+                entity_family(entity.type) == entity_family(e['type']) and any(
+                    normalize_entity_alias(entity.text,e['type']) == normalize_entity_alias(a,e['type'])
+                    for a in [e['text'],*e['aliases']]) for e in entries):
+                raise ValueError('Directory identity would discard source mention modifiers')
             if entry:
                 names = [entry["text"], *entry["aliases"]]
-                if not any(normalize_alias(identity_mention) == normalize_alias(a) for a in names) or (entity.process and not any(source_contains(mention, a) for a in names)):
+                if not directory_identity_matches(entity, entry, mention):
                     raise ValueError("Directory ID does not match the source mention")
                 if entry["ambiguity"] and not source_contains(mention, entry["text"]):
                     # No guessed interpretation of an ambiguous acronym.
@@ -366,6 +404,8 @@ def resolve_bundle(bundle, entries, chunk, version):
                 raise ValueError("Split process requires the original mention")
             if not entity.process and re.search(r"\b(expression|secretion|activity)\b", entity.text, re.I):
                 claim.review_reasons.append("unsplit process-bearing name: " + entity.text)
+            if not entity.process and re.search(r"\b(expression|secretion|activity)\b", mention, re.I):
+                claim.review_reasons.append("unsplit process-bearing mention: " + mention)
             if entity.type == "Other":
                 entity.uncertainty_reason = entity.uncertainty_reason or "insufficient type evidence"
     return omissions

@@ -438,3 +438,10 @@ CREATE INDEX IF NOT EXISTS idx_fact_participants_entity ON fact_participants(ent
 CREATE INDEX IF NOT EXISTS idx_derived_text ON derived_content USING GIN(to_tsvector('simple', content));
 CREATE INDEX IF NOT EXISTS idx_derived_substring ON derived_content USING GIN(content gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_review_pending ON review_items(document_id, status);
+
+-- Stage leases complement session advisory locks; polling never renews them.
+CREATE TABLE IF NOT EXISTS processing_leases (
+    resource TEXT PRIMARY KEY,
+    owner UUID NOT NULL,
+    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
