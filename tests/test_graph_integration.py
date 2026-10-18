@@ -143,6 +143,95 @@ class GraphIntegrationTests(unittest.TestCase):
         self.assertEqual(b["document_count"], 1)
         self.assertEqual(b["evidence_samples"][0]["title"], "Private B study")
 
+    def test_compact_and_explicit_comparison_keep_both_claims_on_one_relation(self):
+        from app.graph_query import fetch_graph
+        from app.schemas import Process
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO documents (sha256,filename,source_path,status) VALUES (%s,'comparison.pdf','/test/comparison.pdf','done') RETURNING id",
+                            ('comparison-' + uuid.uuid4().hex,))
+                document_id = cur.fetchone()['id']
+                sentence = 'Enterococcus faecium abundance was higher in responders than nonresponders.'
+                claim = Claim.model_validate({
+                    'subject': {'text': 'Enterococcus faecium', 'type': 'MicrobialTaxon'},
+                    'predicate': 'DIFFERS_BETWEEN',
+                    'object': {'text': 'responders', 'type': 'StudyGroup'},
+                    'qualifiers': {'metric': 'abundance', 'direction': 'increased',
+                                   'comparison_group': 'responders', 'reference_group': 'nonresponders'},
+                    'evidence': {'sentence': sentence}, 'confidence': .9})
+                claims, relations = [], []
+                for index in range(2):
+                    cur.execute("INSERT INTO chunks (document_id,chunk_index,text) VALUES (%s,%s,%s) RETURNING id",
+                                (document_id, index, sentence))
+                    chunk_id = cur.fetchone()['id']
+                    if index:
+                        claim.subject.process = Process(kind='abundance', direction='increased')
+                    claim_id, relation_id = store_claim(cur, document_id=document_id, chunk_id=chunk_id,
+                                                        claim=claim, extraction_model='regression')
+                    claims.append(claim_id)
+                    relations.append(relation_id)
+                self.assertNotEqual(claims[0], claims[1])
+                self.assertEqual(relations[0], relations[1])
+                graph = fetch_graph(cur, document_id=document_id)
+                self.assertEqual(len(graph['edges']), 1)
+                self.assertEqual(graph['edges'][0]['evidence_count'], 1)
+                cur.execute('SELECT claim_json FROM claims WHERE id=ANY(%s) ORDER BY id', (claims,))
+                raw = [row['claim_json'] for row in cur.fetchall()]
+                self.assertIsNone(raw[0]['subject']['process'])
+                self.assertEqual(raw[1]['subject']['process']['kind'], 'abundance')
+                cur.execute('SELECT count(*) AS count,count(DISTINCT fact_key) AS keys FROM facts WHERE claim_id=ANY(%s)', (claims,))
+                self.assertEqual(cur.fetchone(), {'count': 2, 'keys': 1})
+            conn.rollback()
+
+    def test_legacy_comparison_repair_preserves_same_chunk_claims_and_is_idempotent(self):
+        import importlib.util
+        import tempfile
+        from app.graph_query import fetch_graph
+        from app.schemas import Process
+        spec = importlib.util.spec_from_file_location('comparison_repair',
+            Path(__file__).resolve().parents[1] / 'scripts/repair_comparison_relations.py')
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        with self.connect() as conn, tempfile.TemporaryDirectory() as backup_dir:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO documents(sha256,filename,source_path,status) VALUES (%s,'legacy.pdf','/test/legacy.pdf','done') RETURNING id",
+                            ('legacy-' + uuid.uuid4().hex,))
+                document_id = cur.fetchone()['id']
+                cur.execute('INSERT INTO ingestion_batches(knowledge_base_id) VALUES (%s) RETURNING id', (self.kb_a,))
+                batch_id = cur.fetchone()['id']
+                cur.execute("INSERT INTO ingestion_batch_items(batch_id,position,filename,document_id) VALUES (%s,0,'legacy.pdf',%s)",
+                            (batch_id, document_id))
+                sentence = 'LegacyTaxon abundance was higher in responders than nonresponders.'
+                cur.execute('INSERT INTO chunks(document_id,chunk_index,text) VALUES (%s,0,%s) RETURNING id', (document_id, sentence))
+                chunk_id = cur.fetchone()['id']
+                claim = Claim.model_validate({
+                    'subject': {'text': 'LegacyTaxon', 'type': 'MicrobialTaxon'}, 'predicate': 'DIFFERS_BETWEEN',
+                    'object': {'text': 'responders', 'type': 'StudyGroup'},
+                    'qualifiers': {'metric': 'abundance', 'direction': 'increased',
+                                   'comparison_group': 'responders', 'reference_group': 'nonresponders'},
+                    'evidence': {'sentence': sentence}, 'confidence': .9})
+                with patch('app.facts.canonical_comparison_qualifiers', side_effect=lambda predicate, qualifiers: qualifiers):
+                    compact_id, compact_relation = store_claim(cur, document_id=document_id, chunk_id=chunk_id,
+                                                               claim=claim, extraction_model='legacy')
+                    claim.subject.process = Process(kind='abundance', direction='increased')
+                    explicit_id, explicit_relation = store_claim(cur, document_id=document_id, chunk_id=chunk_id,
+                                                                 claim=claim, extraction_model='legacy')
+                self.assertNotEqual(compact_relation, explicit_relation)
+                before = cur.execute('SELECT id,claim_json FROM claims WHERE document_id=%s ORDER BY id', (document_id,)).fetchall()
+                preview = migration.repair(conn, batch_id)
+                self.assertEqual(preview['merged_relations'], 1)
+                self.assertEqual(len(fetch_graph(cur, document_id=document_id)['edges']), 2)
+                result = migration.repair(conn, batch_id, backup_dir, apply=True)
+                self.assertEqual(result['retained_legacy_fingerprints'], [{'claim_id': compact_id, 'canonical_claim_id': explicit_id}])
+                self.assertTrue(Path(result['backup']).is_file())
+                self.assertEqual(len(fetch_graph(cur, document_id=document_id)['edges']), 1)
+                after = cur.execute('SELECT id,claim_json FROM claims WHERE document_id=%s ORDER BY id', (document_id,)).fetchall()
+                self.assertEqual(before, after)
+                self.assertEqual(cur.execute('SELECT count(*) AS n FROM fact_evidence ev JOIN facts f ON f.id=ev.fact_id WHERE f.claim_id=ANY(%s)',
+                                             ([compact_id, explicit_id],)).fetchone()['n'], 2)
+                self.assertEqual(migration.repair(conn, batch_id)['normalized_relations'], 0)
+            conn.rollback()
+
     def test_direction_subject_object_and_document_threshold(self):
         incoming = self.get("relations", {"entity_id": self.egfr_id, "direction": "incoming"})
         outgoing = self.get("relations", {"entity_id": self.egfr_id, "direction": "outgoing"})

@@ -2,9 +2,31 @@
 from psycopg.types.json import Jsonb
 
 from app.catalog import PROCESSING_VERSION, add_review, digest
-from app.normalization import canonicalize_qualifiers, entity_identity, stable_json
+from app.normalization import canonicalize_qualifiers, entity_identity, normalize_predicate, stable_json
 from app.schemas import Entity, Participant
-from app.processes import PROCESS_PATTERN
+from app.processes import PROCESS_DEFINITIONS, PROCESS_PATTERN
+
+
+def canonical_comparison_qualifiers(predicate, qualifiers):
+    """Give two explicit encodings of the same measured comparison one identity.
+
+    Only exact process-kind metrics qualify. Do not guess that e.g. frequency,
+    percentage or a named diversity index is equivalent to another measurement.
+    Original model output stays in claim_json.
+    """
+    result = canonicalize_qualifiers(qualifiers)
+    if normalize_predicate(predicate) != 'DIFFERS_BETWEEN':
+        return result
+    metric, direction = result.get('metric'), result.get('direction')
+    processes = result.get('processes', [])
+    if (isinstance(metric, str) and metric in PROCESS_DEFINITIONS
+            and isinstance(direction, str)
+            and direction in {'increased', 'decreased', 'unchanged', 'unspecified'}
+            and not any(p.get('role') == 'subject' for p in processes)):
+        result['processes'] = sorted([
+            *processes, {'role': 'subject', 'kind': metric, 'direction': direction}
+        ], key=stable_json)
+    return result
 
 
 def normalized_participants(claim):
@@ -41,7 +63,7 @@ def fact_qualifiers(claim, participants=None):
             processes.append(process)
     if processes:
         qualifiers["processes"] = sorted(processes, key=stable_json)
-    return qualifiers
+    return canonical_comparison_qualifiers(claim.predicate, qualifiers)
 
 
 def store_fact(cur, claim_id, relation_id, claim, projection, document_id):

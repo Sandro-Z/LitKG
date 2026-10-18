@@ -1,4 +1,6 @@
 import os
+import json
+from collections import defaultdict
 from html import escape
 
 import pandas as pd
@@ -196,6 +198,34 @@ def api_upload_batch(
     return response.json()
 
 
+def graph_edge_labels(edges):
+    """Keep context-specific assertions visible as distinct parallel edges."""
+    groups = defaultdict(list)
+    for edge in edges:
+        groups[(edge['source'], edge['target'], edge.get('predicate') or edge.get('label', ''))].append(edge)
+    labels = {}
+    for group in groups.values():
+        for index, edge in enumerate(sorted(group, key=lambda item: item['id']), 1):
+            label = edge.get('label') or edge.get('predicate', '')
+            if edge.get('negated'):
+                label += ' [否定]'
+            if edge.get('speculative'):
+                label += ' [推测]'
+            if len(group) > 1:
+                qualifiers = edge.get('qualifiers') or {}
+                context = []
+                for key in ('metric', 'direction', 'association_direction', 'comparison_group', 'reference_group', 'evidence_type'):
+                    if key in qualifiers:
+                        context.append(f'{key}={qualifiers[key]}')
+                for process in qualifiers.get('processes', []):
+                    context.append(f"{process.get('role')}.{process.get('kind')}={process.get('direction', 'unspecified')}")
+                label += f' · 条件 {index}/{len(group)}'
+                if context:
+                    label += '\n' + '; '.join(context)
+            labels[edge['id']] = label
+    return labels
+
+
 def render_graph(graph_data):
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
@@ -253,6 +283,10 @@ def render_graph(graph_data):
             size=24,
         )
 
+    edge_labels = graph_edge_labels(edges)
+    if len({(e['source'], e['target'], e.get('predicate') or e.get('label', '')) for e in edges}) < len(edges):
+        st.caption('同名平行边代表不同条件或证据标注；边上显示区别，悬停可查看完整限定信息。')
+
     for edge in edges:
         confidence = edge.get("confidence")
         confidence_text = (
@@ -279,12 +313,16 @@ def render_graph(graph_data):
         network.add_edge(
             edge["source"],
             edge["target"],
-            label=edge.get("label", ""),
+            id=edge['id'],
+            label=edge_labels[edge['id']],
             title=(
-                f"关系: {edge.get('label')}<br>"
+                f"关系: {escape(edge.get('label') or edge.get('predicate', ''))}<br>"
+                f"否定: {'是' if edge.get('negated') else '否'} | "
+                f"推测: {'是' if edge.get('speculative') else '否'}<br>"
                 f"平均置信度: {confidence_text}<br>"
                 f"支持文献: {edge.get('document_count', 0)}<br>"
-                f"证据数: {edge.get('evidence_count', 0)}<br><br>"
+                f"证据数: {edge.get('evidence_count', 0)}<br>"
+                f"限定信息:<pre>{escape(json.dumps(edge.get('qualifiers') or {}, ensure_ascii=False, indent=2))}</pre>"
                 f"{evidence_html}"
             ),
             color=edge_color,
