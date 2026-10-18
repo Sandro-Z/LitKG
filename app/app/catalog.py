@@ -3,9 +3,11 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections import Counter
 
 from psycopg.types.json import Jsonb
 from app.processes import PROCESS_CONTEXT_WORDS, PROCESS_PATTERN
+from app.provenance import text_boundary
 
 from app.normalization import (
     abbreviation_key, entity_family, entity_identity, extract_abbreviations,
@@ -31,7 +33,7 @@ def source_contains(text, quote):
     return source_span(text, quote) is not None
 
 
-def segments(chunks, max_chars=12000):
+def segments(chunks, max_chars=12000, *, legacy=False):
     """Cover every character, including oversized paragraphs, without slicing off a tail."""
     if max_chars < 1:
         raise ValueError('CATALOG_SEGMENT_CHARS must be positive')
@@ -40,14 +42,15 @@ def segments(chunks, max_chars=12000):
         text = chunk["text"]
         start = 0
         while start < len(text):
-            end = min(len(text), start + max_chars)
+            end = min(len(text), start + max_chars) if legacy else text_boundary(text, start + max_chars, start + max(1, max_chars // 2))
             yield {**chunk, "text": text[start:end], "start": start, "end": end}
             if end == len(text):
                 break
-            start = end - overlap
+            start = end - overlap if legacy else max(start + 1, text_boundary(text, end - overlap,
+                max(start + 1, end - overlap - 200, end - max_chars // 2)))
 
 
-def split_catalog_segment(segment, min_chars=500):
+def split_catalog_segment(segment, min_chars=500, *, legacy=False):
     """Subdivide a capacity-limited segment without dropping any source text."""
     if min_chars < 1:
         raise ValueError('CATALOG_MIN_SEGMENT_CHARS must be positive')
@@ -60,7 +63,8 @@ def split_catalog_segment(segment, min_chars=500):
                   if length // 3 <= m.end() <= 2 * length // 3]
     cut = min(boundaries, key=lambda position: abs(position-middle)) if boundaries else middle
     overlap = min(200, length // 10)
-    left_end, right_start = min(length-1, cut+overlap), max(1, cut-overlap)
+    left_end = min(length-1, cut+overlap) if legacy else text_boundary(text, min(length-1, cut+overlap), max(1, cut), sentences=False)
+    right_start = max(1, cut-overlap) if legacy else text_boundary(text, max(1, cut-overlap), max(1, cut-overlap-200), sentences=False)
     start = segment.get('start', 0)
     return [
         {**segment, 'text':text[:left_end], 'start':start, 'end':start+left_end},
@@ -140,6 +144,17 @@ def verified_alias(name, alias, entity_type, sources):
         for source in sources for left, right in ((name, alias), (alias, name)))
 
 
+def normalize_microbe_type(entity, repairs, **location):
+    # A bare genus/species binomial is a taxon. Strain-specific suffixes such
+    # as NCC2705, GG or NCTC 9343 must remain identity-bearing and are not matched.
+    binomial = r'(?:[A-Z][a-z]+|[A-Z]\.)\s+[a-z]{2,}(?:\s+(?:subsp\.|ssp\.)\s+[a-z]+)?'
+    if entity.type == 'MicrobialStrain' and re.fullmatch(binomial, entity.text.strip()):
+        if entity.mention and not re.fullmatch(binomial, entity.mention.strip()):
+            return  # A longer original mention may carry an actual strain ID.
+        repairs.append(dict(location, field='type', original='MicrobialStrain', replacement='MicrobialTaxon'))
+        entity.type = 'MicrobialTaxon'
+
+
 def prepare_catalog(bundle, segment, *, quarantine=False, allow_empty=False):
     """Keep grounded entries and explicitly isolate unsupported candidates.
 
@@ -147,6 +162,10 @@ def prepare_catalog(bundle, segment, *, quarantine=False, allow_empty=False):
     individual entries, but an entirely invalid nonempty response still fails
     and is eligible for correction. Exclusions never become entity identities.
     """
+    counts = Counter((e.text, e.type, e.mention or e.text) for e in bundle.entities)
+    if len(bundle.entities) >= 8 and max(counts.values(), default=0) * 4 >= len(bundle.entities) * 3:
+        raise CatalogValidationError('Repetitive catalog generation: the same entity/mention dominates the output; '
+            'emit each mention once and cover the entire source, never return a truncated subset')
     if not quarantine:
         return _prepare_catalog(bundle, segment)
     result = bundle.model_copy(deep=True)
@@ -217,6 +236,7 @@ def _prepare_catalog(bundle, segment):
         if entity.evidence != evidence:
             repairs.append({'entity_index': index, 'field': 'evidence', 'original': entity.evidence, 'replacement': evidence})
             entity.evidence = evidence
+        normalize_microbe_type(entity, repairs, entity_index=index)
         aliases = []
         for alias in entity.aliases:
             location = locate(alias)
@@ -420,6 +440,7 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
                 evidence.table_or_figure = None
         evidence_texts = [claim.evidence.sentence, *[e.sentence for e in additional]]
         for role, entity in [('subject', claim.subject), ('object', claim.object), *[(p.role, p.entity) for p in claim.participants]]:
+            normalize_microbe_type(entity, repairs, role=role)
             if entity.process and not entity.mention:
                 raise ValueError('Split process requires the original mention')
             mention = entity.mention or entity.text

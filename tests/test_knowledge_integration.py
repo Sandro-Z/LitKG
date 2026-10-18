@@ -1,5 +1,6 @@
 """Controlled models + real PostgreSQL; never reads .env or calls a live model."""
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from contextlib import ExitStack
 import hashlib
 import os
@@ -86,6 +87,77 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                 'evidence':{'sentence':sentence,'page':3,'page_end':3},'confidence':.9, **extra}
         with self.connect() as conn:
             return store_claim(conn.cursor(),document_id=doc,chunk_id=chunk,claim=Claim.model_validate(data),extraction_model='controlled')
+
+    def test_batch22_concurrent_workers_and_pollers_do_not_rewrite_unchanged_snapshots(self):
+        documents = [self.doc, *[self.new_doc(self.kb) for _ in range(5)]]
+        with self.connect() as conn:
+            conn.execute("UPDATE documents SET status='queued' WHERE id=ANY(%s)", (documents,))
+            batches = [conn.execute("INSERT INTO ingestion_batches(knowledge_base_id,status) VALUES (%s,'queued') RETURNING id",
+                                   (self.kb,)).fetchone()['id'] for _ in range(2)]
+            for batch in batches:
+                for position,doc in enumerate(documents):
+                    conn.execute("INSERT INTO ingestion_batch_items(batch_id,position,filename,document_id,status) VALUES (%s,%s,'test.pdf',%s,'queued')",
+                                 (batch,position,doc))
+        barrier = Barrier(8)
+        def worker(doc):
+            barrier.wait(timeout=10)
+            for status in ('parsing','cataloging','extracting','done'):
+                self.tasks.update_document_status(doc, status)
+        def poller(batch):
+            barrier.wait(timeout=10)
+            for _ in range(12):
+                with self.connect() as conn:
+                    conn.execute("SET LOCAL statement_timeout='10s'")
+                    self.batch_status.sync_batch_status(conn.cursor(), batch)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(worker, doc) for doc in documents] + [pool.submit(poller,b) for b in batches]
+            for future in futures:
+                future.result(timeout=30)
+        for batch in batches:
+            with self.connect() as conn:
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+                self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'], 'done')
+                self.assertEqual(conn.execute("SELECT count(*) AS n FROM ingestion_batch_items WHERE batch_id=%s AND status='done'",(batch,)).fetchone()['n'], 6)
+            with self.connect() as conn:
+                before = conn.execute('SELECT id,xmin::TEXT,updated_at FROM ingestion_batch_items WHERE batch_id=%s ORDER BY id',(batch,)).fetchall()
+                snapshot = conn.execute('SELECT xmin::TEXT,updated_at FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()
+            with self.connect() as conn:
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+            with self.connect() as conn:
+                self.assertEqual(before, conn.execute('SELECT id,xmin::TEXT,updated_at FROM ingestion_batch_items WHERE batch_id=%s ORDER BY id',(batch,)).fetchall())
+                self.assertEqual(snapshot, conn.execute('SELECT xmin::TEXT,updated_at FROM ingestion_batches WHERE id=%s',(batch,)).fetchone())
+
+    def test_batch22_deadlock_aborts_transaction_then_retries_on_fresh_connection(self):
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches(knowledge_base_id,status) VALUES (%s,'queued') RETURNING id",(self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items(batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'queued')",(batch,self.doc))
+        original = self.batch_status._sync_batch_status
+        calls = []
+        def injected(cur, batch_id):
+            calls.append(cur.connection)
+            if len(calls) == 1:
+                cur.execute("UPDATE ingestion_batch_items SET error='must rollback' WHERE batch_id=%s", (batch_id,))
+                cur.execute("DO $$ BEGIN RAISE EXCEPTION USING ERRCODE='40P01',MESSAGE='batch22 test deadlock'; END $$")
+            original(cur, batch_id)
+        with patch.object(self.batch_status, '_sync_batch_status', side_effect=injected):
+            self.batch_status.sync_batches_for_document(self.doc)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNot(calls[0], calls[1])
+        self.assertTrue(calls[0].closed)
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT error FROM ingestion_batch_items WHERE batch_id=%s',(batch,)).fetchone()['error'])
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'], 'done')
+        # API calls retry inside a savepoint, preserving their caller's prior
+        # writes while rolling back the failed attempt's item update.
+        calls.clear()
+        with self.connect() as conn:
+            conn.execute("UPDATE documents SET title='caller work' WHERE id=%s", (self.doc,))
+            with patch.object(self.batch_status, '_sync_batch_status', side_effect=injected):
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+            self.assertEqual(len(calls), 2)
+            self.assertIs(calls[0], calls[1])
+            self.assertIsNone(conn.execute('SELECT error FROM ingestion_batch_items WHERE batch_id=%s',(batch,)).fetchone()['error'])
+            self.assertEqual(conn.execute('SELECT title FROM documents WHERE id=%s',(self.doc,)).fetchone()['title'], 'caller work')
 
     def test_knowledge_base_rename_and_delete_cascade_preserve_shared_documents(self):
         other = self.new_kb()
@@ -670,7 +742,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id",(self.kb,)).fetchone()['id']
             conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')",(batch,self.doc))
-        bad = ClaimBundle.model_validate({'claims':[claim(),claim('Imaginary protein')]})
+        bad = ClaimBundle.model_validate({'claims':[claim(),claim('AKT1',predicate='BINDS_TO',evidence={'sentence':'Unstated sentence.'})]})
         def model(**kwargs):
             if kwargs.get('feedback'):
                 raise self.tasks.ModelOutputError('controlled failed correction','{}')
@@ -1008,20 +1080,20 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         def row(name='AKT1', sentence=source):
             return {'subject':{'text':'Aspirin','type':'Drug'},'predicate':'REDUCES',
                 'object':{'text':name,'type':'Protein'},'evidence':{'sentence':sentence},'confidence':.9}
-        initial = ClaimBundle.model_validate({'claims':[row(),row(sentence='Aspirin cures every disease.'),row('Imaginary protein')]})
+        initial = ClaimBundle.model_validate({'claims':[row(),row(sentence='Aspirin cures every disease.'),row(sentence='Unstated evidence to repair.')]})
         unresolved = parse_model_bundle({'claims':[], 'resolution':{'outcome':'unresolved','reason':'Needs review'}},ClaimBundle)
         with patch.object(self.tasks,'extract_claims',side_effect=[initial,unresolved,unresolved]):
             self.assertEqual(self.tasks.extract_chunk.run(chunk,built['catalog_version'],0,refresh=False)['status'],'done')
         with self.connect() as conn:
             reviews = conn.execute("SELECT id,detail FROM review_items WHERE document_id=%s AND kind='claim_rejection' AND status='pending'",(self.doc,)).fetchall()
         self.assertEqual(len(reviews),2)
-        dismissed = next(r for r in reviews if r['detail']['claim']['evidence']['sentence']!='Aspirin reduces AKT1.')
+        dismissed = next(r for r in reviews if r['detail']['claim']['evidence']['sentence']=='Aspirin cures every disease.')
         response = self.client.post(f"/knowledge-bases/{self.kb}/reviews/{dismissed['id']}?status=dismissed")
         self.assertEqual(response.status_code,200)
         def correction(**kwargs):
             self.assertIn('feedback',kwargs)
             self.assertEqual(len(kwargs['previous_output']['claims']),1)
-            self.assertEqual(kwargs['previous_output']['claims'][0]['object']['text'],'Imaginary protein')
+            self.assertEqual(kwargs['previous_output']['claims'][0]['evidence']['sentence'],'Unstated evidence to repair.')
             return ClaimBundle.model_validate({'claims':[row()]})
         with patch.object(self.tasks,'extract_claims',side_effect=correction) as model:
             result = self.tasks.maintain_knowledge_base.run(self.maintenance_job())

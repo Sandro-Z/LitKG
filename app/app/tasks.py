@@ -2,6 +2,7 @@ from psycopg.types.json import Jsonb
 from contextlib import contextmanager
 from dataclasses import replace
 import os
+import logging
 
 from app.batch_status import sync_batches_for_document
 from app.celery_app import celery_app
@@ -23,6 +24,16 @@ from app.provenance import locate_evidence_pages
 from app.recovery import heartbeat_lease
 
 MODEL_SIGNATURE = digest([LLM_BASE_URL, LLM_MODEL, LLM_REVISION])
+log = logging.getLogger(__name__)
+
+
+def _sync_document_batches(document_id):
+    try:
+        sync_batches_for_document(document_id)
+    except Exception:
+        # Document/chunk state has already committed. A derived batch snapshot
+        # failure must not turn successful work into "Parse failed"/"failed".
+        log.exception('Batch status synchronization failed for document %s; persisted processing state retained', document_id)
 
 
 @contextmanager
@@ -145,7 +156,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                             continue
                         if stage == 'claims' and isinstance(item[label], dict):
                             if not retains_required_context(item[label], values[0]):
-                                item['error'] = 'Correction dropped required participants or condition fields; repair them or explicitly exclude the candidate'
+                                item['error'] = 'Correction changed the original assertion or dropped required participants or condition fields; repair them or explicitly exclude the candidate'
                                 continue
                         getattr(result, field).extend(values)
                         if stage == 'claims':
@@ -204,13 +215,50 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     return result
 
 
+def _claim_segment_keys(segment, version, minimum):
+    key = digest([EXTRACTION_VERSION, CLAIMS_PROMPT_VERSION, MODEL_SIGNATURE, version,
+                  segment['section_title'], segment['text'], minimum, CLAIMS_MAX_OUTPUT_TOKENS])
+    return key, digest(['claims-split-v1', key])
+
+
+def _catalog_segment_keys(title, segment, extraction_epoch, minimum):
+    heading = f"Document title: {title or ''}\nSection: {segment['section_title'] or 'Unknown'}"
+    key = digest([CATALOG_CACHE_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE,
+                  heading, segment['text'], extraction_epoch])
+    return key, digest(['catalog-split-v1', key, minimum])
+
+
+def _cached_segments(document_id, chunks, maximum, stage, keys):
+    """Retain an existing chunk's cached boundaries; new chunks use safe cuts.
+
+    Probe only keys exclusive to the old plan. Common leaves are reused by
+    either plan and cannot be mistaken for evidence of an old split generation.
+    """
+    for chunk in chunks:
+        modern = list(segments([chunk], maximum))
+        old = list(segments([chunk], maximum, legacy=True))
+        modern_keys = {key for segment in modern for key in keys(segment)}
+        cached_old = False
+        for segment in old:
+            for cache_stage,key in zip((stage, stage + '_split'), keys(segment)):
+                if key in modern_keys:
+                    continue
+                with get_conn() as conn:
+                    found = conn.execute('SELECT payload FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s',
+                                         (document_id,cache_stage,key)).fetchone()
+                if found:
+                    cached_old = True
+                    break
+            if cached_old:
+                break
+        yield from old if cached_old else modern
+
+
 def claim_segment_bundles(document_id, segment, entries, version, retry_pending=False, excluded_candidates=None):
     """Bounded correction + durable split tree; one bad leaf cannot erase others."""
     minimum = int(os.environ.get('CLAIMS_MIN_SEGMENT_CHARS', '500'))
     attempts = max(1, min(5, int(os.environ.get('CLAIM_VALIDATION_ATTEMPTS', os.environ.get('CLAIMS_VALIDATION_ATTEMPTS', '2')))))
-    key = digest([EXTRACTION_VERSION, CLAIMS_PROMPT_VERSION, MODEL_SIGNATURE, version,
-                  segment['section_title'], segment['text'], minimum, CLAIMS_MAX_OUTPUT_TOKENS])
-    split_key = digest(['claims-split-v1', key])
+    key, split_key = _claim_segment_keys(segment, version, minimum)
     with get_conn() as conn:
         split = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s",
                              (document_id, 'claims_split', split_key)).fetchone()
@@ -227,7 +275,7 @@ def claim_segment_bundles(document_id, segment, entries, version, retry_pending=
                 max_attempts=attempts, retry_pending=retry_pending, excluded_candidates=excluded_candidates)
             yield segment, bundle
             return
-        children = split_catalog_segment(segment, minimum)
+        children = split_catalog_segment(segment, minimum, legacy=split['payload'].get('strategy') != 'overlapping-halves-v2-boundaries')
     except ModelOutputTruncatedError as exc:
         children = split_catalog_segment(segment, minimum)
         if not children:
@@ -239,7 +287,7 @@ def claim_segment_bundles(document_id, segment, entries, version, retry_pending=
             return
         with get_conn() as conn:
             conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                         (document_id,'claims_split',split_key,Jsonb({'strategy':'overlapping-halves-v1'})))
+                         (document_id,'claims_split',split_key,Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
     except ClaimValidationError as exc:
         bundle = exc.bundle or ClaimBundle(claims=[])
         bundle._processing_gaps = [{'error': str(exc), 'kind': 'no_usable_claims',
@@ -269,7 +317,8 @@ def extract_chunk_claims(document_id, chunk, entries, version, retry_pending=Fal
                 (document_id, version, str(chunk['id']))).fetchall()
         excluded_candidates = {digest(row['detail'].get('claim', row['detail'].get('original'))) for row in rows}
     maximum = int(os.environ.get('CLAIMS_SEGMENT_CHARS', '3000'))
-    for initial in segments([chunk], maximum):
+    minimum = int(os.environ.get('CLAIMS_MIN_SEGMENT_CHARS', '500'))
+    for initial in _cached_segments(document_id, [chunk], maximum, 'claims', lambda s:_claim_segment_keys(s,version,minimum)):
         for segment, bundle in claim_segment_bundles(document_id, initial, entries, version, retry_pending, excluded_candidates):
             for item in [*bundle._claim_rejections, *bundle._claim_repairs]:
                 item.update(start=segment['start'], end=segment['end'])
@@ -288,9 +337,7 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
     sources = [title or '', segment['section_title'] or '', segment['text']]
     validation_segment = {**segment, 'text':'\n'.join(sources), 'sources':sources}
     # Keep the successful-result key compatible with existing validated caches.
-    key = digest([CATALOG_CACHE_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE,
-                  heading, segment['text'], extraction_epoch])
-    split_key = digest(['catalog-split-v1', key, min_chars])
+    key, split_key = _catalog_segment_keys(title, segment, extraction_epoch, min_chars)
     with get_conn() as conn:
         split = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage='catalog_split' AND cache_key=%s",
                              (document_id, split_key)).fetchone()
@@ -310,12 +357,12 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
                     'Increase the catalog output budget within the model server limits; check its context/output limits and thinking configuration.', exc.raw) from exc
             with get_conn() as conn:
                 conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog_split',%s,%s) ON CONFLICT DO NOTHING",
-                             (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v1'})))
+                             (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
         else:
             yield segment, bundle
             return
     else:
-        children = split_catalog_segment(segment, min_chars)
+        children = split_catalog_segment(segment, min_chars, legacy=split['payload'].get('strategy') != 'overlapping-halves-v2-boundaries')
     if not children:
         raise ValueError('Invalid catalog split cache: segment cannot be subdivided')
     for child in children:
@@ -337,7 +384,7 @@ def update_document_status(
                 """,
                 (status, error, document_id),
             )
-    sync_batches_for_document(document_id)
+    _sync_document_batches(document_id)
 
 
 def update_chunk_status(
@@ -405,7 +452,7 @@ def refresh_document_status(document_id: int) -> str:
                 (status, error, document_id),
             )
 
-    sync_batches_for_document(document_id)
+    _sync_document_batches(document_id)
     return status
 
 
@@ -487,7 +534,10 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                     conn.execute("UPDATE chunks SET status='queued',error=NULL WHERE document_id=%s", (document_id,))
             records = []
             rejected_count = 0
-            for initial_segment in segments(chunks, max_chars=int(os.environ.get("CATALOG_SEGMENT_CHARS", "12000"))):
+            maximum = int(os.environ.get('CATALOG_SEGMENT_CHARS', '12000'))
+            minimum = int(os.environ.get('CATALOG_MIN_SEGMENT_CHARS', '500'))
+            keys = lambda s:_catalog_segment_keys(document['title'],s,document['extraction_epoch'],minimum)
+            for initial_segment in _cached_segments(document_id, chunks, maximum, 'catalog', keys):
                 for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
                     rejected_count += len(bundle._catalog_rejections)
                     if bundle._catalog_repairs or bundle._catalog_rejections:

@@ -1,24 +1,97 @@
 """Candidate-local source validation; incomplete assertions are never projected."""
 from app.catalog import resolve_bundle, digest
 from app.schemas import ClaimBundle
-from app.schemas import Participant
-from collections import Counter
+from app.schemas import Participant, Entity
 from app.predicate_registry import normalize_registered_claim
+from app.normalization import clean_text, normalize_predicate
+
+
+def normalize_comparison_groups(claim, repairs):
+    if normalize_predicate(claim.predicate) != 'DIFFERS_BETWEEN':
+        return
+    for role in ('comparison_group', 'reference_group'):
+        value = claim.qualifiers.get(role)
+        if not isinstance(value, dict):
+            continue
+        # Compatibility with the logged entity-shaped values: preserve their
+        # actual entity, normalize only the representation, never invent a group.
+        if set(value) - Entity.model_fields.keys():
+            raise ValueError(f'DIFFERS_BETWEEN {role} contains unsupported context fields; do not discard them')
+        entity = Entity.model_validate(value)
+        if entity.type != 'StudyGroup':
+            raise ValueError(f'DIFFERS_BETWEEN {role} must describe a StudyGroup')
+        label = entity.mention or entity.text
+        participants = [p for p in claim.participants if p.role == role]
+        if not participants:
+            claim.participants.append(Participant(role=role, entity=entity))
+        claim.qualifiers[role] = label
+        repairs.append(dict(field=f'qualifiers.{role}', original=value, replacement=label))
 
 
 def retains_required_context(original, corrected):
-    roles = Counter(Participant.canonical_role(p['role']) for p in original.get('participants', [])
-        if isinstance(p, dict) and isinstance(p.get('role'), str)) if isinstance(original.get('participants', []), list) else Counter()
-    if roles - Counter(p.role for p in corrected.participants):
+    original_participants = original.get('participants', [])
+    if not isinstance(original_participants, list):
         return False
+
+    def names(entity):
+        return {clean_text(value, '').casefold() for value in (entity.get('text'), entity.get('mention'))
+                if isinstance(value, str) and value.strip()}
+
+    def same_entity(before, after):
+        if not isinstance(before, dict) or not names(before) & names(after):
+            return False
+        if 'StudyGroup' in (before.get('type'), after.get('type')) and before.get('mention') and after.get('mention'):
+            if clean_text(before['mention'], '').casefold() != clean_text(after['mention'], '').casefold():
+                return False
+        process = before.get('process')
+        if process:
+            actual = after.get('process') or {}
+            if not isinstance(process, dict) or process.get('kind') != actual.get('kind'):
+                return False
+            if process.get('direction', 'unspecified') != 'unspecified' and process['direction'] != actual.get('direction'):
+                return False
+        return True
+
+    after = corrected.model_dump(mode='json')
+    for role in ('subject', 'object'):
+        before_entity = original.get(role)
+        if not same_entity(before_entity, after[role]):
+            return False
+    from app.predicate_registry import PREDICATE_ALIASES, DIRECTION_ALIASES, _key
+    def predicate(value):
+        key = _key(value) if isinstance(value, str) else ''
+        return 'AFFECTS' if key in DIRECTION_ALIASES else PREDICATE_ALIASES.get(key, key)
+    if predicate(original.get('predicate')) != predicate(corrected.predicate):
+        return False
+    key = _key(original['predicate'])
+    if key in DIRECTION_ALIASES:
+        direction = corrected.object.process.direction if corrected.object.process else corrected.qualifiers.get('object_direction')
+        if direction not in (None, 'unspecified', DIRECTION_ALIASES[key]):
+            return False
+    if any(original.get(k, False) != after[k] for k in ('negated', 'speculative')):
+        return False
+    available = list(after['participants'])
+    for participant in original_participants:
+        if not isinstance(participant, dict):
+            return False
+        matches = [p for p in available if p['role'] == Participant.canonical_role(participant.get('role'))
+                   and same_entity(participant.get('entity'), p['entity'])]
+        if not matches:
+            return False
+        available.remove(matches[0])
 
     def retains_fields(before, after):
         if isinstance(before, dict):
             return isinstance(after, dict) and all(key in after and retains_fields(value, after[key]) for key, value in before.items())
         if isinstance(before, list):
             return isinstance(after, list) and len(after) >= len(before) and all(retains_fields(a, b) for a, b in zip(before, after))
-        return True
-    return retains_fields(original.get('qualifiers') or {}, corrected.qualifiers)
+        return clean_text(before, '') == clean_text(after, '') if isinstance(before, str) and isinstance(after, str) else before == after
+    qualifiers = dict(original.get('qualifiers') or {})
+    for role in ('comparison_group', 'reference_group'):
+        if isinstance(qualifiers.get(role), dict):
+            value = qualifiers[role]
+            qualifiers[role] = value.get('mention') or value.get('text')
+    return retains_fields(qualifiers, corrected.qualifiers)
 
 
 class ClaimValidationError(ValueError):
@@ -38,6 +111,7 @@ def prepare_claims(bundle, entries, chunk, version):
         candidate = ClaimBundle(claims=[claim.model_copy(deep=True)])
         repairs = []
         try:
+            normalize_comparison_groups(candidate.claims[0], repairs)
             resolve_bundle(candidate, entries, chunk, version, repairs)
             normalize_registered_claim(candidate.claims[0], repairs)
         except ValueError as exc:

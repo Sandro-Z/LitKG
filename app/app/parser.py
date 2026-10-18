@@ -5,7 +5,7 @@ import requests
 from lxml import etree
 from pypdf import PdfReader
 
-from app.provenance import page_bounds
+from app.provenance import page_bounds, text_boundary
 from app.page_mapping import PdfPageIndex
 
 
@@ -223,7 +223,7 @@ def split_into_chunks(sections, max_chars=12000, overlap_chars=800):
 
         start = 0
         while start < len(text):
-            end = start + max_chars
+            end = text_boundary(text, start + max_chars, start + max(1, max_chars // 2))
             raw_chunk_text = text[start:end]
             chunk_text = raw_chunk_text.strip()
 
@@ -252,7 +252,8 @@ def split_into_chunks(sections, max_chars=12000, overlap_chars=800):
             if end >= len(text):
                 break
 
-            start = max(0, end - overlap_chars)
+            start = max(start + 1, text_boundary(text, end - overlap_chars,
+                max(start + 1, end - overlap_chars - 200, end - max_chars // 2)))
 
     return chunks
 
