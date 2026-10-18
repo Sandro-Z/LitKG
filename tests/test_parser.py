@@ -188,6 +188,109 @@ class ParserTests(unittest.TestCase):
             metadata, _ = fallback_pdf_text("unused.pdf")
         self.assertEqual(metadata["doi"], "10.1234/paper")
 
+    def test_pdf_fallback_reads_doi_in_last_page_appendix(self):
+        with text_pdf([
+            "Title and abstract without DOI.", "Results.",
+            "References", "Another article. doi: 10.5678/reference",
+            "Appendix A. https://doi.org/10.1234/paper",
+        ]) as pdf, patch("app.parser.call_grobid", side_effect=RuntimeError("offline")):
+            metadata, chunks = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+        self.assertEqual(chunks[-1]["page_start"], 5)
+
+    def test_pdf_fallback_does_not_take_reference_doi(self):
+        with text_pdf([
+            "Article without DOI.", "References", "Another article. doi: 10.5678/reference",
+        ]) as pdf:
+            metadata, _ = fallback_pdf_text(str(pdf))
+        self.assertIsNone(metadata["doi"])
+
+    def test_complete_grobid_coordinates_do_not_skip_missing_doi_recovery(self):
+        xml = TEI.replace('<idno type="DOI">https://doi.org/10.1234/study</idno>', '')
+        xml = xml.replace('3,0,0,100,20;4,0,0,100,20', '3,0,0,100,20')
+        with text_pdf([
+            "Study abstract.", "Aspirin inhibited COX-1.",
+            "EGFR binds gefitinib.", "Appendix A. doi: 10.1234/paper",
+        ]) as pdf, patch("app.parser.call_grobid", return_value=xml):
+            metadata, chunks = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+        self.assertEqual(chunks[1]["section_title"], "Results")
+        self.assertEqual(locate_evidence_pages("EGFR binds gefitinib.", chunks[1]), (3, 3))
+
+    def test_tei_recovers_appendix_link_target_and_excludes_bibliography(self):
+        xml = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+          <p coords="1,0,0,100,20">Article body.</p></body><back>
+          <listBibl><biblStruct><idno type="DOI">10.5678/reference</idno></biblStruct></listBibl>
+          <div><head>Appendix A</head><p>Supplementary information:
+          <ref target="https://doi.org/10.1234/paper">online supplement</ref>.</p></div>
+        </back></text></TEI>'''
+        metadata, _ = parse_tei_sections(xml)
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+        with patch("app.parser.call_grobid", return_value=xml), patch(
+            "app.parser.fallback_pdf_text", side_effect=RuntimeError("no text layer"),
+        ), self.assertLogs("app.parser", level="WARNING"):
+            metadata, chunks = parse_pdf_to_chunks("unused.pdf")
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+        self.assertEqual(chunks[0]["text"], "Article body.")
+
+    def test_tei_does_not_use_inline_bibliographic_links_as_article_doi(self):
+        xml = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+          <p>Earlier work <ref type="bibr" target="https://doi.org/10.5678/reference">[1]</ref>.</p>
+          <bibl><idno type="DOI">10.5678/another-reference</idno></bibl>
+        </body></text></TEI>'''
+        metadata, _ = parse_tei_sections(xml)
+        self.assertIsNone(metadata["doi"])
+
+    def test_tei_comments_do_not_supply_document_doi(self):
+        xml = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+          <!-- Parser example DOI: 10.5678/comment -->
+          <p>No document identifier.</p></body></text></TEI>'''
+        metadata, _ = parse_tei_sections(xml)
+        self.assertIsNone(metadata["doi"])
+
+    def test_pdf_metadata_takes_priority_over_text_candidates(self):
+        xml = TEI.replace('<idno type="DOI">https://doi.org/10.1234/study</idno>', '')
+        xml = xml.replace('Study abstract.', 'Study abstract. doi: 10.5678/other')
+        with text_pdf(["doi: 10.5678/third"], {"/DOI": "10.1234/paper"}) as pdf, patch(
+            "app.parser.call_grobid", return_value=xml,
+        ):
+            metadata, _ = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+
+    def test_grobid_header_takes_priority_over_pdf_metadata_and_body(self):
+        with text_pdf(["doi: 10.5678/other"], {"/DOI": "10.5678/pdf"}) as pdf, patch(
+            "app.parser.call_grobid", return_value=TEI,
+        ):
+            metadata, _ = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/study")
+
+    def test_tei_text_takes_priority_over_unstructured_pdf_candidates(self):
+        xml = TEI.replace('<idno type="DOI">https://doi.org/10.1234/study</idno>', '')
+        xml = xml.replace('Study abstract.', 'Study abstract. doi: 10.1234/paper')
+        with text_pdf(["doi: 10.5678/reference-without-heading"]) as pdf, patch(
+            "app.parser.call_grobid", return_value=xml,
+        ):
+            metadata, _ = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+
+    def test_pdf_doi_line_wrap_is_read_before_prose_dehyphenation(self):
+        reader = SimpleNamespace(
+            metadata={}, pages=[SimpleNamespace(extract_text=lambda: "doi: 10.1234/paper-\n2026")],
+        )
+        with patch("app.parser.PdfReader", return_value=reader):
+            metadata, _ = fallback_pdf_text("unused.pdf")
+        self.assertEqual(metadata["doi"], "10.1234/paper-2026")
+
+    def test_page_alignment_failure_does_not_discard_recovered_doi(self):
+        xml = TEI.replace('<idno type="DOI">https://doi.org/10.1234/study</idno>', '')
+        with text_pdf(["Article text."], {"/DOI": "10.1234/paper"}) as pdf, patch(
+            "app.parser.call_grobid", return_value=xml,
+        ), patch("app.parser.PdfPageIndex.from_sections", side_effect=RuntimeError("alignment failed")), self.assertLogs(
+            "app.parser", level="WARNING",
+        ):
+            metadata, _ = parse_pdf_to_chunks(str(pdf))
+        self.assertEqual(metadata["doi"], "10.1234/paper")
+
     def test_empty_grobid_body_uses_pdf_fallback(self):
         with patch("app.parser.call_grobid", return_value='<TEI xmlns="http://www.tei-c.org/ns/1.0"/>'), patch(
             "app.parser.fallback_pdf_text",

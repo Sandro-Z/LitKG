@@ -288,8 +288,11 @@ curl "http://localhost:8080/knowledge-bases/2/batches"
 
 claims 的知识库接口和单篇接口均包含以下出处字段：
 
-- `title`、`doi`：当前文献的标题和 DOI。DOI 优先从 GROBID 文献头提取，
-  排除参考文献；PDF 回退解析使用元数据或首页显式标注的 DOI。
+- `title`、`doi`：当前文献的标题和 DOI。DOI 优先使用 GROBID 文献头、PDF 元数据，
+  缺失时检索 GROBID 全文及链接目标，再检索 PDF 所有页的正文、附录和补充材料；
+  GROBID 页码完整时也会补查缺失 DOI。排除可识别的参考文献、数据集和代码 DOI，
+  支持 DOI 链接、裸 DOI、常见换行及尾随标点；多个候选优先采用明确标为本文的 DOI，
+  仍有歧义则返回 `null`。更新后已有文献需重新解析 PDF 才能补齐缺失的 DOI。
 - `page`、`page_end`：证据所在的 PDF 起止页，按 PDF 页序号从 `1` 开始，
   与期刊印刷页码可能不同。优先使用句子坐标，缺失时与本地 PDF 逐页文字
   匹配；句子跨页、重复出现在多页或只能确定片段范围时保留已知页码范围。

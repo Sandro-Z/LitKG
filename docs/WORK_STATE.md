@@ -1,5 +1,25 @@
 # LitKG v3 开发与续接记录
 
+## 2026-10-18 DOI 全文与附录补查
+
+基线 f4e6ba3，开始时工作区干净。修复只查 PDF 首页和 GROBID 页码完整时跳过 DOI
+补查的限制。新增 app/doi.py，共用 DOI 规范化、参考文献跨页排除、附录恢复检索、
+数据/代码及引用条目过滤、重复候选去重和歧义处理。优先级为 GROBID 文献头、PDF
+元数据、排除文献引用后的 GROBID 全文及链接目标、PDF 逐页全文。
+PDF 文字层失败时保留 GROBID 的 DOI，页码对齐失败不丢弃已获取的元数据。
+README、changelog 及运行文件校验清单同步；无依赖或 SQL 迁移。
+
+验证使用 /tmp/litkg-replay-venv、本地合成 PDF 和 GROBID 替身。完整发现式回归
+在 tests/test_api.py 的首个 TestClient 请求阻塞，受限时运行超时；线程栈停在
+anyio/from_thread 与 starlette/testclient，未完成 API/UI/数据库全量验证。
+不依赖 TestClient 的解析、目录、关系、维护等 174 项本地回归全部通过；
+compileall、git diff --check 和四份 SHA256 清单验证通过（容器路径映射到工作区文件）。
+测试日志：/tmp/litkg-doi-focused.log；未对真实问题 PDF 或真实 GROBID 服务验证。
+
+改动留在工作区，未提交、推送、部署或更新正式数据库，也未调用真实模型或发布任务。
+已有文献需重新解析原 PDF 才会更新 DOI；单纯 reproject/derived 或重抽已保存 chunks
+不能补充 PDF 解析元数据。本次未触发已有文献重处理。
+
 ## 2026-10-17 在两个远端提交上重放（最新状态）
 
 用户已确认 pull 完成。本次以 c17c801 为基线重放本地备份提交 efca0de；保留远端

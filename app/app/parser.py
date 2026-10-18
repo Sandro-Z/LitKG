@@ -5,6 +5,7 @@ import requests
 from lxml import etree
 from pypdf import PdfReader
 
+from app.doi import extract_document_doi, normalize_doi
 from app.provenance import page_bounds, text_boundary
 from app.page_mapping import PdfPageIndex
 
@@ -43,17 +44,35 @@ def _text_content(nodes):
     return "\n".join(texts).strip()
 
 
-def normalize_doi(value: str | None) -> str | None:
-    if not value:
-        return None
-    value = re.sub(
-        r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)",
-        "",
-        value.strip(),
-        flags=re.I,
-    )
-    value = value.rstrip(".,;")
-    return value if re.fullmatch(r"10\.\d{4,9}/\S+", value, flags=re.I) else None
+def _tei_doi_text(root):
+    """Render text/link targets for DOI lookup without cited bibliographies."""
+    parts = []
+
+    def visit(node):
+        if not isinstance(node.tag, str):
+            return
+        name = etree.QName(node).localname
+        if name in {"listBibl", "biblStruct", "bibl"} or (
+            name == "ref" and (node.get("type") or "").lower() == "bibr"
+        ):
+            return
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            visit(child)
+            if child.tail:
+                parts.append(child.tail)
+        if name in {"ref", "ptr"}:
+            target = node.get("target") or ""
+            if re.match(r"https?://(?:dx\.)?doi\.org/", target, re.I):
+                parts.append(f" {target} ")
+        if name in {"p", "note"}:
+            parts.append("\n\n")
+        elif name in {"head", "div", "idno"}:
+            parts.append("\n")
+
+    visit(root)
+    return "".join(parts)
 
 
 def _paragraph_pages(node) -> tuple[int | None, int | None]:
@@ -127,12 +146,16 @@ def _paragraph_text_and_spans(paragraph):
     return "".join(characters), spans
 
 
-def parse_tei_sections(tei_xml: str):
-    ns = {"tei": "http://www.tei-c.org/ns/1.0"}
-    root = etree.fromstring(
+def _parse_tei_xml(tei_xml: str):
+    return etree.fromstring(
         tei_xml.encode("utf-8"),
         parser=etree.XMLParser(resolve_entities=False, no_network=True),
     )
+
+
+def parse_tei_sections(tei_xml: str, *, include_text_doi: bool = True):
+    ns = {"tei": "http://www.tei-c.org/ns/1.0"}
+    root = _parse_tei_xml(tei_xml)
 
     title_nodes = root.xpath("//tei:titleStmt/tei:title", namespaces=ns)
     title = _text_content(title_nodes) if title_nodes else None
@@ -147,6 +170,8 @@ def parse_tei_sections(tei_xml: str):
         doi = normalize_doi(_text_content([node]))
         if doi:
             break
+    if doi is None and include_text_doi:
+        doi = extract_document_doi([_tei_doi_text(root)])
     metadata = {"title": title, "doi": doi}
 
     sections = []
@@ -179,25 +204,18 @@ def parse_tei_sections(tei_xml: str):
     return metadata, sections
 
 
-def fallback_pdf_text(pdf_path: str):
+def fallback_pdf_text(pdf_path: str, *, doi_hint: str | None = None):
     reader = PdfReader(pdf_path)
     pdf_metadata = reader.metadata or {}
     title = str(pdf_metadata.get("/Title") or "").strip() or None
-    doi = normalize_doi(pdf_metadata.get("/doi") or pdf_metadata.get("/DOI"))
+    doi = normalize_doi(pdf_metadata.get("/doi")) or normalize_doi(pdf_metadata.get("/DOI"))
     pages = []
+    doi_texts = []
     for i, page in enumerate(reader.pages):
         text = page.extract_text() or ""
+        doi_texts.append(text)
         text = re.sub(r"(?<=\w)[-\u2010]\s*\n\s*(?=\w)", "", text)
         text = re.sub(r"\s+", " ", text).strip()
-        if i == 0 and doi is None:
-            match = re.search(
-                r"(?:https?://(?:dx\.)?doi\.org/|\bdoi\s*:\s*)"
-                r"(10\.\d{4,9}/[^\s<>]+)",
-                text,
-                flags=re.I,
-            )
-            if match:
-                doi = normalize_doi(match.group(1))
         if text:
             pages.append({
                 "section_title": f"Page {i + 1}",
@@ -209,6 +227,8 @@ def fallback_pdf_text(pdf_path: str):
                     "page_end": i + 1,
                 }],
             })
+    if doi is None:
+        doi = normalize_doi(doi_hint) or extract_document_doi(doi_texts)
     return {"title": title, "doi": doi}, pages
 
 
@@ -262,7 +282,7 @@ def parse_pdf_to_chunks(pdf_path: str):
     used_grobid = False
     try:
         tei = call_grobid(pdf_path)
-        metadata, sections = parse_tei_sections(tei)
+        metadata, sections = parse_tei_sections(tei, include_text_doi=False)
         if not sections:
             raise RuntimeError("No text sections extracted from GROBID")
         used_grobid = True
@@ -278,19 +298,29 @@ def parse_pdf_to_chunks(pdf_path: str):
             for span in section["page_spans"]
         ) for section in sections
     )
-    if needs_pages:
+    tei_text_doi = None
+    if used_grobid and not metadata.get("doi"):
+        tei_text_doi = extract_document_doi([_tei_doi_text(_parse_tei_xml(tei))])
+
+    if used_grobid and (needs_pages or not metadata.get("doi")):
         try:
-            pdf_metadata, pdf_sections = fallback_pdf_text(pdf_path)
-            index = PdfPageIndex.from_sections(pdf_sections)
-            for section in sections:
-                section["page_spans"] = index.page_spans(
-                    section["text"], section.get("page_spans") or [],
-                )
+            pdf_metadata, pdf_sections = fallback_pdf_text(pdf_path, doi_hint=tei_text_doi)
             metadata = {key: metadata.get(key) or pdf_metadata.get(key)
                         for key in ("title", "doi")}
+            if needs_pages:
+                index = PdfPageIndex.from_sections(pdf_sections)
+                for section in sections:
+                    section["page_spans"] = index.page_spans(
+                        section["text"], section.get("page_spans") or [],
+                    )
         except Exception as exc:
             # Keep useful GROBID text/metadata when a PDF text layer is absent.
-            logger.warning("PDF page alignment unavailable (%s)", type(exc).__name__)
+            logger.warning("PDF metadata/page alignment unavailable (%s)", type(exc).__name__)
+
+    if used_grobid and not metadata.get("doi"):
+        # Structured TEI can retain an appendix/link omitted by PDF extraction,
+        # including when the PDF text layer cannot be read at all.
+        metadata["doi"] = tei_text_doi
 
     if not sections:
         raise RuntimeError("No text sections extracted from PDF")
