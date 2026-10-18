@@ -17,6 +17,7 @@ st.set_page_config(
     layout="wide",
 )
 
+# Keep a distinct color for every canonical type in app/entity_types.py.
 ENTITY_COLORS = {
     "Compound": "#F97316",
     "Drug": "#FB7185",
@@ -24,10 +25,34 @@ ENTITY_COLORS = {
     "Gene": "#6366F1",
     "Disease": "#EF4444",
     "CellLine": "#14B8A6",
+    "CellType": "#115E59",
+    "Tissue": "#D4A373",
+    "AnatomicalStructure": "#7C3E19",
+    "RNA": "#A3E635",
+    "MolecularComplex": "#3730A3",
+    "BiologicalProcess": "#A16207",
+    "Phenotype": "#C026D3",
     "Organism": "#22C55E",
     "Assay": "#EAB308",
     "Pathway": "#8B5CF6",
     "Mutation": "#EC4899",
+    "MicrobialTaxon": "#06B6D4",
+    "MicrobialStrain": "#0E7490",
+    "MicrobialCommunity": "#84CC16",
+    "Microbiome": "#047857",
+    "SequenceFeature": "#FACC15",
+    "Genome": "#1E3A8A",
+    "Metabolite": "#FDBA74",
+    "Diet": "#BE123C",
+    "DietaryComponent": "#C4B5FD",
+    "Intervention": "#0284C7",
+    "Biospecimen": "#78716C",
+    "StudyGroup": "#475569",
+    "ExperimentalModel": "#A78BFA",
+    "Environment": "#4D7C0F",
+    "ClinicalOutcome": "#FDA4AF",
+    "MicrobialFunction": "#713F12",
+    "DiversityMetric": "#D946EF",
     "Other": "#94A3B8",
 }
 
@@ -178,6 +203,25 @@ def render_graph(graph_data):
         st.info("当前筛选范围还没有可展示的关系。")
         return
 
+    type_colors = {
+        node_type: ENTITY_COLORS.get(node_type, ENTITY_COLORS["Other"])
+        for node_type in sorted({node.get("type") or "Other" for node in nodes})
+    }
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:6px;'
+        'white-space:nowrap;font-size:0.875rem;">'
+        '<span aria-hidden="true" style="display:inline-block;width:12px;height:12px;'
+        f'border-radius:50%;background:{color};border:1px solid rgba(0,0,0,0.15);"></span>'
+        f'{escape(node_type)}</span>'
+        for node_type, color in type_colors.items()
+    )
+    st.caption("节点颜色对应实体类型")
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:12px;">'
+        f'{legend}</div>',
+        unsafe_allow_html=True,
+    )
+
     network = Network(
         height="760px",
         width="100%",
@@ -204,10 +248,7 @@ def render_graph(graph_data):
                 f"名称: {node.get('label')}<br>"
                 f"规范化 ID: {normalized_id}"
             ),
-            color=ENTITY_COLORS.get(
-                node_type,
-                ENTITY_COLORS["Other"],
-            ),
+            color=type_colors[node_type],
             shape="dot",
             size=24,
         )
@@ -292,8 +333,6 @@ def main():
     try:
         knowledge_bases = load_knowledge_bases()
         type_names = list(api_get('/entity-types')['types'])
-        for name in type_names:
-            ENTITY_COLORS.setdefault(name, '#0D9488')
     except Exception as exc:
         st.error(f"无法连接 API：{exc}")
         st.stop()
@@ -593,7 +632,9 @@ def main():
         col1, col2, col3 = st.columns(3)
         graph_query = col1.text_input("搜索实体名称、别名、标准 ID 或关系", key="graph_query")
         graph_predicate = col2.text_input("关系类型（可选）", key="graph_predicate")
-        graph_entity_type = col3.selectbox("实体类型（可选）", [""] + list(ENTITY_COLORS), key="graph_entity_type")
+        graph_entity_type = col3.selectbox(
+            "实体类型（可选）", [""] + type_names, key="graph_entity_type"
+        )
         col1, col2, col3 = st.columns(3)
         graph_limit = col1.slider(
             "最多关系数",
