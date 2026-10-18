@@ -1,8 +1,10 @@
 """Controlled models + real PostgreSQL; never reads .env or calls a live model."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+import hashlib
 import os
 from pathlib import Path
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -16,6 +18,7 @@ from fastapi.testclient import TestClient
 from app.graph_store import store_claim
 from app.schemas import CatalogBundle, ClaimBundle, Claim
 from app.retrieval import rebuild_derived, retrieve, answer_question, fetch_facts
+from pdf_fixtures import text_pdf
 
 
 @unittest.skipUnless(os.getenv('LITKG_TEST_DATABASE_URL'), 'Set disposable LITKG_TEST_DATABASE_URL')
@@ -108,6 +111,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         mismatch = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'test knowledge'})
         self.assertEqual(mismatch.status_code, 409)
         response = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'})
+        self.assertEqual(response.json()['deleted_document_count'], 0)
+        self.assertEqual(response.json()['retained_shared_document_count'], 1)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get(f'/knowledge-bases/{self.kb}').status_code, 404)
         with self.connect() as conn:
@@ -122,6 +127,126 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             # A queued worker must skip a deleted KB instead of failing on its FK.
             self.assertEqual(rebuild_derived(conn.cursor(), self.kb)['changed_count'], 0)
         self.assertEqual(self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'}).status_code, 404)
+
+    def test_delete_last_owner_purges_caches_and_same_pdf_runs_full_pipeline_again(self):
+        sentence = 'Probe Q reduces IL-6.'
+        with text_pdf([sentence]) as pdf:
+            content = pdf.read_bytes()
+        catalog = CatalogBundle.model_validate({'entities':[
+            {'text':'Probe Q','type':'Drug','evidence':sentence},
+            {'text':'IL-6','type':'Protein','evidence':sentence}]})
+        claims = ClaimBundle.model_validate({'claims':[{
+            'subject':{'text':'Probe Q','type':'Drug'}, 'predicate':'REDUCES',
+            'object':{'text':'IL-6','type':'Protein'},
+            'evidence':{'sentence':sentence}, 'confidence':.9}]})
+        chunk = {'text':sentence,'section_title':'Results','page_start':1,'page_end':1,
+                 'page_spans':[{'start':0,'end':len(sentence),'page_start':1,'page_end':1}]}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.main, 'UPLOAD_DIR', Path(directory)), \
+                patch.object(self.tasks.parse_document, 'apply_async') as publish, \
+                patch.object(self.tasks, 'parse_pdf_to_chunks', return_value=({'title':'Controlled'},[chunk])) as parse, \
+                patch.object(self.tasks, 'extract_catalog', return_value=catalog) as catalog_model, \
+                patch.object(self.tasks, 'extract_claims', return_value=claims) as claims_model:
+            def upload(kb):
+                response = self.client.post(f'/knowledge-bases/{kb}/documents',
+                    files=[('files',('same.pdf',content,'application/pdf'))])
+                self.assertEqual(response.status_code,202,response.text)
+                item = response.json()['items'][0]
+                self.assertTrue(item['was_new_document'])
+                self.assertTrue(item['queued_for_processing'])
+                return item['document_id']
+            def process(doc):
+                self.tasks.parse_document.run(doc,publish=False)
+                self.tasks.build_document_catalog.run(doc,publish=False)
+                with self.connect() as conn:
+                    chunk_id = conn.execute('SELECT id FROM chunks WHERE document_id=%s',(doc,)).fetchone()['id']
+                self.tasks.extract_chunk.run(chunk_id,refresh=False)
+            first = upload(self.kb)
+            process(first)
+            with self.connect() as conn:
+                from app.catalog import archive_claims
+                archive_claims(conn.cursor(),first)
+                rebuild_derived(conn.cursor(),self.kb)
+                old_chunks = [r['id'] for r in conn.execute('SELECT id FROM chunks WHERE document_id=%s',(first,))]
+                conn.execute("INSERT INTO processing_leases (resource,owner) VALUES (%s,%s)",
+                             (f'litkg-chunk:{old_chunks[0]}',str(uuid.uuid4())))
+                job = str(uuid.uuid4())
+                conn.execute("INSERT INTO maintenance_jobs (id,knowledge_base_id,document_id,mode) VALUES (%s,%s,%s,'retry')",
+                             (job,self.kb,first))
+                conn.execute("INSERT INTO processing_leases (resource,owner) VALUES (%s,%s)",
+                             (f'litkg-maintenance:{job}',str(uuid.uuid4())))
+                self.assertGreater(conn.execute('SELECT count(*) AS n FROM processing_cache WHERE document_id=%s',(first,)).fetchone()['n'],0)
+                self.assertGreater(conn.execute('SELECT count(*) AS n FROM facts f JOIN claims c ON c.id=f.claim_id WHERE c.document_id=%s',(first,)).fetchone()['n'],0)
+            deleted = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(deleted.status_code,200,deleted.text)
+            # self.doc and the uploaded document both belonged exclusively to this KB.
+            self.assertEqual(deleted.json()['deleted_document_count'],2)
+            with self.connect() as conn:
+                for table in ['documents','chunks','document_catalogs','document_entities','processing_cache',
+                              'processing_attempts','claim_history','review_items','derived_dirty_documents',
+                              'maintenance_jobs','ingestion_batch_items','claims']:
+                    column = 'id' if table == 'documents' else 'document_id'
+                    self.assertEqual(conn.execute(f'SELECT count(*) AS n FROM {table} WHERE {column}=%s',(first,)).fetchone()['n'],0,table)
+                self.assertIsNone(conn.execute('SELECT 1 FROM documents WHERE sha256=%s',(hashlib.sha256(content).hexdigest(),)).fetchone())
+                self.assertIsNone(conn.execute('SELECT 1 FROM processing_leases WHERE resource=%s',(f'litkg-chunk:{old_chunks[0]}',)).fetchone())
+                self.assertIsNone(conn.execute('SELECT 1 FROM processing_leases WHERE resource=%s',(f'litkg-maintenance:{job}',)).fetchone())
+            # Tasks already queued for the old ID must not recreate deleted state.
+            self.assertEqual(self.tasks.parse_document.run(first)['status'],'superseded')
+            self.assertEqual(self.tasks.build_document_catalog.run(first)['status'],'superseded')
+            self.assertEqual(self.tasks.extract_chunk.run(old_chunks[0])['status'],'superseded')
+            self.assertEqual(self.tasks.refresh_derived.run(first)['status'],'superseded')
+            second = upload(self.new_kb())
+            self.assertNotEqual(second,first)
+            process(second)
+            self.assertEqual(publish.call_count,2)
+            self.assertEqual(parse.call_count,2)
+            self.assertEqual(catalog_model.call_count,2)
+            self.assertEqual(claims_model.call_count,2)
+
+    def test_last_shared_owner_deletion_removes_document(self):
+        other = self.new_kb()
+        with self.connect() as conn:
+            conn.execute('INSERT INTO knowledge_base_documents (knowledge_base_id,document_id) VALUES (%s,%s)',(other,self.doc))
+        first = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+        self.assertEqual(first.json()['retained_shared_document_count'],1)
+        last = self.client.delete(f'/knowledge-bases/{other}',params={'confirm_name':'test knowledge'})
+        self.assertEqual(last.json()['deleted_document_count'],1)
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE id=%s',(self.doc,)).fetchone())
+
+    def test_delete_while_pdf_is_stored_does_not_register_an_orphan(self):
+        from app.ingestion import store_pdf
+        with text_pdf(['Concurrent upload']) as pdf:
+            content = pdf.read_bytes()
+        def deleted_before_registration(*args):
+            stored = store_pdf(*args)
+            deleted = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(deleted.status_code,200)
+            return stored
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.main,'UPLOAD_DIR',Path(directory)), \
+                patch.object(self.main,'store_pdf',side_effect=deleted_before_registration), \
+                patch.object(self.tasks.parse_document,'apply_async') as publish:
+            response = self.client.post(f'/knowledge-bases/{self.kb}/documents',
+                files=[('files',('race.pdf',content,'application/pdf'))])
+        self.assertEqual(response.status_code,404,response.text)
+        publish.assert_not_called()
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE sha256=%s',(hashlib.sha256(content).hexdigest(),)).fetchone())
+
+    def test_delete_during_active_parse_discards_late_output(self):
+        def parse_then_delete(path):
+            response = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(response.status_code,200,response.text)
+            return {}, [{'text':'Late parser output','section_title':'Results'}]
+        with patch.object(self.tasks,'parse_pdf_to_chunks',side_effect=parse_then_delete), \
+                patch.object(self.tasks.build_document_catalog,'apply_async') as publish:
+            result = self.tasks.parse_document.run(self.doc)
+        self.assertEqual(result['status'],'superseded')
+        publish.assert_not_called()
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE id=%s',(self.doc,)).fetchone())
+            self.assertIsNone(conn.execute('SELECT id FROM chunks WHERE document_id=%s',(self.doc,)).fetchone())
 
     def test_catalog_failure_resumes_segments_before_any_relationship_is_queued(self):
         texts = ['Interleukin-6 (IL-6) was studied.', 'Probe Q was used in the final paragraph.']

@@ -419,7 +419,7 @@ def parse_document(document_id: int, publish: bool = True):
             with get_conn() as conn:
                 document = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
             if not document:
-                raise ValueError("Document not found")
+                return {"document_id": document_id, "status": "superseded"}
             metadata, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
             if not parsed_chunks or not any(c["text"].strip() for c in parsed_chunks):
                 raise ValueError("Parser produced no text; check PDF text layer or OCR")
@@ -448,6 +448,9 @@ def parse_document(document_id: int, publish: bool = True):
                 build_document_catalog.apply_async(args=[document_id], queue="extract")
             return {"document_id": document_id, "chunk_count": len(parsed_chunks), "status": "cataloging"}
         except Exception as exc:
+            with get_conn() as conn:
+                if not conn.execute("SELECT id FROM documents WHERE id=%s", (document_id,)).fetchone():
+                    return {"document_id": document_id, "status": "superseded"}
             update_document_status(document_id, "failed", f"Parse failed: {type(exc).__name__}: {exc}")
             raise
 
@@ -461,6 +464,8 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
         try:
             with get_conn() as conn:
                 document = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
+                if not document:
+                    return {"document_id": document_id, "status": "superseded"}
                 chunks = conn.execute("SELECT * FROM chunks WHERE document_id = %s ORDER BY chunk_index", (document_id,)).fetchall()
                 if force:
                     document = conn.execute("""UPDATE documents SET pipeline_generation=pipeline_generation+1,
@@ -531,6 +536,8 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                     "chunk_count": len(chunks), "rejected_candidates": rejected_count}
         except Exception as exc:
             with get_conn() as conn:
+                if not conn.execute("SELECT id FROM documents WHERE id=%s", (document_id,)).fetchone():
+                    return {"document_id": document_id, "status": "superseded"}
                 conn.execute("UPDATE documents SET catalog_status = 'failed', catalog_error = %s WHERE id = %s", (f"{type(exc).__name__}: {exc}", document_id))
                 if version:
                     conn.execute("UPDATE document_catalogs SET status = 'failed', error = %s WHERE document_id = %s AND version = %s", (str(exc), document_id, version))
@@ -638,7 +645,7 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
             if document_id is not None:
                 with get_conn() as conn:
                     current = conn.execute('SELECT catalog_version,pipeline_generation FROM documents WHERE id=%s', (document_id,)).fetchone()
-                if current and (current['catalog_version'] != chunk['catalog_version'] or current['pipeline_generation'] != chunk['pipeline_generation']):
+                if not current or (current['catalog_version'] != chunk['catalog_version'] or current['pipeline_generation'] != chunk['pipeline_generation']):
                     return {'chunk_id':chunk_id,'status':'superseded'}
             update_chunk_status(chunk_id, "failed", f"{type(exc).__name__}: {exc}")
             if document_id is not None:
@@ -776,6 +783,8 @@ def refresh_derived(document_id: int):
     from app.retrieval import rebuild_derived
     try:
         with get_conn() as conn:
+            if not conn.execute("SELECT id FROM documents WHERE id=%s FOR KEY SHARE", (document_id,)).fetchone():
+                return {"document_id": document_id, "status": "superseded"}
             conn.execute("INSERT INTO derived_dirty_documents (document_id) VALUES (%s) ON CONFLICT DO NOTHING", (document_id,))
             dirty = conn.execute('SELECT document_id,revision FROM derived_dirty_documents ORDER BY (document_id=%s) DESC,document_id LIMIT 500', (document_id,)).fetchall()
             affected_ids = [r['document_id'] for r in dirty]
@@ -788,6 +797,8 @@ def refresh_derived(document_id: int):
                 conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"litkg-derived:{kb}",))
                 results.append(rebuild_derived(conn.cursor(), kb, affected_ids))
         with get_conn() as conn:
+            if not conn.execute("SELECT id FROM documents WHERE id=%s FOR KEY SHARE", (document_id,)).fetchone():
+                return {"document_id": document_id, "status": "superseded"}
             for row in dirty:
                 conn.execute('DELETE FROM derived_dirty_documents WHERE document_id=%s AND revision=%s', (row['document_id'],row['revision']))
             conn.execute("""INSERT INTO processing_attempts (document_id,stage,version,status,output)
@@ -798,6 +809,8 @@ def refresh_derived(document_id: int):
         return results
     except Exception as exc:
         with get_conn() as conn:
+            if not conn.execute("SELECT id FROM documents WHERE id=%s FOR KEY SHARE", (document_id,)).fetchone():
+                return {"document_id": document_id, "status": "superseded"}
             conn.execute("""INSERT INTO processing_attempts (document_id,stage,version,status,error)
                 VALUES (%s,'derived',%s,'failed',%s)""", (document_id,PROCESSING_VERSION,f"{type(exc).__name__}: {exc}"))
         raise

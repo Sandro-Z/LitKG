@@ -344,7 +344,7 @@ def main():
                 if st.session_state.get(f"knowledge_base_edit_error_{selected_knowledge_base_id}"):
                     st.error(st.session_state[f"knowledge_base_edit_error_{selected_knowledge_base_id}"])
             with st.expander("删除当前知识库"):
-                st.warning(f"将删除「{current['name']}」及其全部文献关联、批次、索引和维护记录。此操作无法撤销。原始 PDF 和共享文献保留。")
+                st.warning(f"将删除「{current['name']}」及其文献、处理缓存、抽取结果、批次、索引和维护记录。其他知识库仍在使用的文献保留；独占文献再次上传将从头处理。原始 PDF 文件保留。此操作无法撤销。")
                 with st.form(f"delete_knowledge_base_{selected_knowledge_base_id}"):
                     st.text_input("输入知识库名称以确认删除", key=f"delete_knowledge_base_name_{selected_knowledge_base_id}", max_chars=200)
                     st.form_submit_button("确认删除整个知识库", on_click=delete_knowledge_base,

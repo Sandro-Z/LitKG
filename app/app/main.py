@@ -15,6 +15,7 @@ from fastapi import (
 from app.batch_status import sync_batch_status, quality_columns
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
+from app.graph_store import lock_graph_projection, prune_orphan_projection
 from app.graph_query import fetch_graph, fetch_relations, substring_pattern, current_claim_clause
 from app.ingestion import (
     UploadRejected,
@@ -70,6 +71,14 @@ def _get_knowledge_base(cur, knowledge_base_id: int) -> dict[str, Any]:
     if not knowledge_base:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     return knowledge_base
+
+
+def _lock_ingestion_knowledge_base(cur, knowledge_base_id: int) -> None:
+    # Keep deletion from racing document registration in another transaction.
+    cur.execute("SELECT id FROM knowledge_bases WHERE id = %s FOR KEY SHARE",
+                (knowledge_base_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
 
 
 def _get_default_knowledge_base_id() -> int:
@@ -170,7 +179,7 @@ def _ingest_files(
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            _get_knowledge_base(cur, knowledge_base_id)
+            _lock_ingestion_knowledge_base(cur, knowledge_base_id)
             cur.execute(
                 """
                 INSERT INTO ingestion_batches (
@@ -204,6 +213,7 @@ def _ingest_files(
             )
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    _lock_ingestion_knowledge_base(cur, knowledge_base_id)
                     registered = register_document(
                         cur,
                         stored=stored,
@@ -258,6 +268,7 @@ def _ingest_files(
         except UploadRejected as exc:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    _lock_ingestion_knowledge_base(cur, knowledge_base_id)
                     cur.execute(
                         """
                         INSERT INTO ingestion_batch_items (
@@ -275,9 +286,12 @@ def _ingest_files(
                 "was_new_document": False,
                 "queued_for_processing": False,
             }
+        except HTTPException:
+            raise
         except Exception as exc:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    _lock_ingestion_knowledge_base(cur, knowledge_base_id)
                     cur.execute(
                         """
                         INSERT INTO ingestion_batch_items (
@@ -454,15 +468,41 @@ def delete_knowledge_base(
                 raise HTTPException(status_code=404, detail="Knowledge base not found")
             if confirm_name != knowledge_base["name"]:
                 raise HTTPException(status_code=409, detail="知识库名称不匹配，请刷新后输入完整名称。")
+            # Use the same lock order as extraction: graph projection, then docs.
+            lock_graph_projection(cur, True)
+            cur.execute("""SELECT d.id FROM documents d
+                JOIN knowledge_base_documents m ON m.document_id = d.id
+                WHERE m.knowledge_base_id = %s ORDER BY d.id FOR UPDATE OF d""",
+                (knowledge_base_id,))
+            document_ids = [row["id"] for row in cur.fetchall()]
             cur.execute(
                 "DELETE FROM review_items WHERE detail->>'knowledge_base_id' = %s",
                 (str(knowledge_base_id),),
             )
-            # Foreign keys cascade KB-owned memberships, batches, indices and jobs.
-            # Documents, PDFs and extracted facts are shared across knowledge bases.
             cur.execute("DELETE FROM knowledge_bases WHERE id = %s", (knowledge_base_id,))
+            # Deleting only memberships left the SHA256 and processing caches in
+            # place, so uploading the same PDF incorrectly reused completed work.
+            cur.execute("""SELECT id FROM documents d WHERE id = ANY(%s::BIGINT[])
+                AND NOT EXISTS (SELECT 1 FROM knowledge_base_documents m
+                                WHERE m.document_id = d.id) ORDER BY id""", (document_ids,))
+            deleted_ids = [row["id"] for row in cur.fetchall()]
+            cur.execute("SELECT id FROM chunks WHERE document_id = ANY(%s::BIGINT[])", (deleted_ids,))
+            resources = [f"litkg-document:{doc_id}" for doc_id in deleted_ids]
+            resources.extend(f"litkg-chunk:{row['id']}" for row in cur.fetchall())
+            cur.execute("DELETE FROM processing_leases WHERE resource = ANY(%s::TEXT[])", (resources,))
+            cur.execute("DELETE FROM ingestion_batch_items WHERE document_id = ANY(%s::BIGINT[])", (deleted_ids,))
+            # Cascades include chunks, catalogs, caches, attempts, claim history,
+            # claims, facts, evidence and reviews. Shared documents remain live.
+            cur.execute("DELETE FROM documents WHERE id = ANY(%s::BIGINT[])", (deleted_ids,))
+            # Maintenance leases use text resource keys rather than foreign keys.
+            cur.execute("""DELETE FROM processing_leases lease
+                WHERE resource LIKE 'litkg-maintenance:%'
+                AND NOT EXISTS (SELECT 1 FROM maintenance_jobs job
+                    WHERE lease.resource = 'litkg-maintenance:' || job.id::TEXT)""")
+            prune_orphan_projection(cur)
     return {"status": "deleted", "knowledge_base_id": knowledge_base_id,
-            "name": knowledge_base["name"]}
+            "name": knowledge_base["name"], "deleted_document_count": len(deleted_ids),
+            "retained_shared_document_count": len(document_ids) - len(deleted_ids)}
 
 
 @app.post(
