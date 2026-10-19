@@ -1,4 +1,6 @@
 import os
+import json
+from collections import defaultdict
 from html import escape
 
 import pandas as pd
@@ -17,6 +19,7 @@ st.set_page_config(
     layout="wide",
 )
 
+# Keep a distinct color for every canonical type in app/entity_types.py.
 ENTITY_COLORS = {
     "Compound": "#F97316",
     "Drug": "#FB7185",
@@ -24,10 +27,32 @@ ENTITY_COLORS = {
     "Gene": "#6366F1",
     "Disease": "#EF4444",
     "CellLine": "#14B8A6",
+    "CellType": "#115E59",
+    "Tissue": "#D4A373",
+    "AnatomicalStructure": "#7C3E19",
+    "RNA": "#A3E635",
+    "MolecularComplex": "#3730A3",
+    "BiologicalProcess": "#A16207",
+    "Phenotype": "#C026D3",
     "Organism": "#22C55E",
     "Assay": "#EAB308",
     "Pathway": "#8B5CF6",
     "Mutation": "#EC4899",
+    "Peptide": "#06B6D4",
+    "Proteoform": "#0E7490",
+    "ProteinGroup": "#84CC16",
+    "ProteinFamily": "#047857",
+    "ProteinDomain": "#FACC15",
+    "ProteinModification": "#1E3A8A",
+    "ModificationSite": "#BE123C",
+    "Proteome": "#C4B5FD",
+    "SubcellularLocation": "#4D7C0F",
+    "Metabolite": "#FDBA74",
+    "Intervention": "#0284C7",
+    "Biospecimen": "#78716C",
+    "StudyGroup": "#475569",
+    "ExperimentalModel": "#A78BFA",
+    "ClinicalOutcome": "#FDA4AF",
     "Other": "#94A3B8",
 }
 
@@ -171,12 +196,59 @@ def api_upload_batch(
     return response.json()
 
 
+def graph_edge_labels(edges):
+    """Keep context-specific assertions visible as distinct parallel edges."""
+    groups = defaultdict(list)
+    for edge in edges:
+        groups[(edge['source'], edge['target'], edge.get('predicate') or edge.get('label', ''))].append(edge)
+    labels = {}
+    for group in groups.values():
+        for index, edge in enumerate(sorted(group, key=lambda item: item['id']), 1):
+            label = edge.get('label') or edge.get('predicate', '')
+            if edge.get('negated'):
+                label += ' [否定]'
+            if edge.get('speculative'):
+                label += ' [推测]'
+            if len(group) > 1:
+                qualifiers = edge.get('qualifiers') or {}
+                context = []
+                for key in ('metric', 'direction', 'association_direction', 'comparison_group', 'reference_group', 'evidence_type'):
+                    if key in qualifiers:
+                        context.append(f'{key}={qualifiers[key]}')
+                for process in qualifiers.get('processes', []):
+                    context.append(f"{process.get('role')}.{process.get('kind')}={process.get('direction', 'unspecified')}")
+                label += f' · 条件 {index}/{len(group)}'
+                if context:
+                    label += '\n' + '; '.join(context)
+            labels[edge['id']] = label
+    return labels
+
+
 def render_graph(graph_data):
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
     if not nodes or not edges:
         st.info("当前筛选范围还没有可展示的关系。")
         return
+
+    type_colors = {
+        node_type: ENTITY_COLORS.get(node_type, ENTITY_COLORS["Other"])
+        for node_type in sorted({node.get("type") or "Other" for node in nodes})
+    }
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:6px;'
+        'white-space:nowrap;font-size:0.875rem;">'
+        '<span aria-hidden="true" style="display:inline-block;width:12px;height:12px;'
+        f'border-radius:50%;background:{color};border:1px solid rgba(0,0,0,0.15);"></span>'
+        f'{escape(node_type)}</span>'
+        for node_type, color in type_colors.items()
+    )
+    st.caption("节点颜色对应实体类型")
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:12px;">'
+        f'{legend}</div>',
+        unsafe_allow_html=True,
+    )
 
     network = Network(
         height="760px",
@@ -204,13 +276,14 @@ def render_graph(graph_data):
                 f"名称: {node.get('label')}<br>"
                 f"规范化 ID: {normalized_id}"
             ),
-            color=ENTITY_COLORS.get(
-                node_type,
-                ENTITY_COLORS["Other"],
-            ),
+            color=type_colors[node_type],
             shape="dot",
             size=24,
         )
+
+    edge_labels = graph_edge_labels(edges)
+    if len({(e['source'], e['target'], e.get('predicate') or e.get('label', '')) for e in edges}) < len(edges):
+        st.caption('同名平行边代表不同条件或证据标注；边上显示区别，悬停可查看完整限定信息。')
 
     for edge in edges:
         confidence = edge.get("confidence")
@@ -238,12 +311,16 @@ def render_graph(graph_data):
         network.add_edge(
             edge["source"],
             edge["target"],
-            label=edge.get("label", ""),
+            id=edge['id'],
+            label=edge_labels[edge['id']],
             title=(
-                f"关系: {edge.get('label')}<br>"
+                f"关系: {escape(edge.get('label') or edge.get('predicate', ''))}<br>"
+                f"否定: {'是' if edge.get('negated') else '否'} | "
+                f"推测: {'是' if edge.get('speculative') else '否'}<br>"
                 f"平均置信度: {confidence_text}<br>"
                 f"支持文献: {edge.get('document_count', 0)}<br>"
-                f"证据数: {edge.get('evidence_count', 0)}<br><br>"
+                f"证据数: {edge.get('evidence_count', 0)}<br>"
+                f"限定信息:<pre>{escape(json.dumps(edge.get('qualifiers') or {}, ensure_ascii=False, indent=2))}</pre>"
                 f"{evidence_html}"
             ),
             color=edge_color,
@@ -292,8 +369,6 @@ def main():
     try:
         knowledge_bases = load_knowledge_bases()
         type_names = list(api_get('/entity-types')['types'])
-        for name in type_names:
-            ENTITY_COLORS.setdefault(name, '#0D9488')
     except Exception as exc:
         st.error(f"无法连接 API：{exc}")
         st.stop()
@@ -344,7 +419,7 @@ def main():
                 if st.session_state.get(f"knowledge_base_edit_error_{selected_knowledge_base_id}"):
                     st.error(st.session_state[f"knowledge_base_edit_error_{selected_knowledge_base_id}"])
             with st.expander("删除当前知识库"):
-                st.warning(f"将删除「{current['name']}」及其全部文献关联、批次、索引和维护记录。此操作无法撤销。原始 PDF 和共享文献保留。")
+                st.warning(f"将删除「{current['name']}」及其文献、处理缓存、抽取结果、批次、索引和维护记录。其他知识库仍在使用的文献保留；独占文献再次上传将从头处理。原始 PDF 文件保留。此操作无法撤销。")
                 with st.form(f"delete_knowledge_base_{selected_knowledge_base_id}"):
                     st.text_input("输入知识库名称以确认删除", key=f"delete_knowledge_base_name_{selected_knowledge_base_id}", max_chars=200)
                     st.form_submit_button("确认删除整个知识库", on_click=delete_knowledge_base,
@@ -593,7 +668,9 @@ def main():
         col1, col2, col3 = st.columns(3)
         graph_query = col1.text_input("搜索实体名称、别名、标准 ID 或关系", key="graph_query")
         graph_predicate = col2.text_input("关系类型（可选）", key="graph_predicate")
-        graph_entity_type = col3.selectbox("实体类型（可选）", [""] + list(ENTITY_COLORS), key="graph_entity_type")
+        graph_entity_type = col3.selectbox(
+            "实体类型（可选）", [""] + type_names, key="graph_entity_type"
+        )
         col1, col2, col3 = st.columns(3)
         graph_limit = col1.slider(
             "最多关系数",

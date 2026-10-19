@@ -31,6 +31,20 @@ class ApiTests(unittest.TestCase):
         cursor.fetchall.return_value = rows or []
         return context, cursor
 
+    def test_shared_proteomics_vocabularies_are_available_without_database_access(self):
+        with patch.object(self.main, 'get_conn', side_effect=AssertionError('Vocabulary is local')):
+            types = self.client.get('/entity-types')
+            predicates = self.client.get('/predicate-types')
+        self.assertEqual(types.status_code, 200)
+        self.assertIn('Protein', types.json()['types'])
+        self.assertIn('Proteoform', types.json()['types'])
+        self.assertEqual(predicates.status_code, 200)
+        registry = predicates.json()
+        self.assertEqual(registry['type_parents']['Proteoform'], 'Protein')
+        self.assertIn('occupancy', registry['process_kinds'])
+        self.assertTrue(registry['predicates']['CORRELATED_WITH']['symmetric'])
+        self.assertIn('metric', registry['predicates']['DIFFERS_BETWEEN']['required_qualifiers'])
+
     def test_both_claims_endpoints_return_document_and_page_metadata(self):
         claim = {
             "id": 99, "document_id": 5, "chunk_id": 8,
@@ -138,16 +152,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cursor.execute.call_count, 1)
         self.assertIn("FOR UPDATE", cursor.execute.call_args.args[0])
 
-    def test_delete_removes_only_knowledge_base_and_scoped_reviews(self):
+    def test_delete_purges_unshared_documents_and_processing_records(self):
         connection, cursor = self.connection(row={"id": 3, "name": "测试库"})
+        cursor.fetchall.side_effect = [[{"id": 5}], [{"id": 5}], [{"id": 8}]]
         with patch.object(self.main, "get_conn", return_value=connection):
             response = self.client.delete("/knowledge-bases/3", params={"confirm_name": "测试库"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "deleted", "knowledge_base_id": 3, "name": "测试库"})
-        writes = [(call.args[0], call.args[1]) for call in cursor.execute.call_args_list[1:]]
-        self.assertEqual(len(writes), 2)
-        self.assertEqual(writes[0][1], ("3",))
-        self.assertEqual(writes[1], ("DELETE FROM knowledge_bases WHERE id = %s", (3,)))
+        self.assertEqual(response.json(), {"status": "deleted", "knowledge_base_id": 3,
+            "name": "测试库", "deleted_document_count": 1, "retained_shared_document_count": 0})
+        writes = [(call.args[0], call.args[1]) for call in cursor.execute.call_args_list[1:]
+                  if len(call.args) > 1]
+        self.assertIn(("DELETE FROM knowledge_bases WHERE id = %s", (3,)), writes)
+        self.assertIn(("DELETE FROM documents WHERE id = ANY(%s::BIGINT[])", ([5],)), writes)
+        self.assertIn(("DELETE FROM ingestion_batch_items WHERE document_id = ANY(%s::BIGINT[])", ([5],)), writes)
+        self.assertIn(("DELETE FROM processing_leases WHERE resource = ANY(%s::TEXT[])",
+                       (["litkg-document:5", "litkg-chunk:8"],)), writes)
 
     def test_extraction_replaces_model_page_guesses_with_parser_pages(self):
         from app import tasks

@@ -1,34 +1,69 @@
 """Complete assertion projection, alongside the compatible binary graph."""
-import re
 from psycopg.types.json import Jsonb
 
 from app.catalog import PROCESSING_VERSION, add_review, digest
-from app.normalization import canonicalize_qualifiers
+from app.normalization import canonicalize_qualifiers, entity_identity, normalize_predicate, stable_json
 from app.schemas import Entity, Participant
+from app.processes import PROCESS_DEFINITIONS, PROCESS_PATTERN
+
+
+def canonical_comparison_qualifiers(predicate, qualifiers):
+    """Give two explicit encodings of the same measured comparison one identity.
+
+    Only exact process-kind metrics qualify. Do not guess that e.g. frequency,
+    percentage or a named intensity measure is equivalent to another measurement.
+    Original model output stays in claim_json.
+    """
+    result = canonicalize_qualifiers(qualifiers)
+    if normalize_predicate(predicate) != 'DIFFERS_BETWEEN':
+        return result
+    metric, direction = result.get('metric'), result.get('direction')
+    processes = result.get('processes', [])
+    if (isinstance(metric, str) and metric in PROCESS_DEFINITIONS
+            and isinstance(direction, str)
+            and direction in {'increased', 'decreased', 'unchanged', 'unspecified'}
+            and not any(p.get('role') == 'subject' for p in processes)):
+        result['processes'] = sorted([
+            *processes, {'role': 'subject', 'kind': metric, 'direction': direction}
+        ], key=stable_json)
+    return result
 
 
 def normalized_participants(claim):
     """Project explicit named qualifier roles, including legacy claim records."""
     values = list(claim.participants)
     explicit_roles = {p.role for p in values}
-    for role, entity_type in {'cell_line':'CellLine','species':'Organism','assay':'Assay','tissue':'Tissue','cell_type':'CellType'}.items():
+    for role, entity_type in {'cell_line':'CellLine','species':'Organism','assay':'Assay','tissue':'Tissue','cell_type':'CellType',
+                              'comparison_group':'StudyGroup','reference_group':'StudyGroup'}.items():
         value = claim.qualifiers.get(role)
         if role not in explicit_roles and isinstance(value, str) and value.strip():
             values.append(Participant(role=role,entity=Entity(text=value,type=entity_type)))
     return values
 
 
-def fact_qualifiers(claim):
+def fact_qualifiers(claim, participants=None):
     qualifiers = canonicalize_qualifiers(claim.qualifiers)
     processes = []
-    for role, entity in [("subject", claim.subject), ("object", claim.object), *[(p.role, p.entity) for p in claim.participants]]:
+    values = participants if participants is not None else [
+        {"role": role, "entity": entity} for role, entity in
+        [("subject", claim.subject), ("object", claim.object), *[(p.role, p.entity) for p in claim.participants]]]
+    for participant in values:
+        role, entity = participant['role'], participant['entity']
         if entity.process:
             # Original wording is retained in claim_json and participant.mention;
             # it must not split otherwise identical relation identities.
-            processes.append({"role": role, **entity.process.model_dump()})
+            process = {"role": role, **entity.process.model_dump()}
+            if role not in {"subject", "object"}:
+                # Repeated roles (e.g. two substrates) must still identify whose
+                # production/concentration changed. Graph projection supplies IDs.
+                if 'entity_id' in participant:
+                    process['entity_id'] = participant['entity_id']
+                else:
+                    process['entity_key'] = entity_identity(entity.text, entity.type, entity.normalized_id).canonical_key
+            processes.append(process)
     if processes:
-        qualifiers["processes"] = processes
-    return qualifiers
+        qualifiers["processes"] = sorted(processes, key=stable_json)
+    return canonical_comparison_qualifiers(claim.predicate, qualifiers)
 
 
 def store_fact(cur, claim_id, relation_id, claim, projection, document_id):
@@ -61,7 +96,7 @@ def store_fact(cur, claim_id, relation_id, claim, projection, document_id):
         add_review(cur, document_id, version, "semantic_split", {"claim_id": claim_id, "reason": reason})
     for p in participants:
         entity = p["entity"]
-        if not entity.process and re.search(r"\b(expression|secretion|activity)\b", entity.text, re.I):
+        if entity.type not in {'BiologicalProcess', 'ProteinModification', 'Assay', 'Pathway'} and not entity.process and PROCESS_PATTERN.search(entity.text):
             add_review(cur, document_id, version, "semantic_split", {"claim_id": claim_id, "reason": "unsplit process-bearing name", "entity": entity.model_dump()})
         if entity.uncertainty_reason or entity.type == "Other":
             add_review(cur, document_id, version, "uncertain_entity", {"claim_id": claim_id, "entity": entity.model_dump()})

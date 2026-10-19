@@ -166,7 +166,9 @@ class ClaimsRobustnessTests(unittest.TestCase):
     def test_bounded_correction_preserves_valid_siblings_and_partial_cache_is_retryable(self):
         cache = SegmentCache()
         segment = {'id':7,'section_title':'Results','text':SOURCE,'start':0,'end':len(SOURCE)}
-        bad = ClaimBundle.model_validate({'claims':[claim(),claim('Imaginary protein')]})
+        # Repair evidence for the same assertion. Replacing an imaginary target
+        # with IL-6 is a different fact and must no longer count as correction.
+        bad = ClaimBundle.model_validate({'claims':[claim(),claim(evidence={'sentence':'Unstated sentence.'})]})
         calls = []
         def model(**kwargs):
             calls.append(kwargs)

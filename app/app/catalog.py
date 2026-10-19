@@ -3,22 +3,26 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections import Counter
 
 from psycopg.types.json import Jsonb
+from app.processes import PROCESS_CONTEXT_WORDS, PROCESS_PATTERN
+from app.provenance import text_boundary
 
 from app.normalization import (
     abbreviation_key, entity_family, entity_identity, extract_abbreviations,
     normalize_alias, normalize_entity_alias, normalize_external_id, identifier_namespace, stable_json,
     _DASHES,
     identity_modifiers,
+    SPECIFIC_IDENTITY_TYPES,
 )
 
-PROCESSING_VERSION = "litkg-v3.3"
-CATALOG_VERSION = "catalog-v3-quarantine"
-# The model contract is unchanged. Revalidate existing successful segment
-# caches locally rather than sending the whole literature collection again.
+PROCESSING_VERSION = "litkg-v3.4-proteomics"
+CATALOG_VERSION = "catalog-v4-proteomics"
+# Vocabulary and prompt versions are part of cache keys; the transport stays
+# unchanged, but old extractions must not mask newly supported entity types.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v4-resumable"
+EXTRACTION_VERSION = "claims-v5-controlled-proteomics"
 
 
 def digest(value):
@@ -30,7 +34,7 @@ def source_contains(text, quote):
     return source_span(text, quote) is not None
 
 
-def segments(chunks, max_chars=12000):
+def segments(chunks, max_chars=12000, *, legacy=False):
     """Cover every character, including oversized paragraphs, without slicing off a tail."""
     if max_chars < 1:
         raise ValueError('CATALOG_SEGMENT_CHARS must be positive')
@@ -39,14 +43,15 @@ def segments(chunks, max_chars=12000):
         text = chunk["text"]
         start = 0
         while start < len(text):
-            end = min(len(text), start + max_chars)
+            end = min(len(text), start + max_chars) if legacy else text_boundary(text, start + max_chars, start + max(1, max_chars // 2))
             yield {**chunk, "text": text[start:end], "start": start, "end": end}
             if end == len(text):
                 break
-            start = end - overlap
+            start = end - overlap if legacy else max(start + 1, text_boundary(text, end - overlap,
+                max(start + 1, end - overlap - 200, end - max_chars // 2)))
 
 
-def split_catalog_segment(segment, min_chars=500):
+def split_catalog_segment(segment, min_chars=500, *, legacy=False):
     """Subdivide a capacity-limited segment without dropping any source text."""
     if min_chars < 1:
         raise ValueError('CATALOG_MIN_SEGMENT_CHARS must be positive')
@@ -59,7 +64,8 @@ def split_catalog_segment(segment, min_chars=500):
                   if length // 3 <= m.end() <= 2 * length // 3]
     cut = min(boundaries, key=lambda position: abs(position-middle)) if boundaries else middle
     overlap = min(200, length // 10)
-    left_end, right_start = min(length-1, cut+overlap), max(1, cut-overlap)
+    left_end = min(length-1, cut+overlap) if legacy else text_boundary(text, min(length-1, cut+overlap), max(1, cut), sentences=False)
+    right_start = max(1, cut-overlap) if legacy else text_boundary(text, max(1, cut-overlap), max(1, cut-overlap-200), sentences=False)
     start = segment.get('start', 0)
     return [
         {**segment, 'text':text[:left_end], 'start':start, 'end':start+left_end},
@@ -122,7 +128,7 @@ def source_has_identifier(text, identifier):
     if source_contains(text, identifier):
         return True
     expected = normalize_external_id(identifier)
-    explicit = re.findall(r'(?:UniProt(?:KB)?|PubChem(?:\s*CID)?|CHEBI|NCBI\s*Gene|GeneID|Entrez(?:\s*Gene)?|DrugBank|CID)\s*[:_]\s*[A-Z0-9]+(?:-\d+)?|https?://[^\s)\],;]+', text, flags=re.I)
+    explicit = re.findall(r'(?:UniProt(?:KB)?|PubChem(?:\s*CID)?|CHEBI|NCBI\s*Gene|GeneID|Entrez(?:\s*Gene)?|DrugBank|CID|(?:PSI[- ]?)?MOD|Unimod|(?:PSI[- ]?)?MS)\s*[:_]\s*[A-Z0-9]+(?:-\d+)?|https?://[^\s)\],;]+', text, flags=re.I)
     return bool(expected) and any((normalize_external_id(value) or '').casefold() == expected.casefold() for value in explicit)
 
 
@@ -139,6 +145,12 @@ def verified_alias(name, alias, entity_type, sources):
         for source in sources for left, right in ((name, alias), (alias, name)))
 
 
+def validate_site_identity(entity):
+    if entity.type == 'ModificationSite' and re.fullmatch(
+            r'[A-Za-z]{1,3}\s*-?\s*\d+(?:\s*[/,]\s*[A-Za-z]{0,3}\s*\d+)*', entity.text.strip()):
+        raise ValueError('ModificationSite requires explicit parent protein identity; retain bare residue labels in qualifiers.site')
+
+
 def prepare_catalog(bundle, segment, *, quarantine=False, allow_empty=False):
     """Keep grounded entries and explicitly isolate unsupported candidates.
 
@@ -146,6 +158,10 @@ def prepare_catalog(bundle, segment, *, quarantine=False, allow_empty=False):
     individual entries, but an entirely invalid nonempty response still fails
     and is eligible for correction. Exclusions never become entity identities.
     """
+    counts = Counter((e.text, e.type, e.mention or e.text) for e in bundle.entities)
+    if len(bundle.entities) >= 8 and max(counts.values(), default=0) * 4 >= len(bundle.entities) * 3:
+        raise CatalogValidationError('Repetitive catalog generation: the same entity/mention dominates the output; '
+            'emit each mention once and cover the entire source, never return a truncated subset')
     if not quarantine:
         return _prepare_catalog(bundle, segment)
     result = bundle.model_copy(deep=True)
@@ -189,6 +205,10 @@ def _prepare_catalog(bundle, segment):
         return None
 
     for index, entity in enumerate(result.entities):
+        try:
+            validate_site_identity(entity)
+        except ValueError as exc:
+            raise CatalogValidationError(str(exc)) from exc
         mention = entity.mention or entity.text
         located = locate(mention)
         if located is None and entity.mention:
@@ -241,6 +261,10 @@ def _prepare_catalog(bundle, segment):
 def validate_catalog(bundle, segment):
     sources = _catalog_sources(segment)
     for index, entity in enumerate(bundle.entities):
+        try:
+            validate_site_identity(entity)
+        except ValueError as exc:
+            raise CatalogValidationError(str(exc)) from exc
         if entity.type == 'Other' and not entity.uncertainty_reason:
             entity.uncertainty_reason = 'insufficient type evidence'
         if not any(source_contains(source, entity.evidence) for source in sources):
@@ -295,6 +319,9 @@ def merge_catalog(records, abbreviations, document_id):
         if any(entries[owner].get('ambiguity') or entries[owner].get('pending_merge') for owner in owners):
             continue
         if len({identity_modifiers(entries[owner]['text']) for owner in owners}) > 1:
+            continue
+        if entry['type'] in SPECIFIC_IDENTITY_TYPES and len({
+                normalize_entity_alias(entries[owner]['text'], entry['type']) for owner in owners}) > 1:
             continue
         a,b = sorted(root(owner) for owner in owners)
         if a == b:
@@ -366,10 +393,7 @@ def directory_identity_matches(entity, entry, mention):
         # stereochemistry and other unknown modifiers part of the identity.
         context = normalize_alias(mention[:span[0]] + ' ' + mention[span[1]:])
         words = re.findall(r'\w+', context)
-        neutral = {'the','a','an','of','level','levels','expression','secretion','activity',
-                   'protein','gene','mrna','serum','plasma','concentration','concentrations',
-                   'increased','decreased','high','low','amount','amounts','proportion','percentage'}
-        if words and all(word in neutral for word in words):
+        if words and all(word in PROCESS_CONTEXT_WORDS for word in words):
             return True
     return False
 
@@ -422,6 +446,7 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
                 evidence.table_or_figure = None
         evidence_texts = [claim.evidence.sentence, *[e.sentence for e in additional]]
         for role, entity in [('subject', claim.subject), ('object', claim.object), *[(p.role, p.entity) for p in claim.participants]]:
+            validate_site_identity(entity)
             if entity.process and not entity.mention:
                 raise ValueError('Split process requires the original mention')
             mention = entity.mention or entity.text
@@ -456,8 +481,14 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
             if entity.process:
                 # Strip only the declared process, retaining species/mutations/
                 # modifications in the original complete entity name.
-                identity_mention = re.sub(r'\b(?:increased|decreased|unchanged|of|'+entity.process.kind+r')\b', ' ', mention, flags=re.I)
-                identity_mention = re.sub(r'\s+', ' ', identity_mention).strip()
+                name_span = source_span(mention, entity.text)
+                if name_span and directory_identity_matches(entity, {'text':entity.text, 'type':entity.type, 'aliases':[]}, mention):
+                    identity_mention = mention[name_span[0]:name_span[1]]
+                else:
+                    kind = re.escape(entity.process.kind)
+                    identity_mention = re.sub(r'\b(?:relative|absolute)\s+(?='+kind+r'\b)', '', mention, flags=re.I)
+                    identity_mention = re.sub(r'\b(?:increased|decreased|unchanged|of|'+kind+r')\b', ' ', identity_mention, flags=re.I)
+                    identity_mention = re.sub(r'\s+', ' ', identity_mention).strip()
                 if not identity_mention:
                     raise ValueError('Split process has no grounded entity name')
             expanded = entity_identity(identity_mention, entity.type,
@@ -501,11 +532,13 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)
                 omissions.append((entity, {'chunk_id': chunk['id'], 'mention': mention, 'role': role}))
-            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', entity.text, re.I):
+            validate_site_identity(entity)
+            aspect_entity = entity.type not in {'BiologicalProcess', 'ProteinModification', 'Assay', 'Pathway'}
+            if aspect_entity and not entity.process and PROCESS_PATTERN.search(entity.text):
                 reason = 'unsplit process-bearing name: ' + entity.text
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)
-            if not entity.process and re.search(r'\b(expression|secretion|activity)\b', mention, re.I):
+            if aspect_entity and not entity.process and PROCESS_PATTERN.search(mention):
                 reason = 'unsplit process-bearing mention: ' + mention
                 if reason not in claim.review_reasons:
                     claim.review_reasons.append(reason)

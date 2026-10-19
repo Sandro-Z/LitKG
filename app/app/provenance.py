@@ -3,6 +3,25 @@ import unicodedata
 from typing import Any
 
 
+def text_boundary(text, limit, lower=0, *, sentences=True):
+    """Choose an original-source offset before a budget, never rewrite text.
+
+    Prefer sentence boundaries, then whitespace. Unbroken text may still need
+    a hard split; every caller retains overlap and complete source coverage.
+    """
+    limit = min(len(text), limit)
+    if limit >= len(text) or limit <= lower:
+        return limit
+    if sentences:
+        matches = list(re.finditer(r'[.!?][\)\]"\u201d]?\s+(?=[A-Z])', text[lower:limit]))
+        if matches:
+            return lower + matches[-1].end()
+    if text[limit].isspace() or text[limit-1].isspace():
+        return limit
+    spaces = list(re.finditer(r'\s+', text[lower:limit]))
+    return lower + spaces[-1].end() if spaces else limit
+
+
 def _valid_page(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value

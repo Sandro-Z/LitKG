@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 from app.entity_types import ENTITY_TYPES
 
-
+# Parent accessions cannot uniquely identify a peptide, proteoform or site.
+SPECIFIC_IDENTITY_TYPES = {"Peptide", "Proteoform", "ProteinDomain", "ModificationSite"}
 
 _GREEK = str.maketrans({
     "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta",
@@ -71,17 +72,17 @@ def normalize_alias(value: str | None) -> str:
 
 def entity_family(entity_type: str) -> str:
     canonical = normalize_entity_type(entity_type)
-    return "Chemical" if canonical in {"Drug", "Compound"} else canonical
+    return "Chemical" if canonical in {"Drug", "Compound", "Metabolite"} else canonical
 
 
 def compatible_entity_types(entity_type: str) -> list[str]:
-    return ["Drug", "Compound"] if entity_family(entity_type) == "Chemical" else [entity_type]
+    return ["Drug", "Compound", "Metabolite"] if entity_family(entity_type) == "Chemical" else [entity_type]
 
 
 def normalize_entity_alias(value: str | None, entity_type: str) -> str:
     text = normalize_alias(value).translate(_GREEK)
     canonical_type = normalize_entity_type(entity_type)
-    if canonical_type in {"Gene", "Protein", "CellLine", "Pathway"}:
+    if canonical_type in {"Gene", "Protein", "Proteoform", "CellLine", "Pathway"}:
         # Keep digits, slash-delimited groups, mutations and species labels.
         text = re.sub(r"[\s_-]+", "", text)
     elif canonical_type == "Disease":
@@ -102,6 +103,9 @@ def normalize_external_id(value: str | None) -> str | None:
         (r"(?:UniProt(?:KB)?\s*:\s*|https?://(?:www\.)?uniprot\.org/(?:uniprotkb|uniprot)/|https?://purl\.uniprot\.org/uniprot/)([A-Z0-9]+(?:-\d+)?)", "UniProt"),
         (r"(?:NCBI\s*Gene\s*:\s*|GeneID\s*:\s*|Entrez(?:\s*Gene)?\s*:\s*|https?://(?:www\.)?ncbi\.nlm\.nih\.gov/gene/)(\d+)", "NCBIGene"),
         (r"(?:DrugBank\s*:\s*|https?://(?:go\.)?drugbank\.(?:com|ca)/drugs/)(DB\d+)", "DrugBank"),
+        (r"(?:(?:PSI[- ]?)?MOD\s*[:_]\s*|https?://purl\.obolibrary\.org/obo/MOD_)(\d+)", "MOD"),
+        (r"(?:Unimod\s*[:_]\s*|https?://(?:www\.)?unimod\.org/modifications_view\.php\?editid1=)(\d+)", "UNIMOD"),
+        (r"(?:(?:PSI[- ]?)?MS\s*[:_]\s*|https?://purl\.obolibrary\.org/obo/MS_)(\d+)", "MS"),
     ]
     for pattern, namespace in patterns:
         match = re.fullmatch(pattern, normalized.rstrip("/"), flags=re.I)
@@ -109,6 +113,8 @@ def normalize_external_id(value: str | None) -> str | None:
             identifier = match.group(1).upper()
             if identifier.isdigit():
                 identifier = str(int(identifier))
+                if namespace in {"MOD", "MS"}:
+                    identifier = identifier.zfill(5 if namespace == "MOD" else 7)
             return f"{namespace}:{identifier}"
     return re.sub(r"\s*:\s*", ":", normalized) or None
 
@@ -125,6 +131,7 @@ def identity_modifiers(name):
         r'\b(?:human|humans|mouse|murine|rat|bovine|porcine|canine|rabbit|chicken|zebrafish|'
         r'drosophila|yeast|homo sapiens|mus musculus|danio rerio|escherichia coli|'
         r'mutant|wild[- ]type|phosphorylated|dephosphorylated|phospho|acetylated|methylated|glycosylated|'
+        r'oxidized|oxidised|ubiquitinated|sumoylated|carbamidomethylated|dimethylated|trimethylated|'
         r'isoform\s*[\w-]+|variant\s*[\w-]+|exon\s*\d+(?:\s*(?:deletion|insertion))?|'
         r'(?:[a-z]{1,3})\d+(?:[a-z]{1,3}|del|dup)|[styk]\d+|(?:ser|thr|tyr|lys)\d+|cis|trans|[rs](?=\))|[dl](?=-))\b', text))))
 
@@ -132,7 +139,10 @@ def identity_modifiers(name):
 def identity_identifier_key(identity):
     key = identity.normalized_id.casefold()
     modifiers = identity_modifiers(identity.canonical_name)
-    return key + ('|identity:' + stable_json(modifiers) if modifiers else '')
+    key += '|identity:' + stable_json(modifiers) if modifiers else ''
+    if identity.entity_type in SPECIFIC_IDENTITY_TYPES:
+        key += '|form:' + identity.normalized_alias
+    return key
 
 
 def abbreviation_key(value: str) -> str:
@@ -248,6 +258,8 @@ def entity_identity(
         modifiers = identity_modifiers(canonical_name)
         if modifiers:
             identity_part += '|identity:' + stable_json(modifiers)
+        if canonical_type in SPECIFIC_IDENTITY_TYPES:
+            identity_part += '|form:' + normalized_name
     else:
         identity_part = f"name:{normalized_name}"
     non_specific = normalize_alias(canonical_name) in {
@@ -255,9 +267,17 @@ def entity_identity(
         "the compound", "the drug", "the protein", "the gene",
     }
     local_label = non_specific or bool(
-        entity_family(canonical_type) == "Chemical"
-        and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I)
+        canonical_type in {"ProteinGroup", "StudyGroup", "Biospecimen", "Proteome"}
+        or (canonical_type in SPECIFIC_IDENTITY_TYPES and re.fullmatch(
+            r"(?:peptide|proteoform|domain|site|fragment)[_ #.-]*\d+[a-z]?", canonical_name, flags=re.I))
+        or (entity_family(canonical_type) == "Chemical"
+            and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I))
     )
+    if canonical_type == "ProteinGroup" or (canonical_type in SPECIFIC_IDENTITY_TYPES and local_label):
+        # A member/parent accession does not identify a study's inference group
+        # or numbered peptide/form. Keep supplied IDs in the raw record only.
+        external_id = None
+        identity_part = f"name:{normalized_name}"
     document_scoped = bool(
         document_id is not None and external_id is None
         and (
