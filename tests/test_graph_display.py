@@ -1,5 +1,7 @@
 """Exercise graph rendering with the real frontend module and a captured network."""
 import importlib.util
+import json
+from html.parser import HTMLParser
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -64,5 +66,46 @@ class GraphDisplayTests(unittest.TestCase):
         self.assertIn('Proteoform', legend)
         self.assertIn('&lt;unknown&gt;', legend)
         self.assertNotIn('ProteinGroup', legend)
-        self.assertEqual(network.add_node.call_args_list[0].kwargs['color'], self.ui.ENTITY_COLORS['Proteoform'])
-        self.assertEqual(network.add_node.call_args_list[1].kwargs['color'], self.ui.ENTITY_COLORS['Other'])
+        self.assertEqual(network.add_node.call_args_list[0].kwargs['color']['border'], self.ui.ENTITY_COLORS['Proteoform'])
+        self.assertEqual(network.add_node.call_args_list[1].kwargs['color']['border'], self.ui.ENTITY_COLORS['Other'])
+
+    def test_labels_wrap_without_losing_identifiers_or_chinese(self):
+        for label in ['Proteoform-' + 'Q1234567890' * 8, '蛋白质修饰位点与实验条件' * 8]:
+            wrapped = self.ui.wrap_graph_label(label)
+            self.assertIn('\n', wrapped)
+            self.assertEqual(wrapped.replace('\n', ''), label)
+
+    def test_parallel_reverse_and_self_edges_have_distinct_static_paths(self):
+        edges = [{'id': 1, 'source': 1, 'target': 2},
+                 {'id': 2, 'source': 2, 'target': 1},
+                 {'id': 3, 'source': 1, 'target': 2},
+                 {'id': 4, 'source': 1, 'target': 1},
+                 {'id': 5, 'source': 1, 'target': 1}]
+        curves = self.ui.graph_edge_curves(edges)
+        self.assertEqual(curves, self.ui.graph_edge_curves(list(reversed(edges))))
+        self.assertEqual(len({json.dumps(curves[i], sort_keys=True) for i in (1, 2, 3)}), 3)
+        self.assertNotEqual(curves[4], curves[5])
+        self.assertNotIn('dynamic', json.dumps(curves))
+
+    def test_real_html_is_self_contained_and_entity_text_cannot_escape_script(self):
+        graph = {'knowledge_base_id': 8,
+                 'nodes': [{'id': 1, 'label': '</script><script>alert(1)</script>', 'type': 'Protein'},
+                           {'id': 2, 'label': '胞内修饰位点', 'type': 'ModificationSite'}],
+                 'edges': [{'id': 9, 'source': 1, 'target': 2, 'label': 'MODIFIES'}]}
+        with patch.object(self.ui, 'st'), patch.object(self.ui, 'components') as components:
+            self.ui.render_graph(graph)
+        html = components.html.call_args.args[0]
+        self.assertIn('下载白底 PNG', html)
+        self.assertIn('litkg-kb-8', html)
+        self.assertIn('\\u003c/script\\u003e', html)
+        self.assertNotIn('</script><script>alert(1)</script>', html)
+        class Resources(HTMLParser):
+            remote = []
+            def handle_starttag(self, tag, attrs):
+                for name, value in attrs:
+                    if tag in {'script', 'link', 'img'} and name in {'src', 'href'}:
+                        if value.startswith(('http:', 'https:', '//')):
+                            self.remote.append(value)
+        parser = Resources()
+        parser.feed(html)
+        self.assertEqual(parser.remote, [])
