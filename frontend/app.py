@@ -1,13 +1,16 @@
 import os
 import json
+import unicodedata
 from collections import defaultdict
 from html import escape
+from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
+from jinja2 import ChoiceLoader, FileSystemLoader
 from streamlit_autorefresh import st_autorefresh
 
 
@@ -226,6 +229,54 @@ def graph_edge_labels(edges):
     return labels
 
 
+def wrap_graph_label(value, width=28):
+    """Wrap display text without dropping long identifiers or CJK characters."""
+    lines = []
+    for paragraph in str(value).split("\n"):
+        line = ""
+        size = 0
+        for char in paragraph:
+            char_width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+            if size + char_width > width and line:
+                split = line.rfind(" ")
+                if split > 0:
+                    lines.append(line[:split])
+                    line = line[split + 1:]
+                else:
+                    lines.append(line)
+                    line = ""
+                size = sum(2 if unicodedata.east_asian_width(c) in {"W", "F"} else 1 for c in line)
+            line += char
+            size += char_width
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def graph_edge_curves(edges):
+    """Give parallel, reverse and self edges distinct, static exportable paths."""
+    groups = defaultdict(list)
+    for edge in edges:
+        groups[tuple(sorted((edge["source"], edge["target"])))].append(edge)
+    curves = {}
+    for (source, target), group in groups.items():
+        ordered = sorted(group, key=lambda edge: edge["id"])
+        for index, edge in enumerate(ordered):
+            if source == target:
+                curves[edge["id"]] = {"smooth": False, "selfReference": {"size": 65 + index * 45}}
+                continue
+            lane = index - (len(ordered) - 1) / 2
+            if lane == 0:
+                curves[edge["id"]] = {"smooth": False}
+            else:
+                clockwise = (lane > 0) == (edge["source"] == source)
+                curves[edge["id"]] = {"smooth": {
+                    "enabled": True,
+                    "type": "curvedCW" if clockwise else "curvedCCW",
+                    "roundness": 0.12 + 0.76 * abs(lane) / ((len(ordered) - 1) / 2 + 1),
+                }}
+    return curves
+
+
 def render_graph(graph_data):
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
@@ -258,32 +309,33 @@ def render_graph(graph_data):
         directed=True,
         bgcolor="#ffffff",
         font_color="#111827",
-    )
-    network.barnes_hut(
-        gravity=-30000,
-        central_gravity=0.3,
-        spring_length=180,
-        spring_strength=0.04,
-        damping=0.09,
+        cdn_resources="in_line",
+        heading=f"litkg-kb-{graph_data.get('knowledge_base_id', 'graph')}",
     )
 
     for node in nodes:
         node_type = node.get("type") or "Other"
         normalized_id = node.get("normalized_id") or "未规范化"
+        color = type_colors[node_type]
+        # Pale fills keep dark labels readable for every entity type.
+        fill = "#" + "".join(f"{round(int(color[i:i + 2], 16) * .14 + 255 * .86):02x}" for i in (1, 3, 5))
         network.add_node(
             node["id"],
-            label=node.get("label") or str(node["id"]),
+            label=wrap_graph_label(node.get("label") or str(node["id"])),
             title=(
-                f"类型: {node_type}<br>"
-                f"名称: {node.get('label')}<br>"
-                f"规范化 ID: {normalized_id}"
+                f"类型: {escape(node_type)}<br>"
+                f"名称: {escape(node.get('label') or str(node['id']))}<br>"
+                f"规范化 ID: {escape(normalized_id)}"
             ),
-            color=type_colors[node_type],
-            shape="dot",
-            size=24,
+            color={"border": color, "background": fill,
+                   "highlight": {"border": color, "background": fill}},
+            entityType=node_type,
+            typeColor=color,
+            shape="box",
         )
 
     edge_labels = graph_edge_labels(edges)
+    edge_curves = graph_edge_curves(edges)
     if len({(e['source'], e['target'], e.get('predicate') or e.get('label', '')) for e in edges}) < len(edges):
         st.caption('同名平行边代表不同条件或证据标注；边上显示区别，悬停可查看完整限定信息。')
 
@@ -314,7 +366,7 @@ def render_graph(graph_data):
             edge["source"],
             edge["target"],
             id=edge['id'],
-            label=edge_labels[edge['id']],
+            label=wrap_graph_label(edge_labels[edge['id']], width=42),
             title=(
                 f"关系: {escape(edge.get('label') or edge.get('predicate', ''))}<br>"
                 f"否定: {'是' if edge.get('negated') else '否'} | "
@@ -327,30 +379,34 @@ def render_graph(graph_data):
             ),
             color=edge_color,
             arrows="to",
-            width=min(8, 1 + edge.get("document_count", 1)),
+            width=min(3, 1 + edge.get("document_count", 1) * .4),
+            **edge_curves[edge['id']],
         )
 
-    network.set_options(
-        """
-        const options = {
-          "nodes": {"font": {"size": 16, "face": "Arial"}},
-          "edges": {
-            "font": {"size": 12, "align": "middle"},
-            "smooth": {"type": "dynamic"}
-          },
-          "physics": {
-            "enabled": true,
-            "stabilization": {"iterations": 200}
-          },
-          "interaction": {
-            "hover": true,
-            "navigationButtons": true,
-            "keyboard": true
-          }
-        }
-        """
-    )
-    components.html(network.generate_html(), height=800, scrolling=True)
+    network.set_options(json.dumps({
+        "layout": {"randomSeed": 42, "improvedLayout": False},
+        "nodes": {"font": {"size": 16, "face": "Arial", "color": "#111827"},
+                  "margin": 12, "borderWidth": 2, "widthConstraint": {"maximum": 230},
+                  "shapeProperties": {"borderRadius": 6}},
+        "edges": {"font": {"size": 14, "face": "Arial", "align": "horizontal",
+                            "color": "#334155", "background": "#ffffff", "strokeWidth": 2,
+                            "strokeColor": "#ffffff"},
+                  "arrowStrikethrough": False, "smooth": False,
+                  "selectionWidth": 0, "hoverWidth": 0},
+        "physics": {"enabled": False, "solver": "barnesHut",
+                    "barnesHut": {"gravitationalConstant": -18000, "centralGravity": .12,
+                                  "springLength": 300, "springConstant": .025,
+                                  "damping": .35, "avoidOverlap": 1},
+                    "stabilization": {"enabled": True, "iterations": 500, "updateInterval": 25}},
+        "interaction": {"hover": True, "keyboard": True, "multiselect": True},
+    }))
+    # Reuse PyVis's bundled renderer; the custom template needs no CDN requests.
+    network.templateEnv.loader = ChoiceLoader([
+        FileSystemLoader(str(Path(__file__).parent)), network.templateEnv.loader,
+    ])
+    network.template = network.templateEnv.get_template("graph.html")
+    st.caption("可拖动节点微调，按住 Ctrl 多选。整理后的布局可导出完整白底图片；图片包含当前筛选结果。")
+    components.html(network.generate_html(notebook=True), height=920, scrolling=True)
 
 
 def load_knowledge_bases():

@@ -1,5 +1,30 @@
 # LitKG v3 开发与续接记录
 
+## 2026-10-20 FMT_use 图谱节点整理与白底 PNG 导出
+
+按用户要求从 Proteomics 切换到 FMT_use（基线 4745073）。源功能由 Proteomics
+提交 5504c0b 保留，切换前工作区干净；完整原补丁与分支位置备份位于
+tmp/graph-port-FMT_use-20261020T024947Z。以 git apply --check 预演后迁入功能，
+没有合并 Proteomics 的后端或词表；FMT_use 的 35 种实体及原有配色逐项核对一致。
+
+图谱支持自动、层次、环形布局、间距调整、固定布局、多选拖动及标签页内位置恢复。
+新增 graph.html / graph_view.js，使用 PyVis 自带资源，无 CDN 或新增运行依赖。
+浅色节点框、长标签换行、平行/反向/自环路径及完整证据提示保留。
+图片按整理后位置导出完整筛选子图，提供 1×/2×/3× 不透明白底 PNG，包含关系文字、
+箭头、数量与类型图例；平移和缩放不裁掉图谱，超大图片明确提示缩小范围。
+
+测试数据已改用 FMT_use 的微生物组类型和受控关系。27 项 Python 前端/微生物组
+回归、7 项 Node 布局/导出边界检查通过；3 项 Chromium 测试在 DPR 1 和 2 下各通过
+一轮，验证三种布局、拖动恢复、完整图片、尺寸限制和 iframe 下载。
+实际微生物组合成示例位于 tmp/fmt-graph-export-check-1 和 -2，日志位于
+/tmp/litkg-fmt-graph-*.log。compileall、JS 语法、git diff --check 和 4 份 SHA256
+清单通过。同步修正 FMT_use 原有 catalog-runtime.sha256 中已过期的 facts.py 摘要，
+facts.py 内容与该分支 HEAD 一致，未修改后端逻辑。
+
+当前停留在 FMT_use，修改未暂存、未提交、未推送或部署；源 Proteomics 提交未改变。
+无需数据库迁移，更新前端即可生效。未访问正式数据库、模型或文献，真实大规模图谱与
+其他浏览器尚未实测。
+
 ## 2026-10-18 图谱节点配色补齐
 
 根因：frontend/app.py 仅为 11 种类型配置颜色，main 中通过 setdefault 将 API

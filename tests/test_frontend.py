@@ -61,7 +61,10 @@ class FrontendTests(unittest.TestCase):
                 return response({'status':'done','result':[]})
             resource=path.rsplit('/',1)[-1]
             if resource=='graph':
-                return response({'nodes':[],'edges':[],'summary':{}})
+                return response({'knowledge_base_id': 1,
+                    'nodes':[{'id':1,'label':'Protein A','type':'Protein'},
+                             {'id':2,'label':'Protein B','type':'Protein'}],
+                    'edges':[{'id':1,'source':1,'target':2,'label':'AFFECTS'}], 'summary':{}})
             return response({{'browse':'pages'}.get(resource,resource):[]})
         def post(url,json=None,**kwargs):
             if url.endswith('/ask'):

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>{% include 'lib/vis-9.1.2/vis-network.css' %}</style>
+  <script>{% include 'lib/vis-9.1.2/vis-network.min.js' %}</script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #fff; color: #111827; font: 14px Arial, sans-serif; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px;
+      background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px 8px 0 0; }
+    label { display: inline-flex; align-items: center; gap: 6px; }
+    button, select { font: inherit; padding: 8px 10px; background: white; color: #111827;
+      border: 1px solid #cbd5e1; border-radius: 5px; cursor: pointer; }
+    button:hover { border-color: #3b82f6; }
+    button:focus-visible, select:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+    button:disabled { cursor: wait; opacity: .55; }
+    #export { background: #2563eb; color: white; border-color: #2563eb; }
+    #mynetwork { width: 100%; height: 740px; border: 1px solid #e2e8f0; background: #fff; }
+    #status { margin: 0; min-height: 40px; padding: 10px 12px; color: #475569; line-height: 1.5; }
+    #status.error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <div class="toolbar" aria-label="图谱整理与导出">
+    <label>布局
+      <select id="layout" aria-label="节点布局">
+        <option value="force">自动整理</option>
+        <option value="hierarchy">层次布局</option>
+        <option value="circle">环形布局</option>
+      </select>
+    </label>
+    <label>间距
+      <select id="spacing" aria-label="节点间距">
+        <option value="220">紧凑</option>
+        <option value="320" selected>标准</option>
+        <option value="460">宽松</option>
+      </select>
+    </label>
+    <button id="arrange" type="button">整理节点</button>
+    <button id="freeze" type="button">固定布局</button>
+    <button id="fit" type="button">显示全图</button>
+    <label>清晰度
+      <select id="resolution" aria-label="导出清晰度">
+        <option value="1">标准 1×</option>
+        <option value="2" selected>高清 2×</option>
+        <option value="3">超清 3×</option>
+      </select>
+    </label>
+    <button id="export" type="button">下载白底 PNG</button>
+  </div>
+  <div id="mynetwork" aria-label="可拖动的知识图谱"></div>
+  <p id="status" role="status" aria-live="polite">正在整理节点…</p>
+  <script>
+    const graphData = {nodes: {{ nodes | tojson }}, edges: {{ edges | tojson }}};
+    const graphOptions = {{ options | safe }};
+    const graphName = {{ heading | tojson }};
+    {% include 'graph_view.js' %}
+  </script>
+</body>
+</html>
