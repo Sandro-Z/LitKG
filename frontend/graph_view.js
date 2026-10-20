@@ -161,9 +161,9 @@ const GraphView = (() => {
     const graphHeight = Math.ceil(bounds.bottom - bounds.top);
     const width = Math.ceil((graphWidth + 80) * ratio);
     const height = Math.ceil((graphHeight + 112 + legendRows * 28) * ratio);
-    if (![width, height].every(Number.isFinite) || width < 1 || height < 1 ||
-        width > 16000 || height > 16000 || width * height > 48000000) {
-      throw new Error("图谱图片过大，请降低清晰度、调小节点间距，或筛选较少的关系后导出。");
+    if (![graphWidth, graphHeight, width, height, ratio].every(value => Number.isFinite(value) && value > 0) ||
+        !Number.isFinite(legendRows) || legendRows < 0) {
+      throw new Error("图谱坐标或导出清晰度无效，请重新整理节点后重试。");
     }
     return {width, height, graphWidth, graphHeight};
   }
@@ -286,8 +286,16 @@ if (typeof document !== "undefined") {
     freeze();
     const toolbarControls = document.querySelectorAll(".toolbar button, .toolbar select");
     toolbarControls.forEach(control => { control.disabled = true; });
+    const exportLabel = controls.export.textContent;
+    controls.export.textContent = "正在导出…";
     status("正在生成完整白底图片…");
     let exportNetwork, container, output;
+    const canvasError = "浏览器无法创建或编码这张原尺寸 PNG，可能已达到浏览器的画布或可用内存上限。可尝试选择 1× 清晰度或使用内存更充足的浏览器。";
+    function canvasContext(canvas) {
+      const context = canvas.getContext("2d");
+      if (!context || !canvas.width || !canvas.height || context.isContextLost?.()) throw new Error(canvasError);
+      return context;
+    }
     try {
       await document.fonts.ready;
       const positions = network.getPositions();
@@ -301,6 +309,7 @@ if (typeof document !== "undefined") {
       const rows = legendLayout(scratch, Math.max(320, bounds.right - bounds.left));
       const ratio = Number(controls.resolution.value);
       const size = GraphView.imageSize(bounds, ratio, rows.length);
+      status(`正在生成 ${size.width} × ${size.height} 原尺寸 PNG，大图可能需要较长时间…`);
       const deviceRatio = window.devicePixelRatio || 1;
       container = document.createElement("div");
       container.style.cssText = `position:fixed;left:-100000px;top:0;pointer-events:none;` +
@@ -311,11 +320,15 @@ if (typeof document !== "undefined") {
       options.interaction = {dragNodes: false, dragView: false, zoomView: false, hover: false};
       options.nodes.font.size = 16;
       options.edges.font.size = 14;
+      // Preserve every label at the requested resolution, including 3× exports.
+      options.nodes.scaling = {label: {enabled: false, drawThreshold: 0, maxVisible: Number.MAX_VALUE}};
+      options.edges.scaling = {label: {enabled: false, drawThreshold: 0, maxVisible: Number.MAX_VALUE}};
       exportNetwork = new vis.Network(container, {
         nodes: new vis.DataSet(graphData.nodes.map(node => ({...node, ...positions[node.id], physics: false}))),
         edges: new vis.DataSet(graphData.edges),
       }, options);
       const source = container.querySelector("canvas");
+      canvasContext(source);
       const pixelRatio = source.width / parseFloat(container.style.width);
       await new Promise(resolve => {
         exportNetwork.once("afterDrawing", resolve);
@@ -326,7 +339,7 @@ if (typeof document !== "undefined") {
       output = document.createElement("canvas");
       output.width = size.width;
       output.height = size.height;
-      const context = output.getContext("2d");
+      const context = canvasContext(output);
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, size.width, size.height);
       context.scale(ratio, ratio);
@@ -345,7 +358,7 @@ if (typeof document !== "undefined") {
         context.fillText(item.type, 60 + item.x, legendTop + index * 28 + 12);
       }));
       const blob = await new Promise(resolve => output.toBlob(resolve, "image/png"));
-      if (!blob) throw new Error("浏览器无法生成图片，请降低清晰度后重试。");
+      if (!blob || context.isContextLost?.()) throw new Error(canvasError);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -361,6 +374,7 @@ if (typeof document !== "undefined") {
       if (exportNetwork) exportNetwork.destroy();
       if (container) container.remove();
       if (output) { output.width = 0; output.height = 0; }
+      controls.export.textContent = exportLabel;
       toolbarControls.forEach(control => { control.disabled = false; });
     }
   }
