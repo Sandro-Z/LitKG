@@ -500,7 +500,7 @@ def store_claim(
     return claim_id, relation_id
 
 
-def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None) -> int:
+def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None, *, reconcile_existing=True) -> int:
     if document_id is None:
         cur.execute("SELECT document_id FROM claims WHERE id = %s", (claim_id,))
         document_id = cur.fetchone()["document_id"]
@@ -515,7 +515,7 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
         source['abbreviation_map'] = abbreviations or {}
         entries = load_catalog(cur, document_id, source['catalog_version'])
         resolve_bundle(ClaimBundle(claims=[claim]), entries, source, source['catalog_version'])
-    projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=True)
+    projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=reconcile_existing)
 
     # Old versions could store the same extraction more than once. When
     # backfilling, keep the first matching row so the new unique fingerprint
@@ -536,6 +536,8 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
     )
     duplicate = cur.fetchone()
     if duplicate:
+        if not reconcile_existing:
+            raise ValueError('Scoped reproject would merge existing claims; inspect duplication separately')
         cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
         claim_id = duplicate["id"]
 

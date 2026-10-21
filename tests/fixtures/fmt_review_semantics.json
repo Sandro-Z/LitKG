@@ -1,0 +1,753 @@
+[
+  {
+    "name": "antibody-target-direction",
+    "provenance": {
+      "review_claim_id": "4779",
+      "source_anchors": "D09/p001b1:1984-2185",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "mmune checkpoint blockade with monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) provides long-term clinical benefits to nearly 40% of patients with advanced melanoma (1)(2)(3)(4)(5).",
+    "candidate": {
+      "subject": {
+        "text": "programmed cell death protein 1",
+        "type": "Protein",
+        "mention": "programmed cell death protein 1"
+      },
+      "predicate": "TARGETS",
+      "object": {
+        "text": "monoclonal antibodies",
+        "type": "Drug",
+        "mention": "monoclonal antibodies"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "mmune checkpoint blockade with monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) provides long-term clinical benefits to nearly 40% of patients with advanced melanoma (1)(2)(3)(4)(5)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "rejected",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "target-not-treatment",
+    "provenance": {
+      "review_claim_id": "4489",
+      "source_anchors": "D11/p001b1:2505-2768",
+      "filename": "JC_2020-02-05_Gut_microbiome_influences_efficacyof_PD-1-based_immunotherapyagainst_epithelial_tumors.pdf"
+    },
+    "source_text": "The most widely used ICIs are monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) and its ligand PD-L1 (7). PD-1 blockade is highly efficacious against advanced melanoma, non-small cell lung cancer (NSCLC), and renal cell carcinoma (RCC).",
+    "candidate": {
+      "subject": {
+        "text": "programmed cell death protein 1",
+        "type": "Protein",
+        "mention": "programmed cell death protein 1"
+      },
+      "predicate": "TREATS",
+      "object": {
+        "text": "non-small cell lung cancer",
+        "type": "Disease",
+        "mention": "non-small cell lung cancer"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "The most widely used ICIs are monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) and its ligand PD-L1 (7). PD-1 blockade is highly efficacious against advanced melanoma, non-small cell lung cancer (NSCLC), and renal cell carcinoma (RCC)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "rejected",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "clinical-decline-after-fmt",
+    "provenance": {
+      "review_claim_id": "4799",
+      "source_anchors": "D09/p001b1:5539-5690",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "One patient who had a rapid clinical decline after FMT that was deemed secondary to rapid disease progression was evaluable for safety but not response.",
+    "candidate": {
+      "subject": {
+        "text": "fecal microbiota transplantation",
+        "type": "Intervention",
+        "mention": "FMT"
+      },
+      "predicate": "CAUSES",
+      "object": {
+        "text": "disease progression",
+        "type": "ClinicalOutcome",
+        "mention": "disease progression"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "One patient who had a rapid clinical decline after FMT that was deemed secondary to rapid disease progression was evaluable for safety but not response."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "surgical-event-not-disease-causation",
+    "provenance": {
+      "review_claim_id": "4800",
+      "source_anchors": "D09/p001b1:6544-6732",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "One patient (PT-18-0032) with radiographic CR underwent an elective surgical procedure for spinal stenosis but suffered a spinal infarct unrelated to therapy and subsequently passed away.",
+    "candidate": {
+      "subject": {
+        "text": "spinal stenosis",
+        "type": "Disease",
+        "mention": "spinal stenosis"
+      },
+      "predicate": "CAUSES",
+      "object": {
+        "text": "spinal infarct",
+        "type": "Disease",
+        "mention": "spinal infarct"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "One patient (PT-18-0032) with radiographic CR underwent an elective surgical procedure for spinal stenosis but suffered a spinal infarct unrelated to therapy and subsequently passed away."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "failed-to-influence-natural-progression",
+    "provenance": {
+      "review_claim_id": "4503",
+      "source_anchors": "D11/p006b1:2198-2331",
+      "filename": "JC_2020-02-05_Gut_microbiome_influences_efficacyof_PD-1-based_immunotherapyagainst_epithelial_tumors.pdf"
+    },
+    "source_text": "Although stool composition failed to influence the natural progression of MCA-205 sarcomas, it did so after PD-1 blockade (Fig. 3C).",
+    "candidate": {
+      "subject": {
+        "text": "stool composition",
+        "type": "Microbiome",
+        "mention": "stool composition"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "natural progression of MCA-205 sarcomas",
+        "type": "Phenotype",
+        "mention": "natural progression of MCA-205 sarcomas",
+        "process": {
+          "kind": "growth",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Although stool composition failed to influence the natural progression of MCA-205 sarcomas, it did so after PD-1 blockade (Fig. 3C)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "accepted",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
+    "expected_fields": {
+      "result_status": "no_effect_reported",
+      "negated": false
+    }
+  },
+  {
+    "name": "negative-control-with-figure-abbreviations",
+    "provenance": {
+      "review_claim_id": "4656",
+      "source_anchors": "D14/p004b1:1377-1692",
+      "filename": "nihms781960.pdf"
+    },
+    "source_text": "Oral administration of Lactobacillus murinus to TAC mice, which was not among the overrepresented taxa in JAXfed mice, had no effect on tumor growth (fig. S4D) or on tumor-specific T cell responses (fig. S4E), which suggested that modulation of antitumor immunity depends on the specific bacteria administered.",
+    "candidate": {
+      "subject": {
+        "text": "Lactobacillus murinus",
+        "type": "MicrobialTaxon",
+        "mention": "Lactobacillus murinus"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "tumor growth",
+        "type": "Phenotype",
+        "mention": "tumor growth",
+        "process": {
+          "kind": "growth",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Oral administration of Lactobacillus murinus to TAC mice, which was not among the overrepresented taxa in JAXfed mice, had no effect on tumor growth (fig. S4D) or on tumor-specific T cell responses (fig. S4E), which suggested that modulation of antitumor immunity depends on the specific bacteria administered."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "accepted",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
+    "expected_fields": {
+      "result_status": "no_effect_reported",
+      "negated": false
+    }
+  },
+  {
+    "name": "negative-immune-control-with-same-quote",
+    "provenance": {
+      "review_claim_id": "4657",
+      "source_anchors": "D14/p004b1:1377-1692",
+      "filename": "nihms781960.pdf"
+    },
+    "source_text": "Oral administration of Lactobacillus murinus to TAC mice, which was not among the overrepresented taxa in JAXfed mice, had no effect on tumor growth (fig. S4D) or on tumor-specific T cell responses (fig. S4E), which suggested that modulation of antitumor immunity depends on the specific bacteria administered.",
+    "candidate": {
+      "subject": {
+        "text": "Lactobacillus murinus",
+        "type": "MicrobialTaxon",
+        "mention": "Lactobacillus murinus"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "tumor-specific T cell responses",
+        "type": "Phenotype",
+        "mention": "tumor-specific T cell responses",
+        "process": {
+          "kind": "activity",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Oral administration of Lactobacillus murinus to TAC mice, which was not among the overrepresented taxa in JAXfed mice, had no effect on tumor growth (fig. S4D) or on tumor-specific T cell responses (fig. S4E), which suggested that modulation of antitumor immunity depends on the specific bacteria administered."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "accepted",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
+    "expected_fields": {
+      "result_status": "no_effect_reported",
+      "negated": false
+    }
+  },
+  {
+    "name": "coordinated-fmt-and-antibody-needs-combination",
+    "provenance": {
+      "review_claim_id": "4820",
+      "source_anchors": "D09/p007b1:1101-1279",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "Together, our findings demonstrate that FMT and anti-PD-1 counteract myeloid-induced immunosuppression to augment CD8 + T cell activation in the tumor microenvironment of Rs.",
+    "candidate": {
+      "subject": {
+        "text": "FMT",
+        "type": "Intervention",
+        "mention": "FMT"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "myeloid-induced immunosuppression",
+        "type": "BiologicalProcess",
+        "mention": "myeloid-induced immunosuppression",
+        "process": {
+          "kind": "activity",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Together, our findings demonstrate that FMT and anti-PD-1 counteract myeloid-induced immunosuppression to augment CD8 + T cell activation in the tumor microenvironment of Rs."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "patient-response-is-not-an-intervention",
+    "provenance": {
+      "review_claim_id": "4790",
+      "source_anchors": "D09/p001b1:3672-3780",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "A subset of PD-1-refractory melanoma patients respond to fecal microbiota transplant and anti-PD-1 therapy",
+    "candidate": {
+      "subject": {
+        "text": "PD-1-refractory melanoma patients",
+        "type": "StudyGroup",
+        "mention": "PD-1-refractory melanoma patients"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "fecal microbiota transplant and anti-PD-1 therapy",
+        "type": "Intervention",
+        "mention": "fecal microbiota transplant and anti-PD-1 therapy"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "A subset of PD-1-refractory melanoma patients respond to fecal microbiota transplant and anti-PD-1 therapy"
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "recipient-exclusion-is-not-a-causal-intervention",
+    "provenance": {
+      "review_claim_id": "4688",
+      "source_anchors": "D10/p010b1:1598-1813",
+      "filename": "B1.98.pdf"
+    },
+    "source_text": "* -Recipient #6 was excluded from the trial after the first post-treatment imaging study due to unstable metastatic brain disease (hemorrhage into a brain metastasis that was known prior to inclusion into the trial).",
+    "candidate": {
+      "subject": {
+        "text": "Recipient #6",
+        "type": "StudyGroup",
+        "mention": "Recipient #6"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "metastatic brain disease",
+        "type": "Disease",
+        "mention": "metastatic brain disease",
+        "process": {
+          "kind": "growth",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "* -Recipient #6 was excluded from the trial after the first post-treatment imaging study due to unstable metastatic brain disease (hemorrhage into a brain metastasis that was known prior to inclusion into the trial)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "therapy-efficacy-not-target-protein-activity",
+    "provenance": {
+      "review_claim_id": "4781",
+      "source_anchors": "D09/p001b1:2378-2659",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "In mice, composition of the gut microbiome modulates therapeutic activity of anti-PD-1 and anti-programmed death-ligand 1 (PD-L1), and administration of certain gut commensals or fecal microbiota transplantation (FMT) promotes anti-PD-1 efficacy in melanoma-bearing mice (10)(11)(12).",
+    "candidate": {
+      "subject": {
+        "text": "composition of the gut microbiome",
+        "type": "Microbiome",
+        "mention": "composition of the gut microbiome"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "programmed death-ligand 1",
+        "type": "Protein",
+        "mention": "programmed death-ligand 1"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "In mice, composition of the gut microbiome modulates therapeutic activity of anti-PD-1 and anti-programmed death-ligand 1 (PD-L1), and administration of certain gut commensals or fecal microbiota transplantation (FMT) promotes anti-PD-1 efficacy in melanoma-bearing mice (10)(11)(12)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "lost-bacteria-not-antibiotic-agent",
+    "provenance": {
+      "review_claim_id": "4808",
+      "source_anchors": "D09/p003b1:4454-4676",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "After antibiotics, metagenomic data revealed pronounced changes in microbial community composition (loss of Faecalibacterium prausnitzii, Alistipes spp., and Ruminococcaceae spp.), which correlated with clinical progression.",
+    "candidate": {
+      "subject": {
+        "text": "Faecalibacterium prausnitzii",
+        "type": "MicrobialTaxon",
+        "mention": "Faecalibacterium prausnitzii"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "microbial community composition",
+        "type": "Microbiome",
+        "mention": "microbial community composition"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "After antibiotics, metagenomic data revealed pronounced changes in microbial community composition (loss of Faecalibacterium prausnitzii, Alistipes spp., and Ruminococcaceae spp.), which correlated with clinical progression."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental",
+        "metric": "composition"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "treatment-result-not-cytokine-self-regulation",
+    "provenance": {
+      "review_claim_id": "4863",
+      "source_anchors": "D09/p007b1:2121-2355",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "Multiple circulating cytokines and chemokines decreased after FMT in Rs, including CCL2 (MCP1), CXCL8 (IL-8), and IL-18 that have been associated with negative outcomes to anti-PD-1 (32,33), and IL-12p70 and IFN-g (Fig. 4A, heatmap).",
+    "candidate": {
+      "subject": {
+        "text": "CCL2 (MCP1)",
+        "type": "Protein",
+        "mention": "CCL2 (MCP1)"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "CCL2 (MCP1)",
+        "type": "Protein",
+        "mention": "CCL2 (MCP1)",
+        "process": {
+          "kind": "concentration",
+          "direction": "decreased"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Multiple circulating cytokines and chemokines decreased after FMT in Rs, including CCL2 (MCP1), CXCL8 (IL-8), and IL-18 that have been associated with negative outcomes to anti-PD-1 (32,33), and IL-12p70 and IFN-g (Fig. 4A, heatmap)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "method-does-not-measure-itself",
+    "provenance": {
+      "review_claim_id": "4905",
+      "source_anchors": "D09/p004b1:140-295",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "Dimensionality reduction using t-distributed UMAP (t-UMAP) plot of microbial taxa abundances by last known taxon of FMT recipients at different time points.",
+    "candidate": {
+      "subject": {
+        "text": "t-distributed UMAP",
+        "type": "Assay",
+        "mention": "t-distributed UMAP"
+      },
+      "predicate": "MEASURED_BY",
+      "object": {
+        "text": "t-distributed UMAP",
+        "type": "Assay",
+        "mention": "t-distributed UMAP"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Dimensionality reduction using t-distributed UMAP (t-UMAP) plot of microbial taxa abundances by last known taxon of FMT recipients at different time points."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "rejected",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "incomplete-network-evidence",
+    "provenance": {
+      "review_claim_id": "4837",
+      "source_anchors": "D09/p006b1:1918-2347",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "Network analyses established",
+    "candidate": {
+      "subject": {
+        "text": "microbiome",
+        "type": "Microbiome",
+        "mention": "microbiome"
+      },
+      "predicate": "CORRELATED_WITH",
+      "object": {
+        "text": "metabolite",
+        "type": "Protein",
+        "mention": "metabolite"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Network analyses established"
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "rejected",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "cohort-sampling-does-not-prove-disease-association",
+    "provenance": {
+      "review_claim_id": "4713",
+      "source_anchors": "D13/p002b1:2004-2330",
+      "filename": "nihms928090.pdf"
+    },
+    "source_text": "We first assessed the landscape of the oral and gut microbiome in all available samples in patients (n=112) with metastatic melanoma via 16S sequencing, noting that both communities were relatively diverse, with a high abundance of Lactobacillales in the oral microbiome and Bacteroidales in the fecal microbiome (Fig. 1B).",
+    "candidate": {
+      "subject": {
+        "text": "metastatic melanoma",
+        "type": "Disease",
+        "mention": "metastatic melanoma"
+      },
+      "predicate": "ASSOCIATED_WITH",
+      "object": {
+        "text": "Oral microbiome",
+        "type": "Microbiome",
+        "mention": "Oral microbiome"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "We first assessed the landscape of the oral and gut microbiome in all available samples in patients (n=112) with metastatic melanoma via 16S sequencing, noting that both communities were relatively diverse, with a high abundance of Lactobacillales in the oral microbiome and Bacteroidales in the fecal microbiome (Fig. 1B)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "response-table-label-not-biological-class",
+    "provenance": {
+      "review_claim_id": "4694",
+      "source_anchors": "D10/p015b1:778-855",
+      "filename": "B1.98.pdf"
+    },
+    "source_text": "Response category \"None\" represented iRE-CIST-confirmed progressive disease.",
+    "candidate": {
+      "subject": {
+        "text": "progressive disease",
+        "type": "Disease",
+        "mention": "progressive disease"
+      },
+      "predicate": "SUBCLASS_OF",
+      "object": {
+        "text": "None",
+        "type": "Other",
+        "mention": "None"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Response category \"None\" represented iRE-CIST-confirmed progressive disease."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "protein-not-targeting-antibody",
+    "provenance": {
+      "review_claim_id": "4571",
+      "source_anchors": "D14/p001b1:1770-2006",
+      "filename": "nihms781960.pdf"
+    },
+    "source_text": "Enthusiasm has been fueled by recent clinical success, particularly with antibodies that block immune inhibitory pathways, specifically CTLA-4 and the axis between programmed cell death protein 1 (PD-1) and its ligand 1 (PD-L1) (1, 2).",
+    "candidate": {
+      "subject": {
+        "text": "CTLA-4",
+        "type": "Protein",
+        "mention": "CTLA-4"
+      },
+      "predicate": "TARGETS",
+      "object": {
+        "text": "immune inhibitory pathways",
+        "type": "Pathway",
+        "mention": "immune inhibitory pathways"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Enthusiasm has been fueled by recent clinical success, particularly with antibodies that block immune inhibitory pathways, specifically CTLA-4 and the axis between programmed cell death protein 1 (PD-1) and its ligand 1 (PD-L1) (1, 2)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "corrected-antibody-target",
+    "provenance": {
+      "review_claim_id": "4779",
+      "source_anchors": "D09/p001b1:1984-2185",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "mmune checkpoint blockade with monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) provides long-term clinical benefits to nearly 40% of patients with advanced melanoma (1)(2)(3)(4)(5).",
+    "candidate": {
+      "subject": {
+        "text": "monoclonal antibodies",
+        "type": "Drug",
+        "mention": "monoclonal antibodies"
+      },
+      "predicate": "TARGETS",
+      "object": {
+        "text": "programmed cell death protein 1",
+        "type": "Protein",
+        "mention": "programmed cell death protein 1"
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "mmune checkpoint blockade with monoclonal antibodies (mAbs) targeting programmed cell death protein 1 (PD-1) provides long-term clinical benefits to nearly 40% of patients with advanced melanoma (1)(2)(3)(4)(5)."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      }
+    },
+    "expected": "accepted",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "joint-scheme-retains-both-interventions",
+    "provenance": {
+      "review_claim_id": "4820",
+      "source_anchors": "D09/p007b1:1101-1279",
+      "filename": "Davar,+et+al.+2021.+Fecal+microbiota+transplant+overcomes+resistance+to+anti-PD-1+therapy+in+melanoma+patients.pdf"
+    },
+    "source_text": "Together, our findings demonstrate that FMT and anti-PD-1 counteract myeloid-induced immunosuppression to augment CD8 + T cell activation in the tumor microenvironment of Rs.",
+    "candidate": {
+      "subject": {
+        "text": "FMT",
+        "type": "Intervention",
+        "mention": "FMT"
+      },
+      "predicate": "AFFECTS",
+      "object": {
+        "text": "myeloid-induced immunosuppression",
+        "type": "BiologicalProcess",
+        "mention": "myeloid-induced immunosuppression",
+        "process": {
+          "kind": "activity",
+          "direction": "unspecified"
+        }
+      },
+      "confidence": 0.9,
+      "negated": false,
+      "speculative": false,
+      "evidence": {
+        "sentence": "Together, our findings demonstrate that FMT and anti-PD-1 counteract myeloid-induced immunosuppression to augment CD8 + T cell activation in the tumor microenvironment of Rs."
+      },
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "participants": [
+        {
+          "role": "co_intervention",
+          "entity": {
+            "text": "anti-PD-1",
+            "type": "Drug",
+            "mention": "anti-PD-1"
+          }
+        }
+      ]
+    },
+    "expected": "accepted",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+  },
+  {
+    "name": "csv-incomplete-4542",
+    "provenance": {
+      "review_claim_id": "4542",
+      "source_anchors": "D12/p004b1:2603-2798"
+    },
+    "observable_only": true,
+    "expected": "unassessed",
+    "reason": "CSV omitted process/direction/comparator; do not invent backend fields or score a polarity error."
+  },
+  {
+    "name": "csv-incomplete-4543",
+    "provenance": {
+      "review_claim_id": "4543",
+      "source_anchors": "D12/p004b1:2603-2798"
+    },
+    "observable_only": true,
+    "expected": "unassessed",
+    "reason": "CSV omitted process/direction/comparator; do not invent backend fields or score a polarity error."
+  },
+  {
+    "name": "csv-incomplete-4637",
+    "provenance": {
+      "review_claim_id": "4637",
+      "source_anchors": "D14/p003b1:842-972"
+    },
+    "observable_only": true,
+    "expected": "unassessed",
+    "reason": "CSV omitted process/direction/comparator; do not invent backend fields or score a polarity error."
+  },
+  {
+    "name": "csv-incomplete-4804",
+    "provenance": {
+      "review_claim_id": "4804",
+      "source_anchors": "D09/p003b1:3139-3294"
+    },
+    "observable_only": true,
+    "expected": "unassessed",
+    "reason": "CSV omitted process/direction/comparator; do not invent backend fields or score a polarity error."
+  }
+]

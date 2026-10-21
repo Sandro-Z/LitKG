@@ -326,4 +326,11 @@ def parse_pdf_to_chunks(pdf_path: str):
         raise RuntimeError("No text sections extracted from PDF")
 
     chunks = split_into_chunks(sections)
+    from app.input_quality import inspect_document
+    # Temporary IDs associate locators across chunks; workers persist their
+    # actual chunk_index and processing generation rather than these IDs.
+    located = [{**c, 'id': i} for i,c in enumerate(chunks)]
+    issues = inspect_document(located)
+    for i,chunk in enumerate(chunks):
+        chunk['input_issues'] = [{**issue, 'chunk_id':None} for issue in issues if issue['chunk_id'] == i]
     return metadata, chunks

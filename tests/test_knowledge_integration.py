@@ -595,7 +595,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                 'object':{'text':'IL-6','type':'Protein','mention':'IL-6 secretion' if secretion else 'IL-6 expression',
                           'process':{'kind':'secretion' if secretion else 'expression','direction':'decreased' if secretion else 'unchanged'}},
                 'participants':[{'role':'cell_line','entity':{'text':'A549','type':'CellLine'}}] + ([{'role':'species','entity':{'text':'humans','type':'Organism'}}] if secretion else []),
-                'qualifiers':{'dose':5,'unit':'nM','time':'24 h' if secretion else '48 h'},
+                'qualifiers':{**({'dose':5,'unit':'nM'} if secretion else {}),'time':'24 h' if secretion else '48 h'},
                 'evidence':{'sentence':texts[1].split('. ')[0]+'.' if secretion else texts[2]},
                 'additional_evidence':[{'sentence':'This effect may occur in humans.'}] if secretion else [],
                 'confidence':.8,'negated':not secretion,'speculative':secretion}]})
@@ -614,7 +614,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             facts = fetch_facts(cur,self.kb,document_id=self.doc)
             self.assertEqual(len(facts),2)
             self.assertEqual(len(facts[0]['evidence']),2)
-            self.assertEqual([f['negated'] for f in facts],[False,True])
+            self.assertEqual([f['negated'] for f in facts],[False,False])
+            self.assertEqual(facts[1]['qualifiers']['result_status'],'no_effect_reported')
             self.assertEqual([f['speculative'] for f in facts],[True,False])
             self.assertEqual({p['role'] for p in facts[0]['participants']},{'subject','object','cell_line','species'})
             self.assertEqual({f['qualifiers']['processes'][0]['kind'] for f in facts},{'expression','secretion'})

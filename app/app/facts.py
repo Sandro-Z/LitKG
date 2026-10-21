@@ -43,6 +43,9 @@ def normalized_participants(claim):
 
 def fact_qualifiers(claim, participants=None):
     qualifiers = canonicalize_qualifiers(claim.qualifiers)
+    qualifiers['source_kind'] = claim.source_kind
+    if claim.result_status != 'unknown':
+        qualifiers['result_status'] = claim.result_status
     processes = []
     values = participants if participants is not None else [
         {"role": role, "entity": entity} for role, entity in

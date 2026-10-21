@@ -21,7 +21,7 @@ CATALOG_VERSION = "catalog-v4-microbiome"
 # Vocabulary and prompt versions are part of cache keys; the transport stays
 # unchanged, but old extractions must not mask newly supported entity types.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v5-controlled-microbiome"
+EXTRACTION_VERSION = "claims-v6-review-semantics"
 
 
 def digest(value):

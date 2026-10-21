@@ -4,9 +4,40 @@ import json
 from pathlib import Path
 
 from app.catalog import source_contains
-from app.db import get_conn
 from app.normalization import entity_family, normalize_entity_alias
 from app.retrieval import answer_question, retrieve
+
+
+def evaluate_semantic_cases(cases):
+    """Deterministic checks of supplied counterexamples, not a precision metric.
+
+    Evidence and candidate types are fixed fixture inputs. A passing gate says
+    nothing about unseen extraction accuracy or a model's entailment ability.
+    """
+    from app.claims import prepare_claims
+    from app.schemas import ClaimBundle, parse_model_bundle
+    results = []
+    for case in cases:
+        if case.get('observable_only'):
+            disposition, reasons, claim = 'unassessed', [case['reason']], None
+        else:
+            bundle = prepare_claims(parse_model_bundle({'claims':[case['candidate']]}, ClaimBundle), case.get('directory', []),
+                {'id':1, 'text':case['source_text']}, 'semantic-regression')
+            claim = bundle.claims[0] if bundle.claims else None
+            disposition = 'rejected' if not claim else claim.semantic_status
+            reasons = [r['error'] for r in bundle._claim_rejections] if not claim else claim.review_reasons
+        checks = case.get('expected_fields', {})
+        actual = claim.model_dump(mode='json') if claim else {}
+        fields_match = all(actual.get(key) == value for key,value in checks.items())
+        results.append({'name':case['name'], 'provenance':case.get('provenance',{}), 'expected':case['expected'],
+            'actual':disposition, 'passed':disposition == case['expected'] and fields_match, 'reasons':reasons,
+            'result_status':claim.result_status if claim else None, 'expected_fields_match':fields_match})
+    return {'kind':'fixed_evidence_semantic_regression','case_count':len(results),
+        'passed_count':sum(r['passed'] and r['actual'] != 'unassessed' for r in results),'failed_count':sum(not r['passed'] for r in results),
+        'unassessed_count':sum(r['actual']=='unassessed' for r in results),'cases':results,
+        'limitations':['Fixed candidate/source checks; no live extraction or general semantic entailment evaluation.',
+                       'Review CSV does not expose original backend types, qualifiers or generation versions.',
+                       'No corpus precision, recall or F1 is inferred from these cases.']}
 
 
 def evaluate(cur, knowledge_base_id, queries=(), generate=False):
@@ -69,12 +100,20 @@ def evaluate(cur, knowledge_base_id, queries=(), generate=False):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--knowledge-base-id',required=True,type=int)
+    scope=parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument('--knowledge-base-id',type=int)
+    scope.add_argument('--semantic-cases',type=Path,help='Fixed source/candidate JSON regression cases; no database/model calls')
     parser.add_argument('--queries',type=Path,help='JSON list: question, expected_claim_ids / expected_document_ids')
     parser.add_argument('--baseline',type=Path,help='Earlier local evaluation report')
     parser.add_argument('--output',required=True,type=Path)
     parser.add_argument('--generate-answers',action='store_true',help='Explicitly call configured answer LLM')
     args=parser.parse_args()
+    if args.semantic_cases:
+        report=evaluate_semantic_cases(json.loads(args.semantic_cases.read_text()))
+        args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        print(f"Semantic regression: {report['passed_count']}/{report['case_count']-report['unassessed_count']} checked cases passed; {report['unassessed_count']} unassessed CSV cases")
+        return int(report['failed_count'] != 0)
+    from app.db import get_conn
     queries=json.loads(args.queries.read_text()) if args.queries else []
     with get_conn() as conn:
         report=evaluate(conn.cursor(),args.knowledge_base_id,queries,args.generate_answers)
@@ -87,4 +126,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

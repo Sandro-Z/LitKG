@@ -53,8 +53,18 @@ def retains_required_context(original, corrected):
         return True
 
     after = corrected.model_dump(mode='json')
+    # A grounded model correction may repair the one structural inversion
+    # identified by endpoint types. All participants, qualifiers and polarity
+    # still pass the checks below; unrelated endpoint substitutions remain invalid.
+    reverse_target = (
+        normalize_predicate(original.get('predicate', '')) == 'TARGETS' and corrected.predicate == 'TARGETS'
+        and (original.get('subject') or {}).get('type') in {'Protein','Gene'}
+        and (original.get('object') or {}).get('type') in {'Drug','Intervention'}
+        and corrected.subject.type in {'Drug','Intervention'} and corrected.object.type in {'Protein','Gene'}
+        and corrected.semantic_status == 'accepted'
+    )
     for role in ('subject', 'object'):
-        before_entity = original.get(role)
+        before_entity = original.get({'subject':'object','object':'subject'}[role] if reverse_target else role)
         if not same_entity(before_entity, after[role]):
             return False
     from app.predicate_registry import PREDICATE_ALIASES, DIRECTION_ALIASES, _key
@@ -114,6 +124,9 @@ def prepare_claims(bundle, entries, chunk, version):
             normalize_comparison_groups(candidate.claims[0], repairs)
             resolve_bundle(candidate, entries, chunk, version, repairs)
             normalize_registered_claim(candidate.claims[0], repairs)
+            from app.claim_semantics import normalize_result, check_semantics
+            normalize_result(candidate.claims[0], repairs)
+            check_semantics(candidate.claims[0], repairs)
         except ValueError as exc:
             result._claim_rejections.append({'claim_index': index, 'claim': claim.model_dump(mode='json'),
                                              'error': str(exc), 'outcome': 'unresolved', 'repair_id': repair_id})

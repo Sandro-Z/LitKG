@@ -490,6 +490,9 @@ def parse_document(document_id: int, publish: bool = True):
                             error = NULL, updated_at = now()""",
                             (document_id, index, chunk.get("section_title"), chunk.get("page_start"), chunk.get("page_end"),
                              Jsonb(chunk.get("page_spans", [])), chunk["text"], chunk.get("token_estimate")))
+                        for issue in chunk.get('input_issues', []):
+                            add_review(cur, document_id, 'input-quality-v1', 'input_quality',
+                                       {**issue, 'chunk_index': index, 'pipeline_generation': document['pipeline_generation'] + 1})
                     cur.execute("DELETE FROM chunks WHERE document_id = %s AND chunk_index >= %s", (document_id, len(parsed_chunks)))
             if publish:
                 build_document_catalog.apply_async(args=[document_id], queue="extract")

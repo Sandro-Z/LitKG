@@ -12,6 +12,11 @@ from fastapi import (
     UploadFile,
 )
 
+from app.claim_export import fetch_claim_page, collect_claims, collect_facts, claims_csv
+from fastapi.responses import Response
+from fastapi.encoders import jsonable_encoder
+import json
+
 from app.batch_status import sync_batch_status, quality_columns
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
@@ -618,67 +623,33 @@ def get_knowledge_base_claims(
     offset: int = Query(0, ge=0),
     predicate: str | None = Query(None),
     entity_type: str | None = Query(None),
+    result_status: Literal["observed_change", "no_effect_reported", "not_significant", "unknown"] | None = Query(None),
 ):
-    filters = ["member.knowledge_base_id = %s"]
-    params: list[Any] = [knowledge_base_id]
-    if predicate:
-        filters.append("claim.predicate = %s")
-        params.append(normalize_predicate(predicate))
-    if entity_type:
-        canonical_type = normalize_entity_type(entity_type)
-        filters.append(
-            "(claim.subject_type = %s OR claim.object_type = %s)"
-        )
-        params.extend([canonical_type, canonical_type])
-
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_knowledge_base(cur, knowledge_base_id)
-            cur.execute(
-                f"""
-                SELECT
-                    claim.id,
-                    claim.document_id,
-                    document.filename,
-                    document.title,
-                    document.doi,
-                    claim.chunk_id,
-                    chunk.section_title,
-                    chunk.page_start AS chunk_page_start,
-                    chunk.page_end AS chunk_page_end,
-                    claim.subject_text,
-                    claim.subject_type,
-                    claim.subject_normalized_id,
-                    claim.subject_entity_id,
-                    claim.predicate,
-                    claim.object_text,
-                    claim.object_type,
-                    claim.object_normalized_id,
-                    claim.object_entity_id,
-                    claim.evidence_text,
-                    claim.confidence,
-                    claim.negated,
-                    claim.speculative,
-                    claim.claim_json
-                FROM claims claim
-                JOIN knowledge_base_documents member
-                  ON member.document_id = claim.document_id
-                JOIN documents document ON document.id = claim.document_id
-                LEFT JOIN chunks chunk ON chunk.id = claim.chunk_id
-                WHERE {" AND ".join(filters)}
-                ORDER BY claim.id
-                LIMIT %s OFFSET %s
-                """,
-                (*params, limit, offset),
-            )
-            rows = [add_claim_location(row) for row in cur.fetchall()]
+            page = fetch_claim_page(cur, knowledge_base_id=knowledge_base_id, limit=limit,
+                offset=offset, predicate=predicate, entity_type=entity_type, result_status=result_status)
+    return {"knowledge_base_id": knowledge_base_id, **page}
 
-    return {
-        "knowledge_base_id": knowledge_base_id,
-        "claims": rows,
-        "limit": limit,
-        "offset": offset,
-    }
+
+@app.get("/knowledge-bases/{knowledge_base_id}/claims/export")
+def export_knowledge_base_claims(knowledge_base_id: int,
+    format: Literal["json", "csv"] = Query("json"), predicate: str | None = Query(None),
+    entity_type: str | None = Query(None),
+    result_status: Literal["observed_change", "no_effect_reported", "not_significant", "unknown"] | None = Query(None)):
+    with get_conn() as conn:
+        # Count and every page see exactly the same records, even during writes.
+        conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            payload = collect_claims(cur, knowledge_base_id=knowledge_base_id, predicate=predicate,
+                                    entity_type=entity_type, result_status=result_status)
+    payload['knowledge_base_id'] = knowledge_base_id
+    content = claims_csv(payload['claims']) if format == 'csv' else json.dumps(jsonable_encoder(payload), ensure_ascii=False)
+    return Response(content, media_type='text/csv' if format == 'csv' else 'application/json', headers={
+        'Content-Disposition': f'attachment; filename="claims-{knowledge_base_id}.{format}"',
+        'X-Exported-Count': str(payload['exported_count']), 'X-Total-Count': str(payload['total'])})
 
 
 @app.get("/knowledge-bases/{knowledge_base_id}/entities")
@@ -867,6 +838,10 @@ def get_knowledge_base_graph(
     include_speculative: bool = Query(True),
     query: str | None = Query(None, max_length=200),
     entity_id: int | None = Query(None, ge=1),
+    relation_layer: Literal['all', 'biological', 'method_sample'] = Query('all'),
+    document_id: int | None = Query(None, ge=1),
+    result_status: Literal['observed_change', 'no_effect_reported', 'not_significant', 'unknown'] | None = Query(None),
+    include_pending: bool = Query(False),
     direction: Literal["both", "outgoing", "incoming"] = Query("both"),
 ):
     if direction != "both" and entity_id is None:
@@ -890,6 +865,9 @@ def get_knowledge_base_graph(
                 query=query,
                 entity_id=entity_id,
                 direction=direction,
+                include_total=True, relation_layer=relation_layer,
+                result_status=result_status, include_pending=include_pending,
+                source_document_id=document_id,
             )
     graph["knowledge_base_id"] = knowledge_base_id
     return graph
@@ -1093,51 +1071,11 @@ def get_claims(
 ):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM documents WHERE id = %s", (document_id,))
+            cur.execute("SELECT 1 FROM documents WHERE id=%s", (document_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Document not found")
-            cur.execute(
-                """
-                SELECT
-                    claim.id,
-                    claim.document_id,
-                    document.filename,
-                    document.title,
-                    document.doi,
-                    claim.chunk_id,
-                    chunk.section_title,
-                    chunk.page_start AS chunk_page_start,
-                    chunk.page_end AS chunk_page_end,
-                    claim.subject_text,
-                    claim.subject_type,
-                    claim.subject_normalized_id,
-                    claim.subject_entity_id,
-                    claim.predicate,
-                    claim.object_text,
-                    claim.object_type,
-                    claim.object_normalized_id,
-                    claim.object_entity_id,
-                    claim.evidence_text,
-                    claim.confidence,
-                    claim.negated,
-                    claim.speculative,
-                    claim.claim_json
-                FROM claims claim
-                JOIN documents document ON document.id = claim.document_id
-                LEFT JOIN chunks chunk ON chunk.id = claim.chunk_id
-                WHERE claim.document_id = %s
-                ORDER BY claim.id
-                LIMIT %s OFFSET %s
-                """,
-                (document_id, limit, offset),
-            )
-            rows = [add_claim_location(row) for row in cur.fetchall()]
-    return {
-        "document_id": document_id,
-        "claims": rows,
-        "limit": limit,
-        "offset": offset,
-    }
+            page = fetch_claim_page(cur, document_id=document_id, limit=limit, offset=offset)
+    return {"document_id": document_id, **page}
 
 
 @app.get("/documents/{document_id}/graph")
@@ -1157,7 +1095,7 @@ def get_document_graph(
             graph = fetch_graph(
                 cur,
                 document_id=document_id,
-                limit=limit,
+                limit=limit, include_total=True,
                 evidence_limit=evidence_limit,
             )
     graph["document_id"] = document_id
@@ -1240,6 +1178,20 @@ def complete_facts(knowledge_base_id: int, document_id: int | None = Query(None,
     return {'facts': rows, 'limit': limit, 'offset': offset}
 
 
+@app.get('/knowledge-bases/{knowledge_base_id}/facts/export')
+def export_complete_facts(knowledge_base_id: int, format: Literal['json','csv'] = Query('json'),
+                          document_id: int | None = Query(None, ge=1), entity_id: int | None = Query(None, ge=1)):
+    with get_conn() as conn:
+        conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            payload = collect_facts(cur, knowledge_base_id=knowledge_base_id, document_id=document_id, entity_id=entity_id)
+    content = claims_csv(payload['facts']) if format == 'csv' else json.dumps(jsonable_encoder(payload), ensure_ascii=False)
+    return Response(content, media_type='text/csv' if format == 'csv' else 'application/json', headers={
+        'Content-Disposition':f'attachment; filename="facts-{knowledge_base_id}.{format}"',
+        'X-Exported-Count':str(payload['exported_count']), 'X-Total-Count':str(payload['total'])})
+
+
 @app.post('/knowledge-bases/{knowledge_base_id}/ask')
 def ask(knowledge_base_id: int, request: QuestionRequest):
     if not request.question.strip():
@@ -1274,7 +1226,9 @@ def reviews(knowledge_base_id: int, status: Literal['pending','resolved','dismis
             _get_knowledge_base(cur, knowledge_base_id)
             cur.execute("""SELECT r.* FROM review_items r JOIN documents d ON d.id=r.document_id
                 JOIN knowledge_base_documents m ON m.document_id=r.document_id
-                WHERE m.knowledge_base_id=%s AND r.status=%s AND r.version=COALESCE(d.catalog_version,'legacy')
+                WHERE m.knowledge_base_id=%s AND r.status=%s
+                AND (r.version=COALESCE(d.catalog_version,'legacy') OR (r.kind='input_quality'
+                    AND r.detail->>'pipeline_generation'=d.pipeline_generation::TEXT))
                 AND (NOT (r.detail ? 'knowledge_base_id') OR r.detail->>'knowledge_base_id'=%s)
                 ORDER BY r.id LIMIT %s OFFSET %s""", (knowledge_base_id,status,str(knowledge_base_id),limit,offset))
             rows = cur.fetchall()
