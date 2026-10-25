@@ -208,23 +208,46 @@ def graph_edge_labels(edges):
     for group in groups.values():
         for index, edge in enumerate(sorted(group, key=lambda item: item['id']), 1):
             label = edge.get('label') or edge.get('predicate', '')
-            if edge.get('negated'):
+            if edge.get('display_negated', edge.get('negated')):
                 label += ' [否定]'
             if edge.get('speculative'):
                 label += ' [推测]'
-            if len(group) > 1:
-                qualifiers = edge.get('qualifiers') or {}
-                context = []
-                for key in ('metric', 'direction', 'association_direction', 'comparison_group', 'reference_group', 'evidence_type'):
-                    if key in qualifiers:
+            qualifiers = edge.get('qualifiers') or {}
+            evidence_type = qualifiers.get('evidence_type')
+            if evidence_type:
+                label += f' [{evidence_type}]'
+            else:
+                label += ' [证据等级未知]'
+            if qualifiers.get('knowledge_level') == 'predicted':
+                label += ' [功能预测]'
+            context = []
+            for key in ('metric', 'direction', 'association_direction', 'comparison_group', 'reference_group'):
+                if key in qualifiers:
+                    if isinstance(qualifiers[key], (str, int, float)):
                         context.append(f'{key}={qualifiers[key]}')
-                for process in qualifiers.get('processes', []):
-                    context.append(f"{process.get('role')}.{process.get('kind')}={process.get('direction', 'unspecified')}")
+            for process in qualifiers.get('processes', []):
+                context.append(f"{process.get('role')}.{process.get('kind')}={process.get('direction', 'unspecified')}")
+            if len(group) > 1:
                 label += f' · 条件 {index}/{len(group)}'
-                if context:
-                    label += '\n' + '; '.join(context)
+            if context:
+                label += '\n' + ('; '.join(context))[:200]
+            status = edge.get('result_status') or (edge.get('qualifiers') or {}).get('result_status')
+            if status == 'not_significant':
+                label += ' [未显著差异]'
+            elif status == 'no_effect_reported':
+                label += ' [未见变化]'
+            if edge.get('review_status') == 'pending':
+                label += ' [待审核]'
             labels[edge['id']] = label
     return labels
+
+
+def graph_edge_dashes(edge):
+    if edge.get('review_status') == 'pending' or edge.get('result_status') == 'not_significant':
+        return True
+    kind = (edge.get('qualifiers') or {}).get('evidence_type')
+    return {'observational':[8,4], 'cooccurrence':[8,4], 'computational_prediction':[2,4],
+            'author_statement':[12,4,2,4], 'experimental':False}.get(kind, [1,7])
 
 
 def wrap_graph_label(value, width=28):
@@ -355,8 +378,12 @@ def render_graph(graph_data):
         )
 
         edge_color = "#64748B"
-        if edge.get("negated"):
+        if edge.get("display_negated", edge.get("negated")):
             edge_color = "#DC2626"
+        elif edge.get("review_status") == "pending":
+            edge_color = "#9333EA"
+        elif edge.get("result_status") == "not_significant":
+            edge_color = "#0284C7"
         elif edge.get("speculative"):
             edge_color = "#D97706"
 
@@ -367,15 +394,17 @@ def render_graph(graph_data):
             label=wrap_graph_label(edge_labels[edge['id']], width=42),
             title=(
                 f"关系: {escape(edge.get('label') or edge.get('predicate', ''))}<br>"
-                f"否定: {'是' if edge.get('negated') else '否'} | "
+                f"否定: {'是' if edge.get('display_negated', edge.get('negated')) else '否'} | "
                 f"推测: {'是' if edge.get('speculative') else '否'}<br>"
                 f"平均置信度: {confidence_text}<br>"
                 f"支持文献: {edge.get('document_count', 0)}<br>"
                 f"证据数: {edge.get('evidence_count', 0)}<br>"
                 f"限定信息:<pre>{escape(json.dumps(edge.get('qualifiers') or {}, ensure_ascii=False, indent=2))}</pre>"
+                f"参与者及来源:<pre>{escape(json.dumps(samples, ensure_ascii=False, indent=2))}</pre>"
                 f"{evidence_html}"
             ),
             color=edge_color,
+            dashes=graph_edge_dashes(edge),
             arrows="to",
             width=min(3, 1 + edge.get("document_count", 1) * .4),
             **edge_curves[edge['id']],
@@ -638,31 +667,48 @@ def main():
             "按实体类型筛选",
             [""] + type_names,
         )
+        result_filter = st.selectbox('结果语义', ['', 'no_effect_reported', 'not_significant', 'observed_change', 'unknown'],
+            format_func=lambda k: {'':'全部', 'no_effect_reported':'未见变化', 'not_significant':'未显著差异', 'observed_change':'报告变化', 'unknown':'未知'}.get(k, k))
+        page_number = st.number_input('Claims 页码', min_value=1, value=1, step=1)
+        page_size = st.selectbox('每页 Claims', [100, 250, 500])
+        filters = {'predicate': predicate or None, 'entity_type': entity_type or None, 'result_status': result_filter or None}
         try:
-            claims = api_get(
-                f"/knowledge-bases/{selected_knowledge_base_id}/claims",
-                params={
-                    "limit": 500,
-                    "predicate": predicate or None,
-                    "entity_type": entity_type or None,
-                },
-            ).get("claims", [])
+            page = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims",
+                params={**filters, 'limit': page_size, 'offset': (page_number-1)*page_size})
+            claims = page.get('claims', [])
+            st.caption(f"本页 {len(claims)} 条 / 总数量 {page.get('total', '未知')}；当前第 {page_number} 页")
             if claims:
-                st.dataframe(
-                    pd.DataFrame(claims),
-                    column_order=[
-                        "id", "subject_text", "predicate", "object_text",
-                        "title", "doi", "page", "page_end", "filename",
-                        "section_title", "table_or_figure", "evidence_text",
-                        "confidence", "negated", "speculative",
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(pd.DataFrame(claims), column_order=[
+                    'id', 'subject_text', 'predicate', 'object_text', 'result_status', 'review_status',
+                    'title', 'doi', 'page', 'page_end', 'filename', 'section_title', 'evidence_text',
+                    'confidence', 'display_negated', 'speculative', 'source_kind'],
+                    use_container_width=True, hide_index=True)
             else:
-                st.info("当前筛选条件没有 claims。")
+                st.info('当前页没有 claims。')
+            export_key = 'claims_export_' + json.dumps([selected_knowledge_base_id, filters], sort_keys=True)
+            if st.button('准备完整导出 CSV / JSON'):
+                st.session_state[export_key] = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims/export", params={**filters, 'format':'json'})
+            if export_key in st.session_state:
+                exported = st.session_state[export_key]
+                st.success(f"已导出数量/总数量：{exported['exported_count']}/{exported['total']}（导出时快照）")
+                st.download_button('下载完整 JSON（无损）', json.dumps(exported, ensure_ascii=False, indent=2),
+                    file_name=f'claims-{selected_knowledge_base_id}.json', mime='application/json')
+                csv_rows = [{k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for k,v in row.items()} for row in exported['claims']]
+                st.download_button('下载完整 CSV', pd.DataFrame(csv_rows).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f'claims-{selected_knowledge_base_id}.csv', mime='text/csv')
+            facts_key = f'facts_export_{selected_knowledge_base_id}'
+            if st.button('准备导出全部当前 Facts（含参与者实体 ID）'):
+                st.session_state[facts_key] = api_get(f'/knowledge-bases/{selected_knowledge_base_id}/facts/export')
+            if facts_key in st.session_state:
+                exported_facts = st.session_state[facts_key]
+                st.success(f"Facts 已导出数量/总数量：{exported_facts['exported_count']}/{exported_facts['total']}；文献数：{exported_facts['document_count']}")
+                st.download_button('下载完整 Facts JSON', json.dumps(exported_facts,ensure_ascii=False,indent=2),
+                    file_name=f'facts-{selected_knowledge_base_id}.json',mime='application/json')
+                fact_rows = [{k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in f.items()} for f in exported_facts['facts']]
+                st.download_button('下载完整 Facts CSV',pd.DataFrame(fact_rows).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f'facts-{selected_knowledge_base_id}.csv',mime='text/csv')
         except Exception as exc:
-            st.error(f"读取 claims 失败：{exc}")
+            st.error(f'读取或导出 claims 失败：{exc}')
 
     with tabs[4]:
         st.subheader("统一、可溯源知识图谱")
@@ -747,6 +793,12 @@ def main():
             max_value=10,
             value=3,
         )
+        relation_layer = st.selectbox('关系显示范围', ['all', 'biological', 'method_sample'],
+            format_func=lambda k: {'all':'全部关系', 'biological':'生物学关系', 'method_sample':'方法 / 样本关系'}[k])
+        graph_document_id = st.number_input('图谱限定文献 ID（0 表示当前知识库）',min_value=0,value=0,step=1)
+        st.caption('边型：实线为实验，长虚线为观察/共现，点线为计算预测，点划线为作者断言，稀点线为未知；未显著差异和待审核另有文字标记。')
+        graph_result = st.selectbox('图谱结果语义', ['', 'no_effect_reported', 'not_significant', 'unknown'])
+        include_pending = st.checkbox('包含待审核候选（紫色虚线）', value=False)
         include_speculative = st.checkbox("包含推测关系", value=True)
         include_negated = st.checkbox("包含否定关系", value=True)
 
@@ -755,6 +807,8 @@ def main():
                 f"/knowledge-bases/{selected_knowledge_base_id}/graph",
                 params={
                     "limit": graph_limit,
+                    "relation_layer": relation_layer, "result_status": graph_result or None, "include_pending": include_pending,
+                    "document_id": graph_document_id or None,
                     "query": graph_query or None,
                     "predicate": graph_predicate or None,
                     "entity_type": graph_entity_type or None,
@@ -767,7 +821,13 @@ def main():
             summary = graph.get("summary", {})
             col1, col2, col3 = st.columns(3)
             col1.metric("实体", summary.get("node_count", 0))
-            col2.metric("聚合关系", summary.get("relation_count", 0))
+            col2.metric("当前显示关系", summary.get("displayed_relation_count", summary.get("relation_count", 0)))
+            matched = summary.get('matched_relation_count', '未知')
+            st.caption(f"符合筛选条件的总关系数：{matched}")
+            if summary.get('truncated'):
+                st.warning(f"图谱已截断：当前显示 {len(graph.get('edges', []))}/{matched} 条关系。可提高绘制上限、缩小筛选范围，或在关系检索中分页查看全部。")
+            else:
+                st.caption('当前筛选图谱未截断。')
             col3.metric(
                 "覆盖文献",
                 summary.get("represented_document_count", 0),
@@ -778,6 +838,15 @@ def main():
             )
             st.caption(f"当前显示子图包含 {summary.get('component_count', 0)} 个连通分量；显示数量和筛选条件会影响子图连通性。")
             render_graph(graph)
+            if graph.get('edges'):
+                with st.expander('关系详情：完整条件、参与者与来源'):
+                    selected_edge = st.selectbox('关系 ID', graph['edges'],
+                        format_func=lambda e: f"{e['id']} · {e.get('predicate') or e.get('label', '')}")
+                    st.write({'审核状态': selected_edge.get('review_status', 'unknown'),
+                              '结果语义': selected_edge.get('result_status', 'unknown'),
+                              '否定': selected_edge.get('negated', False), '推测': selected_edge.get('speculative', False)})
+                    st.json(selected_edge.get('qualifiers') or {})
+                    st.json(selected_edge.get('evidence_samples') or [])
         except Exception as exc:
             st.error(f"读取统一图谱失败：{exc}")
 

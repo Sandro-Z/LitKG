@@ -47,10 +47,34 @@ class GraphDisplayTests(unittest.TestCase):
         self.assertNotIn('<script>', first['title'])
         self.assertIn('other', second['title'])
 
-    def test_single_edge_keeps_compact_predicate_label(self):
+    def test_single_edge_keeps_compact_predicate_and_evidence_level(self):
         self.assertEqual(self.ui.graph_edge_labels([{'id': 1, 'source': 1, 'target': 2,
             'label': 'ASSOCIATED_WITH', 'qualifiers': {'evidence_type': 'experimental'}}]),
-            {1: 'ASSOCIATED_WITH'})
+            {1: 'ASSOCIATED_WITH [experimental]'})
+
+    def test_evidence_design_styles_do_not_imply_experimental_validation(self):
+        patterns = {}
+        for kind in ['experimental','observational','computational_prediction']:
+            edge={'id':1,'source':1,'target':2,'predicate':'PRODUCES','qualifiers':{'evidence_type':kind}}
+            patterns[kind]=self.ui.graph_edge_dashes(edge)
+            self.assertIn(kind,self.ui.graph_edge_labels([edge])[1])
+        self.assertFalse(patterns['experimental'])
+        self.assertNotEqual(patterns['observational'],patterns['computational_prediction'])
+
+    def test_single_edge_shows_aspect_direction_comparison_and_review_without_full_json(self):
+        edge = {'id':1, 'source':1, 'target':2, 'label':'AFFECTS', 'review_status':'pending',
+            'result_status':'not_significant', 'qualifiers': {'metric':'abundance', 'reference_group':'control',
+                'processes':[{'role':'object','kind':'abundance','direction':'unspecified'}],
+                'dose':{'value':5, 'unit':'μg'}}}
+        label = self.ui.graph_edge_labels([edge])[1]
+        self.assertIn('abundance',label)
+        self.assertIn('unspecified',label)
+        self.assertIn('control',label)
+        self.assertIn('未显著差异',label)
+        self.assertIn('待审核',label)
+        self.assertNotIn('dose',label)
+        edge['result_status']='no_effect_reported'
+        self.assertIn('未见变化',self.ui.graph_edge_labels([edge])[1])
 
     def test_all_proteomics_types_have_unique_colors_and_legend_uses_current_subgraph(self):
         from app.entity_types import TYPE_DEFINITIONS
@@ -70,7 +94,7 @@ class GraphDisplayTests(unittest.TestCase):
         self.assertEqual(network.add_node.call_args_list[1].kwargs['color']['border'], self.ui.ENTITY_COLORS['Other'])
 
     def test_labels_wrap_without_losing_identifiers_or_chinese(self):
-        for label in ['Proteoform-' + 'Q1234567890' * 8, '蛋白质修饰位点与实验条件' * 8]:
+        for label in ['Protein-' + 'Q1234567890' * 8, '蛋白质修饰位点与实验条件' * 8]:
             wrapped = self.ui.wrap_graph_label(label)
             self.assertIn('\n', wrapped)
             self.assertEqual(wrapped.replace('\n', ''), label)
@@ -90,7 +114,7 @@ class GraphDisplayTests(unittest.TestCase):
     def test_real_html_is_self_contained_and_entity_text_cannot_escape_script(self):
         graph = {'knowledge_base_id': 8,
                  'nodes': [{'id': 1, 'label': '</script><script>alert(1)</script>', 'type': 'Protein'},
-                           {'id': 2, 'label': '胞内修饰位点', 'type': 'ModificationSite'}],
+                           {'id': 2, 'label': '胞内修饰位点', 'type': 'BiologicalProcess'}],
                  'edges': [{'id': 9, 'source': 1, 'target': 2, 'label': 'MODIFIES'}]}
         with patch.object(self.ui, 'st'), patch.object(self.ui, 'components') as components:
             self.ui.render_graph(graph)

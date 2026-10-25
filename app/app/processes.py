@@ -3,6 +3,8 @@ import re
 from typing import Literal
 
 ProcessKind = Literal[
+    'prevalence',
+    'growth',
     'expression',
     'secretion',
     'activity',
@@ -30,6 +32,8 @@ ProcessKind = Literal[
 ]
 
 PROCESS_DEFINITIONS = {
+    'prevalence': 'Occurrence frequency of the attached entity across samples; not within-sample abundance',
+    'growth': 'Growth of the attached organism or cell population',
     'expression': 'Expression of the attached gene/RNA/protein; not inferred from peptide intensity alone',
     'secretion': 'Secretion of the attached entity',
     'activity': 'Functional or enzymatic activity; not equivalent to abundance or phosphorylation',

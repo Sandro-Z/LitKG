@@ -90,7 +90,7 @@ class Batch22RegressionTests(unittest.TestCase):
             parsed = parse_model_bundle({'claims': [value['claim']]}, ClaimBundle)
             if not parsed.claims:
                 # Diversity belongs to the archived microbiome contract, not
-                # proteomics. Reject it explicitly without weakening Process.
+                # the shared schema. Reject it explicitly without weakening Process.
                 self.assertTrue(parsed._claim_rejections)
                 self.assertIn('process.kind', parsed._claim_rejections[0]['error'])
                 continue

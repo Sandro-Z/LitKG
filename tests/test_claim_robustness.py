@@ -250,3 +250,25 @@ class ClaimCorrectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'repair_id'):
                     self.cached(cache, first, Mock(return_value=result))
                 self.assertTrue(cache.payload['_processing_gap'])
+
+    def test_grounded_target_direction_correction_reuses_existing_candidate_repair(self):
+        from app.schemas import Claim
+        source='The monoclonal antibodies target PD-1 in A549 cells.'
+        wrong={'subject':{'text':'PD-1','type':'Protein'},'predicate':'TARGETS',
+            'object':{'text':'monoclonal antibodies','type':'Drug'},'evidence':{'sentence':source},'confidence':.9,
+            'participants':[{'role':'cell_line','entity':{'text':'A549','type':'CellLine'}}],
+            'qualifiers':{'evidence_type':'experimental'}}
+        right={**wrong,'subject':wrong['object'],'object':wrong['subject']}
+        model=Mock(return_value=ClaimBundle(claims=[wrong]))
+        correction=Mock(return_value=ClaimBundle(claims=[right]))
+        cache=MemoryCache()
+        with patch.object(self.tasks,'get_conn',side_effect=cache.connect):
+            result=self.tasks.cached_model(1,'claims','target-case',model,ClaimBundle,1,
+                validate=lambda b:prepare_claims(b,[],{'id':1,'text':source},'v'),
+                retry_call=correction,max_attempts=2)
+        self.assertEqual(result.claims[0].subject.text,'monoclonal antibodies')
+        self.assertEqual(result.claims[0].object.text,'PD-1')
+        self.assertEqual(len(result.claims[0].participants),1)
+        correction.assert_called_once()
+        changed=Claim.model_validate({**right,'participants':[],'semantic_status':'accepted'})
+        self.assertFalse(retains_required_context(wrong,changed))

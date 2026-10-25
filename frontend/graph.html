@@ -50,8 +50,8 @@
     </label>
     <button id="export" type="button">下载白底 PNG</button>
   </div>
-  <div id="mynetwork" aria-label="可拖动的知识图谱"></div>
   <p id="status" role="status" aria-live="polite">正在整理节点…</p>
+  <div id="mynetwork" aria-label="可拖动的知识图谱"></div>
   <script>
     const graphData = {nodes: {{ nodes | tojson }}, edges: {{ edges | tojson }}};
     const graphOptions = {{ options | safe }};

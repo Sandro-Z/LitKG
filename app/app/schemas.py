@@ -57,6 +57,9 @@ class Claim(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     negated: bool = False
     speculative: bool = False
+    source_kind: Literal["primary", "cited", "background", "unknown"] = "unknown"
+    result_status: Literal["observed_change", "no_effect_reported", "not_significant", "unknown"] = "unknown"
+    semantic_status: Literal["accepted", "pending", "unknown"] = "unknown"
     participants: list[Participant] = Field(default_factory=list)
     additional_evidence: list[Evidence] = Field(default_factory=list)
     review_reasons: list[str] = Field(default_factory=list)

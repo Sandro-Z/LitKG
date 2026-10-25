@@ -22,7 +22,7 @@ CATALOG_VERSION = "catalog-v4-proteomics"
 # Vocabulary and prompt versions are part of cache keys; the transport stays
 # unchanged, but old extractions must not mask newly supported entity types.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v5-controlled-proteomics"
+EXTRACTION_VERSION = "claims-v6-review-proteomics"
 
 
 def digest(value):

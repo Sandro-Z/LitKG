@@ -33,14 +33,18 @@ class GraphBrowserTests(unittest.TestCase):
             {'id': 1, 'source': 1, 'target': 2, 'label': 'ACTIVATES'},
             {'id': 2, 'source': 1, 'target': 2, 'label': 'ACTIVATES',
              'qualifiers': {'direction': 'increased', 'metric': 'abundance'}, 'speculative': True},
-            {'id': 3, 'source': 2, 'target': 1, 'label': 'REGULATES'},
+            {'id': 3, 'source': 2, 'target': 1, 'label': 'AFFECTS'},
             {'id': 4, 'source': 4, 'target': 2, 'label': 'INHIBITS'},
-            {'id': 5, 'source': 2, 'target': 3, 'label': 'MODIFIES'},
+            {'id': 5, 'source': 2, 'target': 3, 'label': 'HAS_SITE'},
             {'id': 6, 'source': 3, 'target': 5, 'label': 'ASSOCIATED_WITH'},
             {'id': 7, 'source': 6, 'target': 5, 'label': 'AFFECTS', 'negated': True},
             {'id': 8, 'source': 1, 'target': 1, 'label': 'INTERACTS_WITH'},
-            {'id': 9, 'source': 7, 'target': 8, 'label': 'HAS_PEPTIDE'},
+            {'id': 9, 'source': 7, 'target': 8, 'label': 'ASSOCIATED_WITH'},
         ]}
+        from app.entity_types import TYPE_DEFINITIONS
+        from app.predicate_registry import PREDICATES
+        assert {node['type'] for node in cls.graph['nodes']} <= set(TYPE_DEFINITIONS)
+        assert {edge['label'] for edge in cls.graph['edges']} <= set(PREDICATES)
         with patch.object(ui, 'st'), patch.object(ui, 'components') as components:
             ui.render_graph(cls.graph)
         cls.html = components.html.call_args.args[0].replace(
@@ -121,7 +125,7 @@ class GraphBrowserTests(unittest.TestCase):
         self.assertEqual(moved, self.page.evaluate('window.testNetwork.getPositions()'))
         self.page.screenshot(path=str(self.artifacts / 'workspace.png'), full_page=True)
 
-    def test_export_is_independent_of_viewport_and_handles_size_limit(self):
+    def test_export_is_independent_of_viewport(self):
         from PIL import Image, ImageChops
         first = self.download('full-view.png')
         self.page.evaluate('window.testNetwork.moveTo({position:{x:99999,y:99999},scale:.01})')
@@ -129,11 +133,50 @@ class GraphBrowserTests(unittest.TestCase):
         with Image.open(first) as a, Image.open(second) as b:
             self.assertEqual(a.size, b.size)
             self.assertIsNone(ImageChops.difference(a.convert('RGB'), b.convert('RGB')).getbbox())
-        self.page.evaluate('window.testNetwork.moveNode(1, 1000000, 1000000)')
+
+    def test_large_png_is_downloaded_at_original_size_beyond_previous_application_limit(self):
+        from PIL import Image
+        # A wide, short graph verifies the old 16000-pixel rejection without
+        # allocating an enormous square canvas in the test browser.
+        self.page.locator('#resolution').select_option('1')
+        self.page.evaluate('''() => {
+            for (let id = 1; id <= 6; id++) window.testNetwork.moveNode(id, id * 300, 0);
+            window.testNetwork.moveNode(7, 18000, 0);
+            window.testNetwork.moveNode(8, 18500, 0);
+        }''')
+        expected = self.page.evaluate('''() => {
+            const positions = window.testNetwork.getPositions();
+            const context = document.createElement('canvas').getContext('2d');
+            context.font = '14px Arial, sans-serif';
+            const bounds = GraphView.exportBounds(graphData.nodes.map(node => window.testNetwork.getBoundingBox(node.id)),
+                graphData.edges, positions, label => ({
+                    width: Math.max(...label.split('\\n').map(line => context.measureText(line).width)),
+                    height: label.split('\\n').length * 18,
+                }));
+            return Math.ceil(bounds.right - bounds.left + 80);
+        }''')
+        positions = self.page.evaluate('window.testNetwork.getPositions()')
+        path = self.download('large-original.png')
+        with Image.open(path) as image:
+            self.assertGreater(image.width, 16000)
+            self.assertEqual(image.width, expected)
+        self.assertEqual(positions, self.page.evaluate('window.testNetwork.getPositions()'))
+
+    def test_native_browser_encoding_failure_has_visible_error_and_allows_retry(self):
+        self.page.evaluate('''() => {
+            window.originalToBlob = HTMLCanvasElement.prototype.toBlob;
+            HTMLCanvasElement.prototype.toBlob = function(callback) { callback(null); };
+        }''')
         self.page.get_by_role('button', name='下载白底 PNG').click()
         self.page.wait_for_function("document.getElementById('status').classList.contains('error')")
-        self.assertIn('降低清晰度', self.page.locator('#status').inner_text())
+        self.assertIn('浏览器', self.page.locator('#status').inner_text())
+        self.assertIn('原尺寸 PNG', self.page.locator('#status').inner_text())
         self.assertTrue(self.page.get_by_role('button', name='下载白底 PNG').is_enabled())
+        status = self.page.locator('#status').bounding_box()
+        canvas = self.page.locator('#mynetwork').bounding_box()
+        self.assertLess(status['y'], canvas['y'])
+        self.page.evaluate('() => { HTMLCanvasElement.prototype.toBlob = window.originalToBlob; }')
+        self.download('retried.png')
 
     def test_png_download_works_in_streamlit_style_sandboxed_iframe(self):
         from html import escape

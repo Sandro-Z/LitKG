@@ -20,7 +20,7 @@ LLM_MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "4096"))
 CATALOG_MAX_OUTPUT_TOKENS = int(os.environ.get("CATALOG_MAX_OUTPUT_TOKENS", str(LLM_MAX_OUTPUT_TOKENS)))
 CATALOG_PROMPT_VERSION = "catalog-prompt-v3-proteomics"
 CLAIMS_MAX_OUTPUT_TOKENS = int(os.environ.get("CLAIMS_MAX_OUTPUT_TOKENS", "8192"))
-CLAIMS_PROMPT_VERSION = "claims-prompt-v5-controlled-proteomics"
+CLAIMS_PROMPT_VERSION = "claims-prompt-v6-review-proteomics"
 
 client = OpenAI(
     base_url=LLM_BASE_URL,
@@ -175,11 +175,30 @@ qualifiers.evidence_type 仅按当前片段选择：{json.dumps(EVIDENCE_CATEGOR
 当前片段没有交代研究设计时不猜测 evidence_type，省略并在 review_reasons 说明；缺少限定字段也不编造。
 注册表给出的逆关系和对称性只描述语义，不允许据此生成没有原文证据的额外边。
 
+语义角色与证据复核（一次抽取完成，不输出推理链）：
+- 靶向蛋白的 抗体是 Drug/Intervention；相应靶点本身是 Protein 靶点。TARGETS 从抗体指向靶蛋白，不能把靶蛋白当作所给治疗。
+- “疾病在 治疗 后进展”只提供时间顺序，不支持 治疗 CAUSES 疾病进展。保留时间/背景；无注册谓词支持时留 review_reasons，不捏造因果边。
+- “治疗后 CD8 细胞增加”以实际干预为 subject、CD8 细胞为 object，并用 object.process；不能变成 CD8 影响自身。原文明示自调节仍合法。
+- MEASURED_BY 是被测实体/指标 -> Assay；测量方法不是自身的被测物。招募医院/队列来源不是 SUBCLASS_OF。
+- Treatment A combined with Treatment B 的效果属于联合方案，另一干预必须作为 co_intervention participant；供体、受体、宿主或细胞模型、饮食、药物、时间、比较组、指标和方向必须保留。不能拆成两个单药疗效。
+- 相关、组间差异、功能潜能和实验机制保持原始证据级别。evidence 必须完整覆盖两端、谓词及关键限定；“Network analyses established”这样的残句不能支持断言。
+- 无法确定的角色/归因/条件保留 review_reasons；不要用同段共现实体补全证据。
+- 样本人群/受者/供者不是治疗作用者；“patients respond to therapy”不能反成患者 AFFECTS 疗法。供者通过移植物影响受者，保存 donor、recipient、intervention 角色。
+- “underwent surgery for X but suffered Y / subsequently”是临床事件时序，不能直接造 X CAUSES Y；“unrelated to therapy”也不是 X 导致 Y 的依据。
+- Treatment A combined with Treatment B、共同给药等都要检查联合方案。单臂方案不能拆成单药因果；prior refractory、响应定义、ORR/临床获益、人数/分母、时间和预处理分别保存 qualifiers/participants。
+- did not affect / had no effect / failed to influence 按作用的具体终点和分句限定；图号、小数、物种缩写不结束断言。自然生长无效与PD-1阻断后有效必须分开，未降低不等于证明所有方面无效。
+- CD8/MAIT细胞的TIGIT、CD27、granzyme B表达不是细胞数量；同一细胞多个标志方向不同时保留各指标和时间，不能汇总成一个丰度方向。
+- anti-PD-L1治疗疗效不是PD-L1蛋白活性；肿瘤模型/宿主环境、机构/来自该机构的小鼠组、采样背景/疾病关联不可混淆。
+- “None”等表内标签是响应类别，不作生物学分类；单组高丰度描述不证明两供者有差异。测量/统计方法句本身不证明结果；网络中心性不证明干预机制。
+- 保留药物混杂、饮食、供受者基因型、组织/细胞、物种和时间。体重、体脂率、体脂相对增长分别建指标；磷酸化必须保留蛋白、残基/位置及方向，不能丢失Y612等身份限定。
+- may/could/we propose等可能为作者假说；引用前人结果的source_kind与speculative分开。无法从当前证据判断的语义角色/归属，在review_reasons中以semantic:开头说明待复核原因。
+
 抽取规则：
 1. 只抽取文本中明确支持的事实。
 2. 每条 claim 必须包含原文 evidence sentence。
-3. 如果是否定结果，negated=true。
-4. 如果是推测、假设、背景介绍、未来工作，speculative=true。
+3. 统一阴性结果：did not affect / unchanged 表示 result_status=no_effect_reported，AFFECTS 的 object.process.direction=unchanged 且 negated=false；不要双重否定。
+   无显著差异使用 result_status=not_significant，negated=false；保留报告的估计方向，未报告则 unspecified，不能声称已证明无效。只有明确否认关系本身才 negated=true。
+4. speculative 仅用于推测、假设和未来工作；来源另用 source_kind=primary|cited|background|unknown，不因背景/引用就标为推测。旧数据和未交代来源用 unknown，不猜补。
 5. 不确定时不要抽取。
 6. 只有片段明确给出 ChEBI、PubChem CID、UniProt、NCBI Gene、DrugBank
    或原文明示的 PSI-MOD、Unimod、PSI-MS 等标准词表 ID 时才填写 normalized_id；否则填 null，禁止推断或编造。

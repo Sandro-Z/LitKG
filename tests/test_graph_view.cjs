@@ -60,13 +60,32 @@ test('export bounds retain distant nodes, curved edge labels and self loops outs
   assert.ok(loop.left < -4200 && loop.bottom > 2200);
 });
 
-test('image dimensions include the legend and respect requested resolution without unsafe allocations', () => {
+test('image dimensions include the legend and preserve requested resolution', () => {
   const bounds = {left: -100, top: -100, right: 900, bottom: 900};
   const normal = imageSize(bounds, 1, 2);
   const high = imageSize(bounds, 2, 2);
   assert.equal(high.width, normal.width * 2);
   assert.equal(high.height, normal.height * 2);
   assert.ok(normal.height > normal.graphHeight + 100);
-  assert.throws(() => imageSize({...bounds, right: 1000000}, 3, 2), /降低清晰度/);
-  assert.throws(() => imageSize({...bounds, bottom: NaN}, 2, 2), /降低清晰度/);
+});
+
+test('large exports have no application pixel, area or aspect-ratio cap', () => {
+  // Only calculate dimensions here; never allocate enormous canvases in Node.
+  for (const bounds of [
+    {left: 0, top: 0, right: 18000, bottom: 200},
+    {left: 0, top: 0, right: 10000, bottom: 6000},
+    {left: -100, top: -100, right: 1000000, bottom: 1000},
+  ]) {
+    const image = imageSize(bounds, 3, 2);
+    assert.equal(image.width, Math.ceil((bounds.right - bounds.left + 80) * 3));
+    assert.equal(image.height, Math.ceil((bounds.bottom - bounds.top + 112 + 56) * 3));
+  }
+});
+
+test('invalid graph coordinates and resolution are rejected without confusing them with large images', () => {
+  const bounds = {left: 0, top: 0, right: 1000, bottom: 1000};
+  assert.throws(() => imageSize({...bounds, bottom: NaN}, 2, 2), /无效/);
+  assert.throws(() => imageSize({...bounds, right: Infinity}, 2, 2), /无效/);
+  assert.throws(() => imageSize({...bounds, right: -100}, 2, 2), /无效/);
+  assert.throws(() => imageSize(bounds, 0, 2), /无效/);
 });
