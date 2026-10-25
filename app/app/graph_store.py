@@ -19,6 +19,7 @@ from app.normalization import (
     normalize_external_id,
     normalize_predicate,
     qualifiers_fingerprint,
+    stable_json,
 )
 from app.schemas import Claim
 from app.facts import fact_qualifiers, normalized_participants, store_fact
@@ -68,6 +69,11 @@ def _merge_entities(cur, target, sources):
         qualifiers = dict(relation['qualifiers'])
         if 'participants' in qualifiers:
             qualifiers['participants'] = sorted({(role,target_id if entity_id in source_ids else entity_id) for role,entity_id in qualifiers['participants']})
+        for process in qualifiers.get('processes', []):
+            if process.get('entity_id') in source_ids:
+                process['entity_id'] = target_id
+        if 'processes' in qualifiers:
+            qualifiers['processes'] = sorted(qualifiers['processes'], key=stable_json)
         cur.execute(
             """
             INSERT INTO relations (subject_entity_id, predicate, object_entity_id, qualifiers, qualifiers_hash, negated, speculative)
@@ -97,6 +103,11 @@ def _merge_entities(cur, target, sources):
         qualifiers = dict(current['qualifiers'])
         if 'participants' in qualifiers:
             qualifiers['participants'] = sorted({(role,target_id if entity_id in source_ids else entity_id) for role,entity_id in qualifiers['participants']})
+        for process in qualifiers.get('processes', []):
+            if process.get('entity_id') in source_ids:
+                process['entity_id'] = target_id
+        if 'processes' in qualifiers:
+            qualifiers['processes'] = sorted(qualifiers['processes'], key=stable_json)
         key = digest({'participants':participants,'predicate':current['predicate'],'qualifiers':qualifiers,
                       'negated':current['negated'],'speculative':current['speculative']})
         cur.execute('UPDATE facts SET fact_key=%s,qualifiers=%s,updated_at=now() WHERE id=%s', (key,Jsonb(qualifiers),fact['id']))
@@ -312,7 +323,7 @@ def _claim_projection(cur, claim: Claim, abbreviations=None, document_id=None, *
     for participant, identity in extra_identities:
         participants.append({"role": participant.role, "entity_id": upsert_entity(cur, identity, reconcile_existing=reconcile_existing),
                              "mention": participant.entity.mention or participant.entity.text, "entity": participant.entity})
-    qualifiers = fact_qualifiers(claim)
+    qualifiers = fact_qualifiers(claim, participants)
     if extra_identities:
         qualifiers["participants"] = sorted({(p["role"], p["entity_id"]) for p in participants if p["role"] not in {"subject", "object"}})
     evidence_text = clean_text(claim.evidence.sentence)
@@ -489,7 +500,7 @@ def store_claim(
     return claim_id, relation_id
 
 
-def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None) -> int:
+def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbreviations=None, document_id=None, *, reconcile_existing=True) -> int:
     if document_id is None:
         cur.execute("SELECT document_id FROM claims WHERE id = %s", (claim_id,))
         document_id = cur.fetchone()["document_id"]
@@ -504,7 +515,7 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
         source['abbreviation_map'] = abbreviations or {}
         entries = load_catalog(cur, document_id, source['catalog_version'])
         resolve_bundle(ClaimBundle(claims=[claim]), entries, source, source['catalog_version'])
-    projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=True)
+    projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=reconcile_existing)
 
     # Old versions could store the same extraction more than once. When
     # backfilling, keep the first matching row so the new unique fingerprint
@@ -525,6 +536,8 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
     )
     duplicate = cur.fetchone()
     if duplicate:
+        if not reconcile_existing:
+            raise ValueError('Scoped reproject would merge existing claims; inspect duplication separately')
         cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
         claim_id = duplicate["id"]
 

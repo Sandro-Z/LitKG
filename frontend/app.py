@@ -1,11 +1,16 @@
 import os
+import json
+import unicodedata
+from collections import defaultdict
 from html import escape
+from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
+from jinja2 import ChoiceLoader, FileSystemLoader
 from streamlit_autorefresh import st_autorefresh
 
 
@@ -17,6 +22,7 @@ st.set_page_config(
     layout="wide",
 )
 
+# Keep a distinct color for every canonical type in app/entity_types.py.
 ENTITY_COLORS = {
     "Compound": "#F97316",
     "Drug": "#FB7185",
@@ -24,10 +30,20 @@ ENTITY_COLORS = {
     "Gene": "#6366F1",
     "Disease": "#EF4444",
     "CellLine": "#14B8A6",
+    "CellType": "#115E59",
+    "Tissue": "#D4A373",
+    "AnatomicalStructure": "#7C3E19",
+    "RNA": "#A3E635",
+    "MolecularComplex": "#3730A3",
+    "BiologicalProcess": "#A16207",
+    "Phenotype": "#C026D3",
     "Organism": "#22C55E",
     "Assay": "#EAB308",
     "Pathway": "#8B5CF6",
     "Mutation": "#EC4899",
+    "Intervention": "#0284C7",
+    "Biospecimen": "#78716C",
+    "StudyGroup": "#475569",
     "Other": "#94A3B8",
 }
 
@@ -171,6 +187,105 @@ def api_upload_batch(
     return response.json()
 
 
+def graph_edge_labels(edges):
+    """Keep context-specific assertions visible as distinct parallel edges."""
+    groups = defaultdict(list)
+    for edge in edges:
+        groups[(edge['source'], edge['target'], edge.get('predicate') or edge.get('label', ''))].append(edge)
+    labels = {}
+    for group in groups.values():
+        for index, edge in enumerate(sorted(group, key=lambda item: item['id']), 1):
+            label = edge.get('label') or edge.get('predicate', '')
+            if edge.get('display_negated', edge.get('negated')):
+                label += ' [否定]'
+            if edge.get('speculative'):
+                label += ' [推测]'
+            qualifiers = edge.get('qualifiers') or {}
+            evidence_type = qualifiers.get('evidence_type')
+            if evidence_type:
+                label += f' [{evidence_type}]'
+            else:
+                label += ' [证据等级未知]'
+            if qualifiers.get('knowledge_level') == 'predicted':
+                label += ' [功能预测]'
+            context = []
+            for key in ('metric', 'direction', 'association_direction', 'comparison_group', 'reference_group'):
+                if key in qualifiers:
+                    if isinstance(qualifiers[key], (str, int, float)):
+                        context.append(f'{key}={qualifiers[key]}')
+            for process in qualifiers.get('processes', []):
+                context.append(f"{process.get('role')}.{process.get('kind')}={process.get('direction', 'unspecified')}")
+            if len(group) > 1:
+                label += f' · 条件 {index}/{len(group)}'
+            if context:
+                label += '\n' + ('; '.join(context))[:200]
+            status = edge.get('result_status') or (edge.get('qualifiers') or {}).get('result_status')
+            if status == 'not_significant':
+                label += ' [未显著差异]'
+            elif status == 'no_effect_reported':
+                label += ' [未见变化]'
+            if edge.get('review_status') == 'pending':
+                label += ' [待审核]'
+            labels[edge['id']] = label
+    return labels
+
+
+def graph_edge_dashes(edge):
+    if edge.get('review_status') == 'pending' or edge.get('result_status') == 'not_significant':
+        return True
+    kind = (edge.get('qualifiers') or {}).get('evidence_type')
+    return {'observational':[8,4], 'cooccurrence':[8,4], 'computational_prediction':[2,4],
+            'author_statement':[12,4,2,4], 'experimental':False}.get(kind, [1,7])
+
+
+def wrap_graph_label(value, width=28):
+    """Wrap display text without dropping long identifiers or CJK characters."""
+    lines = []
+    for paragraph in str(value).split("\n"):
+        line = ""
+        size = 0
+        for char in paragraph:
+            char_width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+            if size + char_width > width and line:
+                split = line.rfind(" ")
+                if split > 0:
+                    lines.append(line[:split])
+                    line = line[split + 1:]
+                else:
+                    lines.append(line)
+                    line = ""
+                size = sum(2 if unicodedata.east_asian_width(c) in {"W", "F"} else 1 for c in line)
+            line += char
+            size += char_width
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def graph_edge_curves(edges):
+    """Give parallel, reverse and self edges distinct, static exportable paths."""
+    groups = defaultdict(list)
+    for edge in edges:
+        groups[tuple(sorted((edge["source"], edge["target"])))].append(edge)
+    curves = {}
+    for (source, target), group in groups.items():
+        ordered = sorted(group, key=lambda edge: edge["id"])
+        for index, edge in enumerate(ordered):
+            if source == target:
+                curves[edge["id"]] = {"smooth": False, "selfReference": {"size": 65 + index * 45}}
+                continue
+            lane = index - (len(ordered) - 1) / 2
+            if lane == 0:
+                curves[edge["id"]] = {"smooth": False}
+            else:
+                clockwise = (lane > 0) == (edge["source"] == source)
+                curves[edge["id"]] = {"smooth": {
+                    "enabled": True,
+                    "type": "curvedCW" if clockwise else "curvedCCW",
+                    "roundness": 0.12 + 0.76 * abs(lane) / ((len(ordered) - 1) / 2 + 1),
+                }}
+    return curves
+
+
 def render_graph(graph_data):
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
@@ -178,39 +293,60 @@ def render_graph(graph_data):
         st.info("当前筛选范围还没有可展示的关系。")
         return
 
+    type_colors = {
+        node_type: ENTITY_COLORS.get(node_type, ENTITY_COLORS["Other"])
+        for node_type in sorted({node.get("type") or "Other" for node in nodes})
+    }
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:6px;'
+        'white-space:nowrap;font-size:0.875rem;">'
+        '<span aria-hidden="true" style="display:inline-block;width:12px;height:12px;'
+        f'border-radius:50%;background:{color};border:1px solid rgba(0,0,0,0.15);"></span>'
+        f'{escape(node_type)}</span>'
+        for node_type, color in type_colors.items()
+    )
+    st.caption("节点颜色对应实体类型")
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:12px;">'
+        f'{legend}</div>',
+        unsafe_allow_html=True,
+    )
+
     network = Network(
         height="760px",
         width="100%",
         directed=True,
         bgcolor="#ffffff",
         font_color="#111827",
-    )
-    network.barnes_hut(
-        gravity=-30000,
-        central_gravity=0.3,
-        spring_length=180,
-        spring_strength=0.04,
-        damping=0.09,
+        cdn_resources="in_line",
+        heading=f"litkg-kb-{graph_data.get('knowledge_base_id', 'graph')}",
     )
 
     for node in nodes:
         node_type = node.get("type") or "Other"
         normalized_id = node.get("normalized_id") or "未规范化"
+        color = type_colors[node_type]
+        # Pale fills keep dark labels readable for every entity type.
+        fill = "#" + "".join(f"{round(int(color[i:i + 2], 16) * .14 + 255 * .86):02x}" for i in (1, 3, 5))
         network.add_node(
             node["id"],
-            label=node.get("label") or str(node["id"]),
+            label=wrap_graph_label(node.get("label") or str(node["id"])),
             title=(
-                f"类型: {node_type}<br>"
-                f"名称: {node.get('label')}<br>"
-                f"规范化 ID: {normalized_id}"
+                f"类型: {escape(node_type)}<br>"
+                f"名称: {escape(node.get('label') or str(node['id']))}<br>"
+                f"规范化 ID: {escape(normalized_id)}"
             ),
-            color=ENTITY_COLORS.get(
-                node_type,
-                ENTITY_COLORS["Other"],
-            ),
-            shape="dot",
-            size=24,
+            color={"border": color, "background": fill,
+                   "highlight": {"border": color, "background": fill}},
+            entityType=node_type,
+            typeColor=color,
+            shape="box",
         )
+
+    edge_labels = graph_edge_labels(edges)
+    edge_curves = graph_edge_curves(edges)
+    if len({(e['source'], e['target'], e.get('predicate') or e.get('label', '')) for e in edges}) < len(edges):
+        st.caption('同名平行边代表不同条件或证据标注；边上显示区别，悬停可查看完整限定信息。')
 
     for edge in edges:
         confidence = edge.get("confidence")
@@ -230,48 +366,62 @@ def render_graph(graph_data):
         )
 
         edge_color = "#64748B"
-        if edge.get("negated"):
+        if edge.get("display_negated", edge.get("negated")):
             edge_color = "#DC2626"
+        elif edge.get("review_status") == "pending":
+            edge_color = "#9333EA"
+        elif edge.get("result_status") == "not_significant":
+            edge_color = "#0284C7"
         elif edge.get("speculative"):
             edge_color = "#D97706"
 
         network.add_edge(
             edge["source"],
             edge["target"],
-            label=edge.get("label", ""),
+            id=edge['id'],
+            label=wrap_graph_label(edge_labels[edge['id']], width=42),
             title=(
-                f"关系: {edge.get('label')}<br>"
+                f"关系: {escape(edge.get('label') or edge.get('predicate', ''))}<br>"
+                f"否定: {'是' if edge.get('display_negated', edge.get('negated')) else '否'} | "
+                f"推测: {'是' if edge.get('speculative') else '否'}<br>"
                 f"平均置信度: {confidence_text}<br>"
                 f"支持文献: {edge.get('document_count', 0)}<br>"
-                f"证据数: {edge.get('evidence_count', 0)}<br><br>"
+                f"证据数: {edge.get('evidence_count', 0)}<br>"
+                f"限定信息:<pre>{escape(json.dumps(edge.get('qualifiers') or {}, ensure_ascii=False, indent=2))}</pre>"
+                f"参与者及来源:<pre>{escape(json.dumps(samples, ensure_ascii=False, indent=2))}</pre>"
                 f"{evidence_html}"
             ),
             color=edge_color,
+            dashes=graph_edge_dashes(edge),
             arrows="to",
-            width=min(8, 1 + edge.get("document_count", 1)),
+            width=min(3, 1 + edge.get("document_count", 1) * .4),
+            **edge_curves[edge['id']],
         )
 
-    network.set_options(
-        """
-        const options = {
-          "nodes": {"font": {"size": 16, "face": "Arial"}},
-          "edges": {
-            "font": {"size": 12, "align": "middle"},
-            "smooth": {"type": "dynamic"}
-          },
-          "physics": {
-            "enabled": true,
-            "stabilization": {"iterations": 200}
-          },
-          "interaction": {
-            "hover": true,
-            "navigationButtons": true,
-            "keyboard": true
-          }
-        }
-        """
-    )
-    components.html(network.generate_html(), height=800, scrolling=True)
+    network.set_options(json.dumps({
+        "layout": {"randomSeed": 42, "improvedLayout": False},
+        "nodes": {"font": {"size": 16, "face": "Arial", "color": "#111827"},
+                  "margin": 12, "borderWidth": 2, "widthConstraint": {"maximum": 230},
+                  "shapeProperties": {"borderRadius": 6}},
+        "edges": {"font": {"size": 14, "face": "Arial", "align": "horizontal",
+                            "color": "#334155", "background": "#ffffff", "strokeWidth": 2,
+                            "strokeColor": "#ffffff"},
+                  "arrowStrikethrough": False, "smooth": False,
+                  "selectionWidth": 0, "hoverWidth": 0},
+        "physics": {"enabled": False, "solver": "barnesHut",
+                    "barnesHut": {"gravitationalConstant": -18000, "centralGravity": .12,
+                                  "springLength": 300, "springConstant": .025,
+                                  "damping": .35, "avoidOverlap": 1},
+                    "stabilization": {"enabled": True, "iterations": 500, "updateInterval": 25}},
+        "interaction": {"hover": True, "keyboard": True, "multiselect": True},
+    }))
+    # Reuse PyVis's bundled renderer; the custom template needs no CDN requests.
+    network.templateEnv.loader = ChoiceLoader([
+        FileSystemLoader(str(Path(__file__).parent)), network.templateEnv.loader,
+    ])
+    network.template = network.templateEnv.get_template("graph.html")
+    st.caption("可拖动节点微调，按住 Ctrl 多选。整理后的布局可导出完整白底图片；图片包含当前筛选结果。")
+    components.html(network.generate_html(notebook=True), height=920, scrolling=True)
 
 
 def load_knowledge_bases():
@@ -292,8 +442,6 @@ def main():
     try:
         knowledge_bases = load_knowledge_bases()
         type_names = list(api_get('/entity-types')['types'])
-        for name in type_names:
-            ENTITY_COLORS.setdefault(name, '#0D9488')
     except Exception as exc:
         st.error(f"无法连接 API：{exc}")
         st.stop()
@@ -344,7 +492,7 @@ def main():
                 if st.session_state.get(f"knowledge_base_edit_error_{selected_knowledge_base_id}"):
                     st.error(st.session_state[f"knowledge_base_edit_error_{selected_knowledge_base_id}"])
             with st.expander("删除当前知识库"):
-                st.warning(f"将删除「{current['name']}」及其全部文献关联、批次、索引和维护记录。此操作无法撤销。原始 PDF 和共享文献保留。")
+                st.warning(f"将删除「{current['name']}」及其文献、处理缓存、抽取结果、批次、索引和维护记录。其他知识库仍在使用的文献保留；独占文献再次上传将从头处理。原始 PDF 文件保留。此操作无法撤销。")
                 with st.form(f"delete_knowledge_base_{selected_knowledge_base_id}"):
                     st.text_input("输入知识库名称以确认删除", key=f"delete_knowledge_base_name_{selected_knowledge_base_id}", max_chars=200)
                     st.form_submit_button("确认删除整个知识库", on_click=delete_knowledge_base,
@@ -507,31 +655,48 @@ def main():
             "按实体类型筛选",
             [""] + type_names,
         )
+        result_filter = st.selectbox('结果语义', ['', 'no_effect_reported', 'not_significant', 'observed_change', 'unknown'],
+            format_func=lambda k: {'':'全部', 'no_effect_reported':'未见变化', 'not_significant':'未显著差异', 'observed_change':'报告变化', 'unknown':'未知'}.get(k, k))
+        page_number = st.number_input('Claims 页码', min_value=1, value=1, step=1)
+        page_size = st.selectbox('每页 Claims', [100, 250, 500])
+        filters = {'predicate': predicate or None, 'entity_type': entity_type or None, 'result_status': result_filter or None}
         try:
-            claims = api_get(
-                f"/knowledge-bases/{selected_knowledge_base_id}/claims",
-                params={
-                    "limit": 500,
-                    "predicate": predicate or None,
-                    "entity_type": entity_type or None,
-                },
-            ).get("claims", [])
+            page = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims",
+                params={**filters, 'limit': page_size, 'offset': (page_number-1)*page_size})
+            claims = page.get('claims', [])
+            st.caption(f"本页 {len(claims)} 条 / 总数量 {page.get('total', '未知')}；当前第 {page_number} 页")
             if claims:
-                st.dataframe(
-                    pd.DataFrame(claims),
-                    column_order=[
-                        "id", "subject_text", "predicate", "object_text",
-                        "title", "doi", "page", "page_end", "filename",
-                        "section_title", "table_or_figure", "evidence_text",
-                        "confidence", "negated", "speculative",
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(pd.DataFrame(claims), column_order=[
+                    'id', 'subject_text', 'predicate', 'object_text', 'result_status', 'review_status',
+                    'title', 'doi', 'page', 'page_end', 'filename', 'section_title', 'evidence_text',
+                    'confidence', 'display_negated', 'speculative', 'source_kind'],
+                    use_container_width=True, hide_index=True)
             else:
-                st.info("当前筛选条件没有 claims。")
+                st.info('当前页没有 claims。')
+            export_key = 'claims_export_' + json.dumps([selected_knowledge_base_id, filters], sort_keys=True)
+            if st.button('准备完整导出 CSV / JSON'):
+                st.session_state[export_key] = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims/export", params={**filters, 'format':'json'})
+            if export_key in st.session_state:
+                exported = st.session_state[export_key]
+                st.success(f"已导出数量/总数量：{exported['exported_count']}/{exported['total']}（导出时快照）")
+                st.download_button('下载完整 JSON（无损）', json.dumps(exported, ensure_ascii=False, indent=2),
+                    file_name=f'claims-{selected_knowledge_base_id}.json', mime='application/json')
+                csv_rows = [{k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for k,v in row.items()} for row in exported['claims']]
+                st.download_button('下载完整 CSV', pd.DataFrame(csv_rows).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f'claims-{selected_knowledge_base_id}.csv', mime='text/csv')
+            facts_key = f'facts_export_{selected_knowledge_base_id}'
+            if st.button('准备导出全部当前 Facts（含参与者实体 ID）'):
+                st.session_state[facts_key] = api_get(f'/knowledge-bases/{selected_knowledge_base_id}/facts/export')
+            if facts_key in st.session_state:
+                exported_facts = st.session_state[facts_key]
+                st.success(f"Facts 已导出数量/总数量：{exported_facts['exported_count']}/{exported_facts['total']}；文献数：{exported_facts['document_count']}")
+                st.download_button('下载完整 Facts JSON', json.dumps(exported_facts,ensure_ascii=False,indent=2),
+                    file_name=f'facts-{selected_knowledge_base_id}.json',mime='application/json')
+                fact_rows = [{k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in f.items()} for f in exported_facts['facts']]
+                st.download_button('下载完整 Facts CSV',pd.DataFrame(fact_rows).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f'facts-{selected_knowledge_base_id}.csv',mime='text/csv')
         except Exception as exc:
-            st.error(f"读取 claims 失败：{exc}")
+            st.error(f'读取或导出 claims 失败：{exc}')
 
     with tabs[4]:
         st.subheader("统一、可溯源知识图谱")
@@ -593,7 +758,9 @@ def main():
         col1, col2, col3 = st.columns(3)
         graph_query = col1.text_input("搜索实体名称、别名、标准 ID 或关系", key="graph_query")
         graph_predicate = col2.text_input("关系类型（可选）", key="graph_predicate")
-        graph_entity_type = col3.selectbox("实体类型（可选）", [""] + list(ENTITY_COLORS), key="graph_entity_type")
+        graph_entity_type = col3.selectbox(
+            "实体类型（可选）", [""] + type_names, key="graph_entity_type"
+        )
         col1, col2, col3 = st.columns(3)
         graph_limit = col1.slider(
             "最多关系数",
@@ -614,6 +781,12 @@ def main():
             max_value=10,
             value=3,
         )
+        relation_layer = st.selectbox('关系显示范围', ['all', 'biological', 'method_sample'],
+            format_func=lambda k: {'all':'全部关系', 'biological':'生物学关系', 'method_sample':'方法 / 样本关系'}[k])
+        graph_document_id = st.number_input('图谱限定文献 ID（0 表示当前知识库）',min_value=0,value=0,step=1)
+        st.caption('边型：实线为实验，长虚线为观察/共现，点线为计算预测，点划线为作者断言，稀点线为未知；未显著差异和待审核另有文字标记。')
+        graph_result = st.selectbox('图谱结果语义', ['', 'no_effect_reported', 'not_significant', 'unknown'])
+        include_pending = st.checkbox('包含待审核候选（紫色虚线）', value=False)
         include_speculative = st.checkbox("包含推测关系", value=True)
         include_negated = st.checkbox("包含否定关系", value=True)
 
@@ -622,6 +795,8 @@ def main():
                 f"/knowledge-bases/{selected_knowledge_base_id}/graph",
                 params={
                     "limit": graph_limit,
+                    "relation_layer": relation_layer, "result_status": graph_result or None, "include_pending": include_pending,
+                    "document_id": graph_document_id or None,
                     "query": graph_query or None,
                     "predicate": graph_predicate or None,
                     "entity_type": graph_entity_type or None,
@@ -634,7 +809,13 @@ def main():
             summary = graph.get("summary", {})
             col1, col2, col3 = st.columns(3)
             col1.metric("实体", summary.get("node_count", 0))
-            col2.metric("聚合关系", summary.get("relation_count", 0))
+            col2.metric("当前显示关系", summary.get("displayed_relation_count", summary.get("relation_count", 0)))
+            matched = summary.get('matched_relation_count', '未知')
+            st.caption(f"符合筛选条件的总关系数：{matched}")
+            if summary.get('truncated'):
+                st.warning(f"图谱已截断：当前显示 {len(graph.get('edges', []))}/{matched} 条关系。可提高绘制上限、缩小筛选范围，或在关系检索中分页查看全部。")
+            else:
+                st.caption('当前筛选图谱未截断。')
             col3.metric(
                 "覆盖文献",
                 summary.get("represented_document_count", 0),
@@ -645,6 +826,15 @@ def main():
             )
             st.caption(f"当前显示子图包含 {summary.get('component_count', 0)} 个连通分量；显示数量和筛选条件会影响子图连通性。")
             render_graph(graph)
+            if graph.get('edges'):
+                with st.expander('关系详情：完整条件、参与者与来源'):
+                    selected_edge = st.selectbox('关系 ID', graph['edges'],
+                        format_func=lambda e: f"{e['id']} · {e.get('predicate') or e.get('label', '')}")
+                    st.write({'审核状态': selected_edge.get('review_status', 'unknown'),
+                              '结果语义': selected_edge.get('result_status', 'unknown'),
+                              '否定': selected_edge.get('negated', False), '推测': selected_edge.get('speculative', False)})
+                    st.json(selected_edge.get('qualifiers') or {})
+                    st.json(selected_edge.get('evidence_samples') or [])
         except Exception as exc:
             st.error(f"读取统一图谱失败：{exc}")
 

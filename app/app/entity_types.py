@@ -18,11 +18,39 @@ TYPE_DEFINITIONS = {
     "Assay": "Measurement method or assay",
     "Pathway": "Named biological pathway",
     "Mutation": "Explicit sequence variant or mutation",
+    "Intervention": "Named non-drug intervention or treatment procedure; drug molecules remain Drug",
+    "Biospecimen": "Collected biological material or sample; not its anatomical source",
+    "StudyGroup": "Explicit cohort, treatment arm or comparison group; not an individual organism",
     "Other": "Unresolved type; preserve uncertainty_reason rather than guessing",
 }
 
 ENTITY_TYPES = {name.casefold(): name for name in TYPE_DEFINITIONS}
 ENTITY_TYPES.update({
-    "chemical": "Compound", "chemicalcompound": "Compound", "smallmolecule": "Compound",
-    "medication": "Drug", "proteins": "Protein", "genes": "Gene", "celllines": "CellLine",
+    "chemical": "Compound",
+    "chemicalcompound": "Compound",
+    "smallmolecule": "Compound",
+    "medication": "Drug",
+    "proteins": "Protein",
+    "genes": "Gene",
+    "celllines": "CellLine",
+    "sample": "Biospecimen",
+    "specimen": "Biospecimen",
+    "cohort": "StudyGroup",
+    "treatmentarm": "StudyGroup",
+    "perturbation": "Intervention",
 })
+
+# Endpoint constraints never merge entity identities.
+TYPE_PARENTS = {
+    "Drug": "Compound",
+}
+
+
+def type_is_allowed(entity_type, allowed):
+    if "*" in allowed:
+        return True
+    while entity_type:
+        if entity_type in allowed:
+            return True
+        entity_type = TYPE_PARENTS.get(entity_type)
+    return False

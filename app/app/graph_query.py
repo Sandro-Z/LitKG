@@ -4,6 +4,8 @@ from typing import Any, Literal
 from app.normalization import normalize_entity_type, normalize_predicate
 from app.graph_diagnostics import connectivity_metrics
 from app.provenance import evidence_location
+from app.claim_semantics import result_sql, result_view, display_negated
+from app.predicate_registry import PREDICATES
 
 
 def substring_pattern(query: str) -> str:
@@ -12,10 +14,11 @@ def substring_pattern(query: str) -> str:
     return f"%{escaped}%"
 
 
-def current_claim_clause(alias='c'):
+def current_claim_clause(alias='c', include_pending=False):
+    reviewed = '' if include_pending else f" AND COALESCE({alias}.claim_json->>'semantic_status','unknown') <> 'pending'"
     return f"""EXISTS (SELECT 1 FROM documents source_document WHERE source_document.id={alias}.document_id
         AND source_document.catalog_status IN ('done','legacy')
-        AND {alias}.catalog_version IS NOT DISTINCT FROM source_document.catalog_version)"""
+        AND {alias}.catalog_version IS NOT DISTINCT FROM source_document.catalog_version)""" + reviewed
 
 
 def _entity_search(alias: str) -> str:
@@ -41,13 +44,14 @@ def _scope_clause(
     *,
     knowledge_base_id: int | None,
     document_id: int | None,
+    include_pending: bool = False,
 ) -> tuple[str, list[Any]]:
     if (knowledge_base_id is None) == (document_id is None):
         raise ValueError(
             "Exactly one of knowledge_base_id or document_id must be provided"
         )
 
-    current_version = ' AND ' + current_claim_clause()
+    current_version = ' AND ' + current_claim_clause(include_pending=include_pending)
     if knowledge_base_id is not None:
         return (
             """
@@ -81,13 +85,32 @@ def fetch_graph(
     direction: Literal["both", "outgoing", "incoming"] = "both",
     offset: int = 0,
     include_total: bool = False,
+    relation_layer: Literal['all', 'biological', 'method_sample'] = 'all',
+    result_status: str | None = None,
+    include_pending: bool = False,
+    source_document_id: int | None = None,
 ) -> dict[str, Any]:
     scope_sql, scope_params = _scope_clause(
         knowledge_base_id=knowledge_base_id,
         document_id=document_id,
+        include_pending=include_pending,
     )
     relation_filters = []
     relation_params: list[Any] = []
+    if source_document_id is not None:
+        scope_sql += ' AND c.document_id=%s'
+        scope_params.append(source_document_id)
+    if result_status:
+        scope_sql += f' AND ({result_sql("c")})=%s'
+        scope_params.append(result_status)
+    if not include_negated:
+        scope_sql += f" AND (NOT c.negated OR (c.predicate IN ('AFFECTS','DIFFERS_BETWEEN') AND ({result_sql('c')}) IN ('no_effect_reported','not_significant')))"
+    method_predicates = [name for name, spec in PREDICATES.items() if spec['group'] == 'measurement']
+    if relation_layer not in {'all', 'biological', 'method_sample'}:
+        raise ValueError('Unknown relation layer')
+    if relation_layer != 'all':
+        relation_filters.append('r.predicate ' + ('= ANY(%s::TEXT[])' if relation_layer == 'method_sample' else '<> ALL(%s::TEXT[])'))
+        relation_params.append(method_predicates)
 
     if direction not in {"both", "outgoing", "incoming"}:
         raise ValueError("Unknown relation direction")
@@ -131,8 +154,6 @@ def fetch_graph(
             "(subject.entity_type = %s OR object.entity_type = %s)"
         )
         relation_params.extend([canonical_type, canonical_type])
-    if not include_negated:
-        relation_filters.append("r.negated = false")
     if not include_speculative:
         relation_filters.append("r.speculative = false")
 
@@ -147,6 +168,7 @@ def fetch_graph(
                 c.id AS claim_id,
                 c.document_id,
                 c.evidence_text,
+                COALESCE(c.claim_json->>'semantic_status','unknown')='pending' AS semantic_pending,
                 c.confidence
             FROM relation_evidence re
             JOIN claims c ON c.id = re.claim_id
@@ -162,6 +184,7 @@ def fetch_graph(
                 claim_id,
                 document_id,
                 evidence_text,
+                semantic_pending,
                 confidence
             FROM raw_scoped_evidence
             ORDER BY
@@ -190,6 +213,7 @@ def fetch_graph(
             COUNT(DISTINCT se.document_id)::INT AS document_count,
             AVG(se.confidence)::REAL AS confidence,
             MAX(se.confidence)::REAL AS max_confidence
+            , BOOL_OR(se.semantic_pending) AS semantic_pending
         FROM relations r
         JOIN scoped_evidence se ON se.relation_id = r.id
         JOIN entities subject ON subject.id = r.subject_entity_id
@@ -231,6 +255,8 @@ def fetch_graph(
             "summary": {
                 **connectivity_metrics([]),
                 "represented_document_count": 0,
+                **({'matched_relation_count': pagination['total'], 'displayed_relation_count': 0,
+                    'truncated': pagination['total'] > 0} if include_total else {}),
             },
         }
 
@@ -320,6 +346,11 @@ def fetch_graph(
                 **evidence_location(evidence),
                 "sentence": evidence["evidence_text"],
                 "confidence": evidence["confidence"],
+                "participants": (evidence.get('claim_json') or {}).get('participants', []),
+                "additional_evidence": (evidence.get('claim_json') or {}).get('additional_evidence', []),
+                "source_kind": (evidence.get('claim_json') or {}).get('source_kind', 'unknown'),
+                "semantic_status": (evidence.get('claim_json') or {}).get('semantic_status', 'unknown'),
+                "review_reasons": (evidence.get('claim_json') or {}).get('review_reasons', []),
             }
         )
 
@@ -357,11 +388,14 @@ def fetch_graph(
                 "confidence": row["confidence"],
                 "max_confidence": row["max_confidence"],
                 "negated": row["negated"],
+                "display_negated": display_negated({'predicate':row['predicate'], 'negated':row['negated'], 'qualifiers':row['qualifiers']}),
                 "speculative": row["speculative"],
                 "evidence_count": row["evidence_count"],
                 "document_count": row["document_count"],
                 "evidence": evidence[0]["sentence"] if evidence else None,
                 "evidence_samples": evidence,
+                "result_status": result_view({'qualifiers': row['qualifiers'], 'negated': row['negated'], 'predicate': row['predicate']}),
+                "review_status": 'pending' if row.get('semantic_pending') or any(s.get('semantic_status') == 'pending' for s in evidence) else 'unknown',
             }
         )
 
@@ -372,6 +406,8 @@ def fetch_graph(
         "summary": {
             **connectivity_metrics(edges),
             "represented_document_count": represented_document_count,
+            **({'matched_relation_count': pagination['total'], 'displayed_relation_count': len(edges),
+                'truncated': offset + len(edges) < pagination['total'] or offset > 0} if include_total else {}),
         },
     }
 

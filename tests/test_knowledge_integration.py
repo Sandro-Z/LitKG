@@ -1,8 +1,11 @@
 """Controlled models + real PostgreSQL; never reads .env or calls a live model."""
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from contextlib import ExitStack
+import hashlib
 import os
 from pathlib import Path
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -16,6 +19,7 @@ from fastapi.testclient import TestClient
 from app.graph_store import store_claim
 from app.schemas import CatalogBundle, ClaimBundle, Claim
 from app.retrieval import rebuild_derived, retrieve, answer_question, fetch_facts
+from pdf_fixtures import text_pdf
 
 
 @unittest.skipUnless(os.getenv('LITKG_TEST_DATABASE_URL'), 'Set disposable LITKG_TEST_DATABASE_URL')
@@ -84,6 +88,77 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             return store_claim(conn.cursor(),document_id=doc,chunk_id=chunk,claim=Claim.model_validate(data),extraction_model='controlled')
 
+    def test_batch22_concurrent_workers_and_pollers_do_not_rewrite_unchanged_snapshots(self):
+        documents = [self.doc, *[self.new_doc(self.kb) for _ in range(5)]]
+        with self.connect() as conn:
+            conn.execute("UPDATE documents SET status='queued' WHERE id=ANY(%s)", (documents,))
+            batches = [conn.execute("INSERT INTO ingestion_batches(knowledge_base_id,status) VALUES (%s,'queued') RETURNING id",
+                                   (self.kb,)).fetchone()['id'] for _ in range(2)]
+            for batch in batches:
+                for position,doc in enumerate(documents):
+                    conn.execute("INSERT INTO ingestion_batch_items(batch_id,position,filename,document_id,status) VALUES (%s,%s,'test.pdf',%s,'queued')",
+                                 (batch,position,doc))
+        barrier = Barrier(8)
+        def worker(doc):
+            barrier.wait(timeout=10)
+            for status in ('parsing','cataloging','extracting','done'):
+                self.tasks.update_document_status(doc, status)
+        def poller(batch):
+            barrier.wait(timeout=10)
+            for _ in range(12):
+                with self.connect() as conn:
+                    conn.execute("SET LOCAL statement_timeout='10s'")
+                    self.batch_status.sync_batch_status(conn.cursor(), batch)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(worker, doc) for doc in documents] + [pool.submit(poller,b) for b in batches]
+            for future in futures:
+                future.result(timeout=30)
+        for batch in batches:
+            with self.connect() as conn:
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+                self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'], 'done')
+                self.assertEqual(conn.execute("SELECT count(*) AS n FROM ingestion_batch_items WHERE batch_id=%s AND status='done'",(batch,)).fetchone()['n'], 6)
+            with self.connect() as conn:
+                before = conn.execute('SELECT id,xmin::TEXT,updated_at FROM ingestion_batch_items WHERE batch_id=%s ORDER BY id',(batch,)).fetchall()
+                snapshot = conn.execute('SELECT xmin::TEXT,updated_at FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()
+            with self.connect() as conn:
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+            with self.connect() as conn:
+                self.assertEqual(before, conn.execute('SELECT id,xmin::TEXT,updated_at FROM ingestion_batch_items WHERE batch_id=%s ORDER BY id',(batch,)).fetchall())
+                self.assertEqual(snapshot, conn.execute('SELECT xmin::TEXT,updated_at FROM ingestion_batches WHERE id=%s',(batch,)).fetchone())
+
+    def test_batch22_deadlock_aborts_transaction_then_retries_on_fresh_connection(self):
+        with self.connect() as conn:
+            batch = conn.execute("INSERT INTO ingestion_batches(knowledge_base_id,status) VALUES (%s,'queued') RETURNING id",(self.kb,)).fetchone()['id']
+            conn.execute("INSERT INTO ingestion_batch_items(batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'queued')",(batch,self.doc))
+        original = self.batch_status._sync_batch_status
+        calls = []
+        def injected(cur, batch_id):
+            calls.append(cur.connection)
+            if len(calls) == 1:
+                cur.execute("UPDATE ingestion_batch_items SET error='must rollback' WHERE batch_id=%s", (batch_id,))
+                cur.execute("DO $$ BEGIN RAISE EXCEPTION USING ERRCODE='40P01',MESSAGE='batch22 test deadlock'; END $$")
+            original(cur, batch_id)
+        with patch.object(self.batch_status, '_sync_batch_status', side_effect=injected):
+            self.batch_status.sync_batches_for_document(self.doc)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNot(calls[0], calls[1])
+        self.assertTrue(calls[0].closed)
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT error FROM ingestion_batch_items WHERE batch_id=%s',(batch,)).fetchone()['error'])
+            self.assertEqual(conn.execute('SELECT status FROM ingestion_batches WHERE id=%s',(batch,)).fetchone()['status'], 'done')
+        # API calls retry inside a savepoint, preserving their caller's prior
+        # writes while rolling back the failed attempt's item update.
+        calls.clear()
+        with self.connect() as conn:
+            conn.execute("UPDATE documents SET title='caller work' WHERE id=%s", (self.doc,))
+            with patch.object(self.batch_status, '_sync_batch_status', side_effect=injected):
+                self.batch_status.sync_batch_status(conn.cursor(), batch)
+            self.assertEqual(len(calls), 2)
+            self.assertIs(calls[0], calls[1])
+            self.assertIsNone(conn.execute('SELECT error FROM ingestion_batch_items WHERE batch_id=%s',(batch,)).fetchone()['error'])
+            self.assertEqual(conn.execute('SELECT title FROM documents WHERE id=%s',(self.doc,)).fetchone()['title'], 'caller work')
+
     def test_knowledge_base_rename_and_delete_cascade_preserve_shared_documents(self):
         other = self.new_kb()
         graph_job = str(uuid.uuid4())
@@ -108,6 +183,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         mismatch = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'test knowledge'})
         self.assertEqual(mismatch.status_code, 409)
         response = self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'})
+        self.assertEqual(response.json()['deleted_document_count'], 0)
+        self.assertEqual(response.json()['retained_shared_document_count'], 1)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get(f'/knowledge-bases/{self.kb}').status_code, 404)
         with self.connect() as conn:
@@ -122,6 +199,126 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             # A queued worker must skip a deleted KB instead of failing on its FK.
             self.assertEqual(rebuild_derived(conn.cursor(), self.kb)['changed_count'], 0)
         self.assertEqual(self.client.delete(f'/knowledge-bases/{self.kb}', params={'confirm_name':'修改后的库'}).status_code, 404)
+
+    def test_delete_last_owner_purges_caches_and_same_pdf_runs_full_pipeline_again(self):
+        sentence = 'Probe Q reduces IL-6.'
+        with text_pdf([sentence]) as pdf:
+            content = pdf.read_bytes()
+        catalog = CatalogBundle.model_validate({'entities':[
+            {'text':'Probe Q','type':'Drug','evidence':sentence},
+            {'text':'IL-6','type':'Protein','evidence':sentence}]})
+        claims = ClaimBundle.model_validate({'claims':[{
+            'subject':{'text':'Probe Q','type':'Drug'}, 'predicate':'REDUCES',
+            'object':{'text':'IL-6','type':'Protein'},
+            'evidence':{'sentence':sentence}, 'confidence':.9}]})
+        chunk = {'text':sentence,'section_title':'Results','page_start':1,'page_end':1,
+                 'page_spans':[{'start':0,'end':len(sentence),'page_start':1,'page_end':1}]}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.main, 'UPLOAD_DIR', Path(directory)), \
+                patch.object(self.tasks.parse_document, 'apply_async') as publish, \
+                patch.object(self.tasks, 'parse_pdf_to_chunks', return_value=({'title':'Controlled'},[chunk])) as parse, \
+                patch.object(self.tasks, 'extract_catalog', return_value=catalog) as catalog_model, \
+                patch.object(self.tasks, 'extract_claims', return_value=claims) as claims_model:
+            def upload(kb):
+                response = self.client.post(f'/knowledge-bases/{kb}/documents',
+                    files=[('files',('same.pdf',content,'application/pdf'))])
+                self.assertEqual(response.status_code,202,response.text)
+                item = response.json()['items'][0]
+                self.assertTrue(item['was_new_document'])
+                self.assertTrue(item['queued_for_processing'])
+                return item['document_id']
+            def process(doc):
+                self.tasks.parse_document.run(doc,publish=False)
+                self.tasks.build_document_catalog.run(doc,publish=False)
+                with self.connect() as conn:
+                    chunk_id = conn.execute('SELECT id FROM chunks WHERE document_id=%s',(doc,)).fetchone()['id']
+                self.tasks.extract_chunk.run(chunk_id,refresh=False)
+            first = upload(self.kb)
+            process(first)
+            with self.connect() as conn:
+                from app.catalog import archive_claims
+                archive_claims(conn.cursor(),first)
+                rebuild_derived(conn.cursor(),self.kb)
+                old_chunks = [r['id'] for r in conn.execute('SELECT id FROM chunks WHERE document_id=%s',(first,))]
+                conn.execute("INSERT INTO processing_leases (resource,owner) VALUES (%s,%s)",
+                             (f'litkg-chunk:{old_chunks[0]}',str(uuid.uuid4())))
+                job = str(uuid.uuid4())
+                conn.execute("INSERT INTO maintenance_jobs (id,knowledge_base_id,document_id,mode) VALUES (%s,%s,%s,'retry')",
+                             (job,self.kb,first))
+                conn.execute("INSERT INTO processing_leases (resource,owner) VALUES (%s,%s)",
+                             (f'litkg-maintenance:{job}',str(uuid.uuid4())))
+                self.assertGreater(conn.execute('SELECT count(*) AS n FROM processing_cache WHERE document_id=%s',(first,)).fetchone()['n'],0)
+                self.assertGreater(conn.execute('SELECT count(*) AS n FROM facts f JOIN claims c ON c.id=f.claim_id WHERE c.document_id=%s',(first,)).fetchone()['n'],0)
+            deleted = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(deleted.status_code,200,deleted.text)
+            # self.doc and the uploaded document both belonged exclusively to this KB.
+            self.assertEqual(deleted.json()['deleted_document_count'],2)
+            with self.connect() as conn:
+                for table in ['documents','chunks','document_catalogs','document_entities','processing_cache',
+                              'processing_attempts','claim_history','review_items','derived_dirty_documents',
+                              'maintenance_jobs','ingestion_batch_items','claims']:
+                    column = 'id' if table == 'documents' else 'document_id'
+                    self.assertEqual(conn.execute(f'SELECT count(*) AS n FROM {table} WHERE {column}=%s',(first,)).fetchone()['n'],0,table)
+                self.assertIsNone(conn.execute('SELECT 1 FROM documents WHERE sha256=%s',(hashlib.sha256(content).hexdigest(),)).fetchone())
+                self.assertIsNone(conn.execute('SELECT 1 FROM processing_leases WHERE resource=%s',(f'litkg-chunk:{old_chunks[0]}',)).fetchone())
+                self.assertIsNone(conn.execute('SELECT 1 FROM processing_leases WHERE resource=%s',(f'litkg-maintenance:{job}',)).fetchone())
+            # Tasks already queued for the old ID must not recreate deleted state.
+            self.assertEqual(self.tasks.parse_document.run(first)['status'],'superseded')
+            self.assertEqual(self.tasks.build_document_catalog.run(first)['status'],'superseded')
+            self.assertEqual(self.tasks.extract_chunk.run(old_chunks[0])['status'],'superseded')
+            self.assertEqual(self.tasks.refresh_derived.run(first)['status'],'superseded')
+            second = upload(self.new_kb())
+            self.assertNotEqual(second,first)
+            process(second)
+            self.assertEqual(publish.call_count,2)
+            self.assertEqual(parse.call_count,2)
+            self.assertEqual(catalog_model.call_count,2)
+            self.assertEqual(claims_model.call_count,2)
+
+    def test_last_shared_owner_deletion_removes_document(self):
+        other = self.new_kb()
+        with self.connect() as conn:
+            conn.execute('INSERT INTO knowledge_base_documents (knowledge_base_id,document_id) VALUES (%s,%s)',(other,self.doc))
+        first = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+        self.assertEqual(first.json()['retained_shared_document_count'],1)
+        last = self.client.delete(f'/knowledge-bases/{other}',params={'confirm_name':'test knowledge'})
+        self.assertEqual(last.json()['deleted_document_count'],1)
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE id=%s',(self.doc,)).fetchone())
+
+    def test_delete_while_pdf_is_stored_does_not_register_an_orphan(self):
+        from app.ingestion import store_pdf
+        with text_pdf(['Concurrent upload']) as pdf:
+            content = pdf.read_bytes()
+        def deleted_before_registration(*args):
+            stored = store_pdf(*args)
+            deleted = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(deleted.status_code,200)
+            return stored
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.main,'UPLOAD_DIR',Path(directory)), \
+                patch.object(self.main,'store_pdf',side_effect=deleted_before_registration), \
+                patch.object(self.tasks.parse_document,'apply_async') as publish:
+            response = self.client.post(f'/knowledge-bases/{self.kb}/documents',
+                files=[('files',('race.pdf',content,'application/pdf'))])
+        self.assertEqual(response.status_code,404,response.text)
+        publish.assert_not_called()
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE sha256=%s',(hashlib.sha256(content).hexdigest(),)).fetchone())
+
+    def test_delete_during_active_parse_discards_late_output(self):
+        def parse_then_delete(path):
+            response = self.client.delete(f'/knowledge-bases/{self.kb}',params={'confirm_name':'test knowledge'})
+            self.assertEqual(response.status_code,200,response.text)
+            return {}, [{'text':'Late parser output','section_title':'Results'}]
+        with patch.object(self.tasks,'parse_pdf_to_chunks',side_effect=parse_then_delete), \
+                patch.object(self.tasks.build_document_catalog,'apply_async') as publish:
+            result = self.tasks.parse_document.run(self.doc)
+        self.assertEqual(result['status'],'superseded')
+        publish.assert_not_called()
+        with self.connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM documents WHERE id=%s',(self.doc,)).fetchone())
+            self.assertIsNone(conn.execute('SELECT id FROM chunks WHERE document_id=%s',(self.doc,)).fetchone())
 
     def test_catalog_failure_resumes_segments_before_any_relationship_is_queued(self):
         texts = ['Interleukin-6 (IL-6) was studied.', 'Probe Q was used in the final paragraph.']
@@ -398,7 +595,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                 'object':{'text':'IL-6','type':'Protein','mention':'IL-6 secretion' if secretion else 'IL-6 expression',
                           'process':{'kind':'secretion' if secretion else 'expression','direction':'decreased' if secretion else 'unchanged'}},
                 'participants':[{'role':'cell_line','entity':{'text':'A549','type':'CellLine'}}] + ([{'role':'species','entity':{'text':'humans','type':'Organism'}}] if secretion else []),
-                'qualifiers':{'dose':5,'unit':'nM','time':'24 h' if secretion else '48 h'},
+                'qualifiers':{**({'dose':5,'unit':'nM'} if secretion else {}),'time':'24 h' if secretion else '48 h'},
                 'evidence':{'sentence':texts[1].split('. ')[0]+'.' if secretion else texts[2]},
                 'additional_evidence':[{'sentence':'This effect may occur in humans.'}] if secretion else [],
                 'confidence':.8,'negated':not secretion,'speculative':secretion}]})
@@ -417,7 +614,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             facts = fetch_facts(cur,self.kb,document_id=self.doc)
             self.assertEqual(len(facts),2)
             self.assertEqual(len(facts[0]['evidence']),2)
-            self.assertEqual([f['negated'] for f in facts],[False,True])
+            self.assertEqual([f['negated'] for f in facts],[False,False])
+            self.assertEqual(facts[1]['qualifiers']['result_status'],'no_effect_reported')
             self.assertEqual([f['speculative'] for f in facts],[True,False])
             self.assertEqual({p['role'] for p in facts[0]['participants']},{'subject','object','cell_line','species'})
             self.assertEqual({f['qualifiers']['processes'][0]['kind'] for f in facts},{'expression','secretion'})
@@ -545,7 +743,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         with self.connect() as conn:
             batch = conn.execute("INSERT INTO ingestion_batches (knowledge_base_id,status) VALUES (%s,'processing') RETURNING id",(self.kb,)).fetchone()['id']
             conn.execute("INSERT INTO ingestion_batch_items (batch_id,position,filename,document_id,status) VALUES (%s,0,'test.pdf',%s,'extracting')",(batch,self.doc))
-        bad = ClaimBundle.model_validate({'claims':[claim(),claim('Imaginary protein')]})
+        bad = ClaimBundle.model_validate({'claims':[claim(),claim('AKT1',predicate='BINDS_TO',evidence={'sentence':'Unstated sentence.'})]})
         def model(**kwargs):
             if kwargs.get('feedback'):
                 raise self.tasks.ModelOutputError('controlled failed correction','{}')
@@ -883,20 +1081,20 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         def row(name='AKT1', sentence=source):
             return {'subject':{'text':'Aspirin','type':'Drug'},'predicate':'REDUCES',
                 'object':{'text':name,'type':'Protein'},'evidence':{'sentence':sentence},'confidence':.9}
-        initial = ClaimBundle.model_validate({'claims':[row(),row(sentence='Aspirin cures every disease.'),row('Imaginary protein')]})
+        initial = ClaimBundle.model_validate({'claims':[row(),row(sentence='Aspirin cures every disease.'),row(sentence='Unstated evidence to repair.')]})
         unresolved = parse_model_bundle({'claims':[], 'resolution':{'outcome':'unresolved','reason':'Needs review'}},ClaimBundle)
         with patch.object(self.tasks,'extract_claims',side_effect=[initial,unresolved,unresolved]):
             self.assertEqual(self.tasks.extract_chunk.run(chunk,built['catalog_version'],0,refresh=False)['status'],'done')
         with self.connect() as conn:
             reviews = conn.execute("SELECT id,detail FROM review_items WHERE document_id=%s AND kind='claim_rejection' AND status='pending'",(self.doc,)).fetchall()
         self.assertEqual(len(reviews),2)
-        dismissed = next(r for r in reviews if r['detail']['claim']['evidence']['sentence']!='Aspirin reduces AKT1.')
+        dismissed = next(r for r in reviews if r['detail']['claim']['evidence']['sentence']=='Aspirin cures every disease.')
         response = self.client.post(f"/knowledge-bases/{self.kb}/reviews/{dismissed['id']}?status=dismissed")
         self.assertEqual(response.status_code,200)
         def correction(**kwargs):
             self.assertIn('feedback',kwargs)
             self.assertEqual(len(kwargs['previous_output']['claims']),1)
-            self.assertEqual(kwargs['previous_output']['claims'][0]['object']['text'],'Imaginary protein')
+            self.assertEqual(kwargs['previous_output']['claims'][0]['evidence']['sentence'],'Unstated evidence to repair.')
             return ClaimBundle.model_validate({'claims':[row()]})
         with patch.object(self.tasks,'extract_claims',side_effect=correction) as model:
             result = self.tasks.maintain_knowledge_base.run(self.maintenance_job())

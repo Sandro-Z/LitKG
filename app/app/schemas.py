@@ -3,10 +3,11 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, ValidationE
 from app.normalization import normalize_entity_type, clean_text
 import re
 from app.entity_types import TYPE_DEFINITIONS
+from app.processes import ProcessKind
 
 
 class Process(BaseModel):
-    kind: Literal["expression", "secretion", "activity"]
+    kind: ProcessKind
     direction: Literal["increased", "decreased", "unchanged", "unspecified"] = "unspecified"
 
 
@@ -49,13 +50,16 @@ class Evidence(BaseModel):
 
 class Claim(BaseModel):
     subject: Entity
-    predicate: str
+    predicate: str = Field(description="Controlled base predicate from /predicate-types; context and direction belong in qualifiers/process")
     object: Entity
     qualifiers: dict[str, Any] = Field(default_factory=dict)
     evidence: Evidence
     confidence: float = Field(ge=0.0, le=1.0)
     negated: bool = False
     speculative: bool = False
+    source_kind: Literal["primary", "cited", "background", "unknown"] = "unknown"
+    result_status: Literal["observed_change", "no_effect_reported", "not_significant", "unknown"] = "unknown"
+    semantic_status: Literal["accepted", "pending", "unknown"] = "unknown"
     participants: list[Participant] = Field(default_factory=list)
     additional_evidence: list[Evidence] = Field(default_factory=list)
     review_reasons: list[str] = Field(default_factory=list)

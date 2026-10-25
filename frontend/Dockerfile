@@ -6,6 +6,7 @@ COPY requirements.txt /frontend/requirements.txt
 RUN pip install --no-cache-dir -r /frontend/requirements.txt
 
 COPY app.py /frontend/app.py
+COPY graph.html graph_view.js /frontend/
 
 EXPOSE 8501
 

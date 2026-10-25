@@ -64,9 +64,12 @@ def _put(cur, kb, kind, source_id, content, sources, warnings):
     return True
 
 
-def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=100, offset=0):
+def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=100, offset=0, after_id=None):
     cur.execute("""SELECT f.*, c.document_id, c.chunk_id, c.confidence, c.claim_json,
+        c.extraction_model, c.processing_version AS claim_processing_version, ch.extraction_version AS chunk_extraction_version,
         d.title, d.doi, d.filename, ch.text AS source_text, ch.section_title,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'kind',r.kind,'status',r.status,'note',r.note) ORDER BY r.id)
+          FROM review_items r WHERE r.document_id=c.document_id AND (r.detail->>'claim_id'=c.id::TEXT OR r.detail->>'chunk_id'=c.chunk_id::TEXT)), '[]'::jsonb) AS reviews,
         (SELECT jsonb_agg(jsonb_build_object('entity_id',p.entity_id,'role',p.role,'mention',p.mention,
             'name',e.canonical_name,'type',e.entity_type,'normalized_id',e.normalized_id) ORDER BY p.role,p.entity_id)
          FROM fact_participants p JOIN entities e ON e.id=p.entity_id WHERE p.fact_id=f.id) AS participants,
@@ -78,13 +81,14 @@ def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=
           AND (%s::BIGINT[] IS NULL OR f.id=ANY(%s::BIGINT[]))
           AND (%s::BIGINT IS NULL OR c.document_id=%s)
           AND (%s::BIGINT IS NULL OR EXISTS (SELECT 1 FROM fact_participants p WHERE p.fact_id=f.id AND p.entity_id=%s))
-        ORDER BY f.id LIMIT %s OFFSET %s""", (kb, fact_ids, fact_ids, document_id, document_id, entity_id, entity_id, limit, offset))
+          AND (%s::BIGINT IS NULL OR f.id>%s)
+        ORDER BY f.id LIMIT %s OFFSET %s""", (kb, fact_ids, fact_ids, document_id, document_id, entity_id, entity_id, after_id, after_id, limit, offset))
     return cur.fetchall()
 
 
 def fact_text(fact):
     participants = "; ".join(f'{p["role"]}: {p["name"]} ({p["type"]}; mention={p["mention"]}; ID={p["normalized_id"] or "unknown"})' for p in fact["participants"] or [])
-    return (f'{participants}\n{fact["predicate"]}; negated={fact["negated"]}; speculative={fact["speculative"]}; '
+    return (f'{participants}\n{fact["predicate"]}; semantic_status={(fact.get("claim_json") or {}).get("semantic_status", "unknown")}; negated={fact["negated"]}; speculative={fact["speculative"]}; '
             f'conditions={stable_json(fact["qualifiers"])}\n' + "\n".join(e["sentence"] for e in fact["evidence"] or []))
 
 
@@ -180,7 +184,8 @@ def rebuild_derived(cur, kb, document_ids=None):
         entity = cur.fetchone()
         names = sorted({r["mention"] for r in mentions if r["mention"]} | {a for r in entries for a in [r["entry"]["text"], *r["entry"]["aliases"]]})
         refs = [{"document_id": d} for d in sorted({r["document_id"] for r in mentions + entries})]
-        cur.execute("""SELECT DISTINCT f.id,f.predicate,f.negated,f.speculative,f.qualifiers FROM facts f
+        cur.execute("""SELECT DISTINCT f.id,f.predicate,f.negated,f.speculative,f.qualifiers,
+            COALESCE(c.claim_json->>'semantic_status','unknown') AS semantic_status FROM facts f
             JOIN fact_participants p ON p.fact_id=f.id JOIN claims c ON c.id=f.claim_id JOIN documents d ON d.id=c.document_id
             JOIN knowledge_base_documents m ON m.document_id=c.document_id WHERE m.knowledge_base_id=%s AND p.entity_id=%s
             AND f.catalog_version IS NOT DISTINCT FROM d.catalog_version AND d.catalog_status IN ('done','legacy') ORDER BY f.id""", (kb, entity_id))
@@ -234,13 +239,16 @@ def retrieve(cur, kb, question, limit=12, hops=1):
             JOIN documents d ON d.id=c.document_id JOIN knowledge_base_documents m ON m.document_id=c.document_id
             JOIN fact_participants p ON p.fact_id=f.id WHERE m.knowledge_base_id=%s
             AND f.catalog_version IS NOT DISTINCT FROM d.catalog_version AND d.catalog_status IN ('done','legacy')
+            AND COALESCE(c.claim_json->>'semantic_status','unknown') <> 'pending'
             AND (p.entity_id=ANY(%s::BIGINT[]) OR p.entity_id IN (
                 SELECT p2.entity_id FROM fact_participants p2 JOIN facts f2 ON f2.id=p2.fact_id
                 JOIN claims c2 ON c2.id=f2.claim_id JOIN knowledge_base_documents m2 ON m2.document_id=c2.document_id
-                WHERE m2.knowledge_base_id=%s AND f2.id=ANY(%s::BIGINT[])))
+                WHERE m2.knowledge_base_id=%s AND f2.id=ANY(%s::BIGINT[])
+                AND COALESCE(c2.claim_json->>'semantic_status','unknown') <> 'pending'))
             ORDER BY f.id LIMIT %s""", (kb, entities, kb, ids, limit*3))
         ids = list(dict.fromkeys(ids + [r["id"] for r in cur.fetchall()]))[:limit*3]
     rows = fetch_facts(cur, kb, fact_ids=ids, limit=limit*3) if ids else []
+    rows = [row for row in rows if (row.get('claim_json') or {}).get('semantic_status') != 'pending']
     rows.sort(key=lambda r: (-scores["fact"].get(r["id"], 0), r["id"]))
     citations, facts, budget = [], [], 36000
     for row in rows:

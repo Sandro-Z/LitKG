@@ -255,8 +255,9 @@ def entity_identity(
         "the compound", "the drug", "the protein", "the gene",
     }
     local_label = non_specific or bool(
-        entity_family(canonical_type) == "Chemical"
-        and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I)
+        canonical_type in {"StudyGroup", "Biospecimen"}
+        or (entity_family(canonical_type) == "Chemical"
+            and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I))
     )
     document_scoped = bool(
         document_id is not None and external_id is None
