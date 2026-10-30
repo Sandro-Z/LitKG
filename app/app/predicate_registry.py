@@ -25,6 +25,7 @@ QUALIFIER_DEFINITIONS = {
     "metric": "Measured aspect or named metric; e.g. relative abundance, prevalence or Shannon index",
     "direction": "increased | decreased | unchanged | unspecified; focal group relative to reference group",
     "object_direction": "Legacy directional verb with unknown object aspect; preserve direction without inventing a process",
+    "result_interpretation": "not_assessed | not_detected | absence_reported | unresolved_negative; these are not measured null effects",
     "object.process": "Attach kind/direction to the affected object; projected as qualifiers.processes with role=object",
     "substrate": "Named substrate participant; do not encode it in the predicate",
     "product": "Named product participant; do not encode it in the predicate",

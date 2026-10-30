@@ -657,6 +657,7 @@ def search_knowledge_base_entities(
     knowledge_base_id: int,
     query: str | None = Query(None, max_length=200),
     entity_type: str | None = Query(None),
+    include_pending: bool = Query(False),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -703,7 +704,7 @@ def search_knowledge_base_entities(
                       ON member.document_id = claim.document_id
                     WHERE member.knowledge_base_id = %s
                       AND claim.subject_entity_id IS NOT NULL
-                      AND {current_claim_clause('claim')}
+                      AND {current_claim_clause('claim', include_pending=include_pending)}
 
                     UNION ALL
 
@@ -716,7 +717,7 @@ def search_knowledge_base_entities(
                       ON member.document_id = claim.document_id
                     WHERE member.knowledge_base_id = %s
                       AND claim.object_entity_id IS NOT NULL
-                      AND {current_claim_clause('claim')}
+                      AND {current_claim_clause('claim', include_pending=include_pending)}
 
                     UNION ALL
 
@@ -724,7 +725,7 @@ def search_knowledge_base_entities(
                     FROM fact_participants participant JOIN facts f ON f.id=participant.fact_id
                     JOIN claims claim ON claim.id=f.claim_id
                     JOIN knowledge_base_documents member ON member.document_id=claim.document_id
-                    WHERE member.knowledge_base_id=%s AND {current_claim_clause('claim')}
+                    WHERE member.knowledge_base_id=%s AND {current_claim_clause('claim', include_pending=include_pending)}
 
                     UNION ALL
 
@@ -793,6 +794,7 @@ def search_knowledge_base_relations(
     min_document_count: int = Query(1, ge=1),
     include_negated: bool = Query(True),
     include_speculative: bool = Query(True),
+    include_pending: bool = Query(False),
     evidence_limit: int = Query(3, ge=1, le=20),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -820,6 +822,7 @@ def search_knowledge_base_relations(
                 min_document_count=min_document_count,
                 include_negated=include_negated,
                 include_speculative=include_speculative,
+                include_pending=include_pending,
                 evidence_limit=evidence_limit,
                 limit=limit,
                 offset=offset,
@@ -1162,6 +1165,7 @@ def processing_status(knowledge_base_id: int, document_id: int):
     return {'document': document, 'catalog_quality': quality, 'processing_quality': processing_quality, 'chunks': chunks, 'attempts': attempts,
             'upgrade': {'reproject': 'No LLM; rebuilds facts/index/summaries from saved claims; cannot recover unrecorded semantics',
                         'reextract': 'LLM required; full saved text directory followed by all chunks',
+                         'reparse': 'Parse saved PDF again, then rebuild catalog and extract all chunks; replaces saved text corrections',
                         'retry': 'Resumes failed stages with validated segment caches',
                         'derived': 'Rebuilds index and extractive summaries; optional embeddings'}}
 
@@ -1265,7 +1269,7 @@ def start_maintenance(knowledge_base_id: int, request: MaintenanceRequest):
         with get_conn() as conn:
             conn.execute("UPDATE maintenance_jobs SET status='failed',error=%s WHERE id=%s::UUID", (f'Queue publication failed ({type(exc).__name__})',job_id))
         raise HTTPException(503, f'Queue unavailable; failed job {job_id} is recorded') from None
-    return {'task_id': job_id, 'mode': request.mode, 'llm_required': request.mode in {'reextract','retry'},
+    return {'task_id': job_id, 'mode': request.mode, 'llm_required': request.mode in {'reextract','reparse','retry'},
             'status_url': f'/knowledge-bases/{knowledge_base_id}/maintenance/{job_id}',
             'scope': 'Shared documents are updated in every knowledge base containing them'}
 

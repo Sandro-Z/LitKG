@@ -165,12 +165,13 @@
         "evidence_type": "experimental"
       }
     },
-    "expected": "accepted",
+    "expected": "pending",
     "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
     "expected_fields": {
       "result_status": "no_effect_reported",
       "negated": false
-    }
+    },
+    "attribution_expectation": "Source attribution is not supplied by this fixture; result normalization can pass while acceptance remains pending."
   },
   {
     "name": "negative-control-with-figure-abbreviations",
@@ -206,12 +207,13 @@
         "evidence_type": "experimental"
       }
     },
-    "expected": "accepted",
+    "expected": "pending",
     "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
     "expected_fields": {
       "result_status": "no_effect_reported",
       "negated": false
-    }
+    },
+    "attribution_expectation": "Source attribution is not supplied by this fixture; result normalization can pass while acceptance remains pending."
   },
   {
     "name": "negative-immune-control-with-same-quote",
@@ -247,12 +249,13 @@
         "evidence_type": "experimental"
       }
     },
-    "expected": "accepted",
+    "expected": "pending",
     "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
     "expected_fields": {
       "result_status": "no_effect_reported",
       "negated": false
-    }
+    },
+    "attribution_expectation": "Source attribution is not supplied by this fixture; result normalization can pass while acceptance remains pending."
   },
   {
     "name": "coordinated-fmt-and-antibody-needs-combination",
@@ -660,8 +663,9 @@
         "evidence_type": "experimental"
       }
     },
-    "expected": "accepted",
-    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
+    "attribution_expectation": "Source attribution is not supplied by this fixture; result normalization can pass while acceptance remains pending."
   },
   {
     "name": "joint-scheme-retains-both-interventions",
@@ -707,8 +711,9 @@
         }
       ]
     },
-    "expected": "accepted",
-    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields."
+    "expected": "pending",
+    "note": "Endpoint types/process are explicit test inputs; the source CSV did not export those backend fields.",
+    "attribution_expectation": "Source attribution is not supplied by this fixture; result normalization can pass while acceptance remains pending."
   },
   {
     "name": "csv-incomplete-4542",

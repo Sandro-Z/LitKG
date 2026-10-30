@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 from app.claim_export import fetch_claim_page
 from app.claims import prepare_claims
 from app.graph_query import fetch_graph
-from app.graph_store import store_claim
+from app.graph_store import store_claim, project_existing_claim
+from app.catalog import archive_claims
 from app.review_repair import load_scope, make_plan, apply_plan, rollback_run
 from app.schemas import ClaimBundle
 from test_api import TEST_ENV
@@ -177,7 +178,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'changed since preview'):
                 apply_plan(plan)
 
-    def test_legacy_negative_affects_keeps_raw_polarity_and_consistent_display_filter(self):
+    def test_legacy_negative_affects_requires_revalidation_before_null_effect_display(self):
         raw=candidate('FMT did not affect CD8 cells.',negated=True)
         raw['object']['process']['direction']='unchanged'
         kb,doc,_=self.seed(raw['evidence']['sentence'],raw=raw)
@@ -187,12 +188,18 @@ class ReviewIntegrationTests(unittest.TestCase):
             conn.execute('UPDATE relations SET negated=true,qualifiers=%s WHERE id IN (SELECT relation_id FROM facts WHERE claim_id IN (SELECT id FROM claims WHERE document_id=%s))',
                 (Jsonb({'processes':[{'role':'object','kind':'abundance','direction':'unchanged'}]}),doc))
             with conn.cursor() as cur:
-                page=fetch_claim_page(cur,knowledge_base_id=kb,result_status='no_effect_reported')
+                page=fetch_claim_page(cur,knowledge_base_id=kb,result_status='unknown')
                 self.assertTrue(page['claims'][0]['negated'])
-                self.assertFalse(page['claims'][0]['display_negated'])
+                self.assertTrue(page['claims'][0]['display_negated'])
+                graph=fetch_graph(cur,knowledge_base_id=kb,include_negated=False,include_total=True)
+                self.assertEqual(graph['total'],0)
+                archive_claims(cur,doc)
+                project_existing_claim(cur,page['claims'][0]['id'],raw,document_id=doc)
+                page=fetch_claim_page(cur,knowledge_base_id=kb,result_status='no_effect_reported')
+                self.assertFalse(page['claims'][0]['negated'])
                 graph=fetch_graph(cur,knowledge_base_id=kb,include_negated=False,include_total=True)
                 self.assertEqual(graph['total'],1)
-                self.assertTrue(graph['edges'][0]['negated'])
+                self.assertFalse(graph['edges'][0]['negated'])
                 self.assertFalse(graph['edges'][0]['display_negated'])
 
     def test_complete_facts_export_over_500_retains_real_ids_roles_and_both_evidence_quotes(self):

@@ -178,7 +178,7 @@ class QuestionRequest(BaseModel):
 
 
 class MaintenanceRequest(BaseModel):
-    mode: Literal["reproject", "reextract", "retry", "derived"]
+    mode: Literal["reproject", "reextract", "reparse", "retry", "derived"]
     document_id: Optional[int] = Field(default=None, ge=1)
 
 

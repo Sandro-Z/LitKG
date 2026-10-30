@@ -269,6 +269,7 @@ class ClaimCorrectionTests(unittest.TestCase):
         self.assertEqual(result.claims[0].subject.text,'monoclonal antibodies')
         self.assertEqual(result.claims[0].object.text,'PD-1')
         self.assertEqual(len(result.claims[0].participants),1)
+        self.assertEqual(result.claims[0].semantic_status,'pending')  # Missing attribution does not block a grounded role correction.
         correction.assert_called_once()
         changed=Claim.model_validate({**right,'participants':[],'semantic_status':'accepted'})
         self.assertFalse(retains_required_context(wrong,changed))

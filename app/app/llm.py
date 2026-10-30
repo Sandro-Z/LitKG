@@ -18,9 +18,9 @@ LLM_REVISION = os.environ.get("LLM_REVISION", "")
 LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "300"))
 LLM_MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "4096"))
 CATALOG_MAX_OUTPUT_TOKENS = int(os.environ.get("CATALOG_MAX_OUTPUT_TOKENS", str(LLM_MAX_OUTPUT_TOKENS)))
-CATALOG_PROMPT_VERSION = "catalog-prompt-v3-microbiome"
+CATALOG_PROMPT_VERSION = "catalog-prompt-v4-scoped"
 CLAIMS_MAX_OUTPUT_TOKENS = int(os.environ.get("CLAIMS_MAX_OUTPUT_TOKENS", "8192"))
-CLAIMS_PROMPT_VERSION = "claims-prompt-v7-review-evidence"
+CLAIMS_PROMPT_VERSION = "claims-prompt-v7-event-roles"
 
 client = OpenAI(
     base_url=LLM_BASE_URL,
@@ -189,12 +189,21 @@ PRODUCES/CONSUMES/TRANSFORMS/ENCODES/CATALYZES 可记录预测，但不能改写
 - “None”等表内标签是响应类别，不作生物学分类；单组高丰度描述不证明两供者有差异。测量/统计方法句本身不证明结果；网络中心性不证明干预机制。
 - 保留药物混杂、饮食、供受者基因型、组织/细胞、物种和时间。体重、体脂率、体脂相对增长分别建指标；磷酸化必须保留蛋白、残基/位置及方向，不能丢失Y612等身份限定。
 - may/could/we propose等可能为作者假说；引用前人结果的source_kind与speculative分开。无法从当前证据判断的语义角色/归属，在review_reasons中以semantic:开头说明待复核原因。
+- 先解析事件角色，再映射谓词：处理/敲除/暴露是作用者，被测基因/蛋白/菌群/指标是终点；组别、培养基、宿主和时间是上下文。不能把“结果在处理后改变”反成结果 AFFECTS 处理。
+- 表达量变化锚定具体基因/RNA/蛋白；“突变株中基因表达下降”用突变/处理 -> 基因的 expression，并保留菌株和野生型参照；不可用基因自环或“组别 expression”代替。
+- DNA提取、移液、组装、注释、统计计算、绘图都是实验/计算方法，不是生物过程。只有明确的测量关系才用 MEASURED_BY；样品经提取、序列经注释不等于被该方法测量。
+- 基因组/基因簇包含基因表示组成关系，明确支持时用基因 PART_OF 对应基因组/基因簇；不能把基因存在、功能注释、表达量变化和催化活性当作同一件事。ENCODES 指编码产物/功能，不能用来代替所有含有基因的关系。
+- DIFFERS_BETWEEN 的两组必须是同一被测终点的真实比较臂。预测模型、训练标签、预测目标、模型性能指标分别保存，不能将模型/特征集合/标签拼成受试组；不支持的关系保留 unresolved。
+- 分别核对 respectively/并列列表的元素配对；只输出原文实际支持的每一对，绝不做笛卡尔积。产品、底物、介质优先用有类型且有逐字 mention 的 participants，可重复同一角色保存多个产物。
+- wild-type、WT、AH18、strain 1、this site 等不能单凭短标签跨论文合并；只有当前原文明确建立全称/背景时才链接目录，不猜补物种前缀或突变背景。
+- 表格错列、相邻文章混入、μ丢失等输入问题不得凭常识修正文献。保留逐字证据并标 semantic: 输入需核图；尤其 mg/mM 不自动改成微单位。
 
 抽取规则：
 1. 只抽取文本中明确支持的事实。
 2. 每条 claim 必须包含原文 evidence sentence。
-3. 统一阴性结果：did not affect / unchanged 表示 result_status=no_effect_reported，AFFECTS 的 object.process.direction=unchanged 且 negated=false；不要双重否定。
+3. 只有明确测量的同一终点、同一比较臂的 did not affect / unchanged 才用 result_status=no_effect_reported，AFFECTS 的 object.process.direction=unchanged 且 negated=false。
    无显著差异使用 result_status=not_significant，negated=false；保留报告的估计方向，未报告则 unspecified，不能声称已证明无效。只有明确否认关系本身才 negated=true。
+    未检测到、未测量/未测试、没有生成某产物、否认结合/致病等不是“零效应”。这些 result_status=unknown；未测试/未检出分别用 qualifiers.result_interpretation=not_assessed|not_detected，关系否定与测量结果分开。
 4. speculative 仅用于推测、假设和未来工作；来源另用 source_kind=primary|cited|background|unknown，不因背景/引用就标为推测。旧数据和未交代来源用 unknown，不猜补。
 5. 不确定时不要抽取。
 6. 只有片段明确给出 ChEBI、PubChem CID、UniProt、NCBI Gene、DrugBank

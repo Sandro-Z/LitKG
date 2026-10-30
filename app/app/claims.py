@@ -1,9 +1,10 @@
 """Candidate-local source validation; incomplete assertions are never projected."""
-from app.catalog import resolve_bundle, digest
-from app.schemas import ClaimBundle
+from app.catalog import resolve_bundle, digest, source_contains, source_has_identifier
+from app.schemas import Claim, ClaimBundle
 from app.schemas import Participant, Entity
 from app.predicate_registry import normalize_registered_claim
 from app.normalization import clean_text, normalize_predicate
+from app.facts import normalized_participants
 
 
 def normalize_comparison_groups(claim, repairs):
@@ -61,7 +62,7 @@ def retains_required_context(original, corrected):
         and (original.get('subject') or {}).get('type') in {'Protein','Gene'}
         and (original.get('object') or {}).get('type') in {'Drug','Intervention'}
         and corrected.subject.type in {'Drug','Intervention'} and corrected.object.type in {'Protein','Gene'}
-        and corrected.semantic_status == 'accepted'
+        and corrected.semantic_status in {'accepted', 'pending'}
     )
     for role in ('subject', 'object'):
         before_entity = original.get({'subject':'object','object':'subject'}[role] if reverse_target else role)
@@ -110,7 +111,25 @@ class ClaimValidationError(ValueError):
         self.bundle = bundle
 
 
-def prepare_claims(bundle, entries, chunk, version):
+def _validate_legacy_source(claim, chunk):
+    """Validate saved evidence without inventing a directory for a legacy document."""
+    quotes = [e.sentence for e in [claim.evidence, *claim.additional_evidence]]
+    if any(not source_contains(chunk['text'], quote) for quote in quotes):
+        raise ValueError('Legacy evidence is absent from the saved chunk')
+    for role, entity in [('subject',claim.subject),('object',claim.object),*[(p.role,p.entity) for p in claim.participants]]:
+        names = [entity.mention or entity.text]
+        for alias, expansion in chunk.get('abbreviation_map',{}).items():
+            if expansion and clean_text(expansion).casefold() == clean_text(entity.text).casefold():
+                names.append(alias)
+        if not any(source_contains(quote,name) for quote in quotes for name in names):
+            raise ValueError(f'Legacy {role} is not grounded in its quoted evidence')
+        if entity.normalized_id and not source_has_identifier(chunk['text'],entity.normalized_id):
+            reason = 'semantic: legacy identifier lacks current source confirmation'
+            if reason not in claim.review_reasons:
+                claim.review_reasons.append(reason)
+
+
+def prepare_claims(bundle, entries, chunk, version, *, resolve_catalog=True):
     result = bundle.model_copy(deep=True)
     result.claims = []
     result._candidate_indices = []
@@ -122,7 +141,13 @@ def prepare_claims(bundle, entries, chunk, version):
         repairs = []
         try:
             normalize_comparison_groups(candidate.claims[0], repairs)
-            resolve_bundle(candidate, entries, chunk, version, repairs)
+            # Promote before grounding, so products/mediators receive the same
+            # quote and directory validation as the binary endpoints.
+            candidate.claims[0].participants = normalized_participants(candidate.claims[0])
+            if resolve_catalog:
+                resolve_bundle(candidate, entries, chunk, version, repairs)
+            else:
+                _validate_legacy_source(candidate.claims[0], chunk)
             normalize_registered_claim(candidate.claims[0], repairs)
             from app.claim_semantics import normalize_result, check_semantics
             normalize_result(candidate.claims[0], repairs)
@@ -136,6 +161,20 @@ def prepare_claims(bundle, entries, chunk, version):
             result._repair_ids.append(repair_id)
             result._claim_repairs.extend({'claim_index': index, **repair} for repair in repairs)
     return result
+
+
+def revalidate_existing_claim(claim_json, entries, chunk, version, *, use_catalog=True):
+    """Use current candidate rules on legacy projections, preserving rejected assertions."""
+    original = Claim.model_validate(claim_json)
+    result = prepare_claims(ClaimBundle(claims=[original]), entries, chunk, version, resolve_catalog=use_catalog)
+    if result.claims:
+        return result.claims[0]
+    original.semantic_status = 'pending'
+    for rejected in result._claim_rejections:
+        reason = 'semantic: legacy validation failed: ' + rejected['error']
+        if reason not in original.review_reasons:
+            original.review_reasons.append(reason)
+    return original
 
 
 def combine_claims(bundles):

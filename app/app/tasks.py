@@ -911,10 +911,10 @@ def maintain_knowledge_base(job_id: str):
                             result = {"projected_count":len(claims),"llm_called":False,"catalog_complete":document["catalog_status"] == "done"}
                         refresh_derived.run(doc_id)
                     else:
-                        force = job["mode"] == "reextract"
+                        force = job["mode"] in {"reextract", "reparse"}
                         with get_conn() as conn:
                             saved = conn.execute('SELECT count(*) AS n FROM chunks WHERE document_id=%s', (doc_id,)).fetchone()['n']
-                        if not saved:
+                        if not saved or job['mode'] == 'reparse':
                             parsed = parse_document.run(doc_id, publish=False)
                             if parsed.get('status') == 'busy':
                                 raise ValueError('Document is busy')

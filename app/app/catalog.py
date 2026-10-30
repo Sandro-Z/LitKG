@@ -16,12 +16,12 @@ from app.normalization import (
     identity_modifiers,
 )
 
-PROCESSING_VERSION = "litkg-v3.4-microbiome"
-CATALOG_VERSION = "catalog-v4-microbiome"
+PROCESSING_VERSION = "litkg-v3.5-audit"
+CATALOG_VERSION = "catalog-v5-scoped"
 # Vocabulary and prompt versions are part of cache keys; the transport stays
 # unchanged, but old extractions must not mask newly supported entity types.
 CATALOG_CACHE_VERSION = "catalog-v2-grounded-repair"
-EXTRACTION_VERSION = "claims-v6-review-semantics"
+EXTRACTION_VERSION = "claims-v7-event-roles"
 
 
 def digest(value):

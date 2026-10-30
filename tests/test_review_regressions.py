@@ -26,7 +26,7 @@ def entity(text, type_, process=None):
 def candidate(sentence, subject=None, object_=None, predicate='AFFECTS', **extra):
     return {'subject': subject or entity('FMT', 'Intervention'), 'predicate': predicate,
         'object': object_ or entity('CD8 cells', 'CellType', {'kind':'abundance', 'direction':'increased'}),
-        'evidence': {'sentence': sentence}, 'confidence': .9, 'qualifiers': {'evidence_type':'experimental'}, **extra}
+        'evidence': {'sentence': sentence}, 'confidence': .9, 'source_kind':'primary', 'qualifiers': {'evidence_type':'experimental'}, **extra}
 
 
 def prepared(value, text=None):
@@ -73,7 +73,7 @@ class ReviewSemanticsTests(unittest.TestCase):
         self.assertFalse(claim.negated)
         self.assertEqual(claim.result_status, 'not_significant')
         self.assertEqual(claim.object.process.direction, 'unspecified')
-        self.assertEqual(result_view({'predicate':'AFFECTS', 'negated':True}), 'no_effect_reported')
+        self.assertEqual(result_view({'predicate':'AFFECTS', 'negated':True}), 'unknown')
         self.assertEqual(result_view({'predicate':'AFFECTS'}), 'unknown')  # CSV without direction is not an error.
         row['object']['process']['direction']='unchanged'
         self.assertEqual(prepared(row).claims[0].object.process.direction,'unspecified')
@@ -115,7 +115,9 @@ class ReviewSemanticsTests(unittest.TestCase):
         self.assertFalse(result.claims)
 
     def test_legacy_defaults_and_document_local_identities(self):
-        claim = Claim.model_validate(candidate('FMT increased CD8 cells.', speculative=True))
+        raw = candidate('FMT increased CD8 cells.', speculative=True)
+        raw.pop('source_kind')
+        claim = Claim.model_validate(raw)
         self.assertEqual(claim.source_kind, 'unknown')
         self.assertTrue(claim.speculative)
         for name, typ in [('Rs','StudyGroup'), ('sample 1','Biospecimen'), ('OTU1','SequenceFeature')]:

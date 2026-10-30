@@ -33,11 +33,29 @@ def normalized_participants(claim):
     """Project explicit named qualifier roles, including legacy claim records."""
     values = list(claim.participants)
     explicit_roles = {p.role for p in values}
-    for role, entity_type in {'cell_line':'CellLine','species':'Organism','assay':'Assay','tissue':'Tissue','cell_type':'CellType',
-                              'comparison_group':'StudyGroup','reference_group':'StudyGroup'}.items():
+    defaults = {'cell_line':'CellLine','species':'Organism','assay':'Assay','tissue':'Tissue','cell_type':'CellType',
+                'comparison_group':'StudyGroup','reference_group':'StudyGroup'}
+    for role in (*defaults, 'substrate', 'product', 'mediator', 'intervention', 'co_intervention', 'host'):
         value = claim.qualifiers.get(role)
-        if role not in explicit_roles and isinstance(value, str) and value.strip():
-            values.append(Participant(role=role,entity=Entity(text=value,type=entity_type)))
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                try:
+                    entity = Entity.model_validate(candidate)
+                    if not entity.text.strip() or not entity.type or entity.type == 'Other':
+                        raise ValueError('Named qualifier role needs an explicit entity type')
+                except ValueError:
+                    reason = f'semantic: invalid typed qualifier participant {role}'
+                    if reason not in claim.review_reasons:
+                        claim.review_reasons.append(reason)
+                    continue
+            elif role in defaults and role not in explicit_roles and isinstance(candidate, str) and candidate.strip():
+                entity = Entity(text=candidate, type=defaults[role])
+            else:
+                continue  # Bare product/mediator names do not establish a type.
+            key = (role, entity.type, (entity.mention or entity.text).strip().casefold())
+            if not any((p.role, p.entity.type, (p.entity.mention or p.entity.text).strip().casefold()) == key for p in values):
+                values.append(Participant(role=role, entity=entity))
     return values
 
 

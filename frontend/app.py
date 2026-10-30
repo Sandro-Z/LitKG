@@ -906,9 +906,10 @@ def main():
                     st.json(api_get(prefix+f'/documents/{doc_id}/catalog'))
                 except Exception as exc:
                     st.error(f'读取失败：{exc}')
-            mode = st.selectbox('维护方式', ['derived','reproject','retry','reextract'], format_func=lambda k: {
+            mode = st.selectbox('维护方式', ['derived','reproject','retry','reextract','reparse'], format_func=lambda k: {
                 'derived':'更新索引和摘要', 'reproject':'重新投影已有记录（无需 LLM）',
-                'retry':'重试失败阶段（可能调用 LLM）','reextract':'重新抽取全文（需要 LLM）'}[k])
+                'retry':'重试失败阶段（可能调用 LLM）','reextract':'从已保存文本重新抽取（需要 LLM）',
+                'reparse':'从原始 PDF 重新解析并抽取（需要 LLM）'}[k])
             st.caption('同一 PDF 可属于多个知识库；更新共享文献会更新所有包含它的知识库。重新投影不能补回旧模型未记录的语义。')
             job_key = f'maintenance_{selected_knowledge_base_id}'
             if st.button('开始维护'):

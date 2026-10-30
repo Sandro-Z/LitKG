@@ -253,9 +253,14 @@ def entity_identity(
     non_specific = normalize_alias(canonical_name) in {
         "unknown", "unspecified", "unnamed", "compound", "drug", "protein", "gene",
         "the compound", "the drug", "the protein", "the gene",
+        "this site", "that site", "these sites", "this gene", "these genes",
+        "this strain", "these strains", "wild type", "wild-type", "wt", "mutant",
     }
     local_label = non_specific or bool(
         canonical_type in {"SequenceFeature", "StudyGroup", "Biospecimen"}
+        or (canonical_type == "MicrobialStrain" and re.fullmatch(
+            r"(?:(?:strain|isolate)\s+)?(?:[a-z]{1,12}[-_ ]*\d+[a-z0-9_.-]*|wild[- ]?type|wt|mutant|parental|control)",
+            canonical_name, flags=re.I))
         or (canonical_type == "Genome" and re.fullmatch(r"(?:MAG|bin|genome)[_ #.-]*\d+[a-z]?", canonical_name, flags=re.I))
         or (entity_family(canonical_type) == "Chemical"
             and re.fullmatch(r"(?:compound|drug|molecule|inhibitor|sample|probe)\s*[-#]?\s*(?:\d+[a-z]?|[a-z])", canonical_name, flags=re.I))

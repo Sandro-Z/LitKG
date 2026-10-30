@@ -75,7 +75,7 @@ class ApiTests(unittest.TestCase):
             response = self.client.get("/knowledge-bases/3/relations", params={
                 "query": "EGFR", "object": "EGFR", "subject": "Gefitinib",
                 "entity_id": 12, "direction": "incoming", "predicate": "inhibits",
-                "include_negated": "false", "limit": 20, "offset": 40,
+                "include_negated": "false", "include_pending":"true", "limit": 20, "offset": 40,
             })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), result)
@@ -85,6 +85,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(kwargs["entity_id"], 12)
         self.assertEqual(kwargs["direction"], "incoming")
         self.assertFalse(kwargs["include_negated"])
+        self.assertTrue(kwargs['include_pending'])
         self.assertEqual((kwargs["limit"], kwargs["offset"]), (20, 40))
 
     def test_graph_route_supports_entity_search(self):

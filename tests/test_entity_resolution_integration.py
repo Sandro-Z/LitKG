@@ -124,7 +124,13 @@ class EntityResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(report["after"]["largest_component_ratio"], 1.0)
         stored = self.get("claims").json()["claims"]
         self.assertEqual([row["id"] for row in stored], claim_ids)
-        self.assertEqual([row["claim_json"] for row in stored], [claim.model_dump(mode="json") for claim in claims])
+        for row, original in zip(stored,claims):
+            self.assertEqual(row['claim_json']['semantic_status'],'pending')
+            for field in ('subject','object','evidence'):
+                self.assertEqual(row['claim_json'][field],original.model_dump(mode='json')[field])
+            with self.connect() as conn:
+                snapshots=conn.execute('SELECT snapshot FROM claim_history WHERE original_claim_id=%s',(row['id'],)).fetchall()
+                self.assertIn(original.model_dump(mode='json'),[s['snapshot']['claim_json'] for s in snapshots])
         self.assertEqual(stored[0]["object_entity_id"], stored[1]["subject_entity_id"])
         self.assertEqual(stored[0]["doi"], "10.1234/test")
         repeated = self.rebuild()
@@ -139,10 +145,13 @@ class EntityResolutionIntegrationTests(unittest.TestCase):
         report = self.rebuild()
         self.assertEqual(report["failed_count"], 0)
         self.assertEqual((report["before"]["node_count"], report["after"]["node_count"]), (3, 2))
-        relation = self.get("relations").json()["relations"][0]
+        # Synthetic legacy quotes do not establish a measured inhibition. Keep
+        # them reviewable while checking identity/evidence preservation.
+        self.assertEqual(self.get('relations').json()['relations'],[])
+        relation = self.get("relations",params={'include_pending':True}).json()["relations"][0]
         self.assertEqual((relation["document_count"], relation["evidence_count"]), (2, 2))
         self.assertEqual({row["id"] for row in self.get("claims").json()["claims"]}, {first_id, second_id})
-        entities = self.get("entities", {"query": "PubChem:2244"}).json()["entities"]
+        entities = self.get("entities", {"query": "PubChem:2244", "include_pending":True}).json()["entities"]
         self.assertEqual(len(entities), 1)
         self.assertEqual(set(entities[0]["identifiers"]), {"CHEBI:15365", "PubChem:2244"})
 
@@ -236,7 +245,7 @@ class EntityResolutionIntegrationTests(unittest.TestCase):
         other_claim = self.get("claims", kb=self.other_kb).json()["claims"][0]
         self.assertEqual(other_claim["id"], other_claim_id)
         self.assertEqual(other_claim["claim_json"], original.model_dump(mode="json"))
-        first_relation = self.get("relations").json()["relations"][0]
+        first_relation = self.get("relations",params={'include_pending':True}).json()["relations"][0]
         self.assertEqual(first_relation["evidence_samples"][0]["document_id"], first[0])
 
     def test_enqueue_failure_is_recorded_without_leaving_a_queued_job(self):

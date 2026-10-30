@@ -210,8 +210,12 @@ class Batch22RegressionTests(unittest.TestCase):
 
     def test_chunk1536_and_recursive_segments_keep_word_boundaries_offsets_and_coverage(self):
         sample = FIXTURE['boundary']
-        self.assertEqual(sample['text'][-800:], sample['next_text'][:800])
-        source = sample['text'] + sample['next_text'][800:]
+        # Persisted chunks can trim the nominal overlap at their edges. Locate
+        # the actual exact overlap; a hard-coded 800 discarded part of efficacy.
+        overlap = max(n for n in range(1,min(len(sample['text']),len(sample['next_text']))+1)
+                      if sample['text'][-n:] == sample['next_text'][:n])
+        self.assertGreaterEqual(overlap,750)
+        source = sample['text'] + sample['next_text'][overlap:]
         self.assertTrue(sample['text'].endswith('efficac'))
         self.assertIn('immunotherapy efficacy', source)
         pieces = list(segments([{'id':1536,'text':source}], 3000))

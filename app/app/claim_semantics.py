@@ -9,8 +9,13 @@ from app.catalog import source_contains
 
 
 NOT_SIGNIFICANT = re.compile(r'\b(?:not statistically significant|no significant (?:difference|change|effect)|did not significantly|not significantly (?:different|alter|affect|change))\b', re.I)
-NO_EFFECT = re.compile(r'\b(?:did not (?:affect|alter|change)|had no effect on|failed to (?:affect|influence)|remained unchanged|was unchanged|were unchanged)\b', re.I)
+NO_EFFECT = re.compile(r'\b(?:did not (?:affect|alter|change)|had no effect on|failed to (?:affect|influence)|unchanged|remained (?:stable|constant)|no (?:observed )?(?:difference|change|effect)|(?:was|were) not (?:affected|altered|changed))\b', re.I)
 CAUSAL = {'CAUSES', 'TREATS', 'PREVENTS', 'AFFECTS', 'ACTIVATES', 'INHIBITS'}
+OUTCOMES = {'AFFECTS', 'ACTIVATES', 'INHIBITS', 'DIFFERS_BETWEEN'}
+NOT_ASSESSED = re.compile(r'\b(?:not (?:tested|assessed|measured|examined|evaluated)|did not (?:test|assess|measure|examine|evaluate))\b', re.I)
+NOT_DETECTED = re.compile(r'\b(?:not detected|undetectable|below (?:the )?(?:limit of detection|detection limit))\b', re.I)
+NON_OUTCOMES = {'not_assessed', 'not_detected', 'absence_reported', 'unresolved_negative'}
+PROCEDURAL = re.compile(r'\b(?:DNA extraction|RNA extraction|liquid handling|pipetting|centrifugation|genome assembly|gene annotation|functional annotation|read mapping|data plotting|statistical analysis)\b', re.I)
 
 
 def outcome_clause(claim):
@@ -38,24 +43,27 @@ def outcome_clause(claim):
 
 
 def result_view(value):
-    """Read both legacy negation and process encodings; missing direction is unknown."""
+    """Read endpoint-specific outcome metadata; logical negation is not a null effect."""
     raw = value.get('claim_json') or value
     q = value.get('qualifiers') or raw.get('qualifiers') or {}
-    processes = list(q.get('processes') or [])
-    for role in ('subject', 'object'):
-        if (raw.get(role) or {}).get('process'):
-            processes.append({'role': role, **raw[role]['process']})
-    status = raw.get('result_status', q.get('result_status', 'unknown'))
-    if status == 'unknown':
-        if any(p.get('direction') == 'unchanged' for p in processes) or q.get('direction') == 'unchanged' or q.get('object_direction') == 'unchanged':
-            status = 'no_effect_reported'
-        elif value.get('negated', raw.get('negated', False)) and raw.get('predicate', value.get('predicate')) == 'AFFECTS' and not (
-                any(p.get('direction') in {'increased','decreased'} for p in processes)
-                or q.get('direction') in {'increased','decreased'} or q.get('object_direction') in {'increased','decreased'}):
-            status = 'no_effect_reported'
-        elif not value.get('negated', raw.get('negated', False)) and (any(p.get('direction') in {'increased', 'decreased'} for p in processes) or q.get('direction') in {'increased', 'decreased'} or q.get('object_direction') in {'increased', 'decreased'}):
-            status = 'observed_change'
-    return status
+    predicate = value.get('predicate', raw.get('predicate'))
+    if predicate not in OUTCOMES or q.get('result_interpretation') in NON_OUTCOMES:
+        return 'unknown'
+    for status in (raw.get('result_status'), q.get('result_status')):
+        if status in {'no_effect_reported', 'not_significant', 'observed_change'}:
+            return status
+    if value.get('negated', raw.get('negated', False)):
+        return 'unknown'
+    role = 'subject' if predicate == 'DIFFERS_BETWEEN' else 'object'
+    directions = [((raw.get(role) or {}).get('process') or {}).get('direction')]
+    directions += [p.get('direction') for p in (q.get('processes') or []) if isinstance(p, dict) and p.get('role') == role]
+    directions.append(q.get('direction' if role == 'subject' else 'object_direction'))
+    changed = any(d in {'increased', 'decreased'} for d in directions)
+    if changed and 'unchanged' not in directions:
+        return 'observed_change'
+    if 'unchanged' in directions and not changed:
+        return 'no_effect_reported'
+    return 'unknown'
 
 
 def normalize_result(claim, repairs):
@@ -64,10 +72,25 @@ def normalize_result(claim, repairs):
     quote = claim.evidence.sentence
     clause = outcome_clause(claim)
     outcome = claim.predicate in {'AFFECTS','DIFFERS_BETWEEN'}
-    if outcome and clause and NOT_SIGNIFICANT.search(clause):
+    unavailable = clause and (NOT_ASSESSED.search(clause) or NOT_DETECTED.search(clause))
+    if outcome and unavailable:
+        status = 'unknown'
+        claim.qualifiers['result_interpretation'] = 'not_assessed' if NOT_ASSESSED.search(clause) else 'not_detected'
+        reason = 'semantic: lack of measurement/detection must not be interpreted as a measured null effect'
+        if reason not in claim.review_reasons:
+            claim.review_reasons.append(reason)
+    elif outcome and clause and NOT_SIGNIFICANT.search(clause):
         status = 'not_significant'
-    if outcome and clause and NO_EFFECT.search(clause) and not NOT_SIGNIFICANT.search(clause):
+    elif outcome and clause and NO_EFFECT.search(clause):
         status = 'no_effect_reported'
+    elif outcome and status == 'no_effect_reported':
+        status = 'unknown'
+        claim.qualifiers['result_interpretation'] = 'unresolved_negative'
+        reason = 'semantic: measured null effect is not explicit in the unique endpoint clause'
+        if reason not in claim.review_reasons:
+            claim.review_reasons.append(reason)
+    if claim.predicate not in OUTCOMES and before['result_status'] != 'unknown':
+        claim.review_reasons.append('semantic: result_status requires a measured outcome; relation negation remains separate')
     claim.result_status = status
     if status == 'no_effect_reported' and claim.predicate in {'AFFECTS', 'DIFFERS_BETWEEN'}:
         claim.negated = False
@@ -75,7 +98,8 @@ def normalize_result(claim, repairs):
         if entity.process:
             entity.process.direction = 'unchanged'
         else:
-            claim.qualifiers['object_direction'] = 'unchanged'
+            key = 'direction' if claim.predicate == 'DIFFERS_BETWEEN' else 'object_direction'
+            claim.qualifiers[key] = 'unchanged'
         if claim.predicate == 'DIFFERS_BETWEEN':
             claim.qualifiers['direction'] = 'unchanged'
     if status == 'not_significant':
@@ -115,7 +139,21 @@ def check_semantics(claim, repairs):
     if claim.predicate == 'TARGETS' and s.type in {'Protein', 'Gene'} and o.type in {'Drug', 'Intervention', 'TherapeuticIntervention'}:
         raise ValueError('TARGETS direction must be intervention/antibody -> molecular target')
 
-    risks = [reason for reason in claim.review_reasons if reason.startswith('semantic:')]
+    risks = [reason for reason in claim.review_reasons if reason.startswith(('semantic:', 'predicate registry:'))]
+    if claim.source_kind == 'unknown':
+        risks.append('semantic: source attribution is unknown; verify primary result versus cited/background statement')
+    if any(e.type in {'BiologicalProcess', 'MicrobialFunction'} and PROCEDURAL.search(e.text) for e in (s, o)):
+        risks.append('semantic: laboratory/computational procedure is typed as a biological process')
+    if claim.predicate == 'MEASURED_BY' and re.search(r'\b(?:extract\w*|assembl\w*|annotat\w*|plott\w*|pipett\w*)\b', quote, re.I):
+        if not re.search(r'\b(?:measur\w*|quantif\w*|detect\w*|assay\w*)\b', quote, re.I):
+            risks.append('semantic: sample preparation/annotation is not an established measurement relationship')
+    if claim.predicate in OUTCOMES and s.process and o.type in {'Intervention', 'TherapeuticIntervention', 'Drug', 'StudyGroup'}:
+        if claim.predicate != 'DIFFERS_BETWEEN':
+            risks.append('semantic: measured outcome appears as subject and treatment/group as object; verify event roles')
+    if o.process and o.process.kind == 'expression' and o.type in {'StudyGroup', 'Phenotype', 'Disease', 'Intervention', 'Drug'}:
+        risks.append('semantic: expression must be anchored to the expressed gene/RNA/protein, with group/phenotype as context')
+    if re.search(r'\brespectively\b', quote, re.I):
+        risks.append('semantic: coordinated respectively mapping requires pair-by-pair source review')
     if any(e.text.strip().casefold() in {'unclassified', 'none'} for e in (s,o)):
         risks.append('Adjective or table response label lacks a biological entity identity')
     if claim.predicate == 'TARGETS' and s.type in {'Protein','Gene'} and re.search(r'\bantibod\w*\b', quote, re.I):
@@ -152,6 +190,9 @@ def check_semantics(claim, repairs):
         risks.append('Possible author hypothesis requires speculative/source attribution review')
     if claim.predicate == 'DIFFERS_BETWEEN' and not re.search(r'\b(?:compar\w*|relative to|versus|vs|between|than|higher|lower|similar|unchanged|differ\w*)\b', quote, re.I):
         risks.append('Group descriptions alone do not establish a measured between-group comparison')
+    if claim.predicate == 'DIFFERS_BETWEEN' and re.search(r'\b(?:accuracy|AUC|ROC|precision|recall|F1|prediction error)\b', str(claim.qualifiers.get('metric','')), re.I):
+        if re.search(r'\b(?:classifier\w*|training (?:labels|data)|prediction models?|predictors?)\b', quote, re.I):
+            risks.append('semantic: model/label/performance comparison is not a measured contrast between StudyGroup participants')
     if claim.predicate in {'ASSOCIATED_WITH','CORRELATED_WITH'} and not re.search(r'\b(?:associat\w*|correlat\w*|related|relationship\w*|link\w*)\b', quote, re.I):
         if re.search(r'\b(?:samples?|patients?|assessed|sequencing|abundance|propose|favorable|taxa)\b', quote, re.I):
             risks.append('Sampling context or composition alone does not establish a biological/statistical association')
@@ -161,7 +202,7 @@ def check_semantics(claim, repairs):
         risks.append('Negative result belongs to an unresolved clause; verify endpoint and arm before assigning polarity')
     # Endpoint grounding already checks names. Key qualitative conditions need
     # the same quote support, rather than a different sentence elsewhere in PDF.
-    for key in ('comparison_group', 'reference_group', 'time', 'diet', 'dose'):
+    for key in ('comparison_group', 'reference_group', 'metric', 'time', 'diet', 'dose'):
         value = claim.qualifiers.get(key)
         if isinstance(value, (str, int, float)) and not source_contains(quote, str(value)):
             risks.append(f'Evidence does not cover qualifier {key}')
@@ -175,27 +216,25 @@ def check_semantics(claim, repairs):
 
 def result_sql(alias):
     """Same conservative legacy reading for list and graph filters."""
+    role = f"CASE WHEN {alias}.predicate='DIFFERS_BETWEEN' THEN 'subject' ELSE 'object' END"
+    direction = f"CASE WHEN {alias}.predicate='DIFFERS_BETWEEN' THEN 'direction' ELSE 'object_direction' END"
+    def has(values):
+        quoted = ','.join("'" + v + "'" for v in values)
+        return f"""({alias}.claim_json->({role})->'process'->>'direction' IN ({quoted})
+          OR {alias}.claim_json->'qualifiers'->>({direction}) IN ({quoted})
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(
+            CASE WHEN jsonb_typeof({alias}.claim_json->'qualifiers'->'processes')='array'
+              THEN {alias}.claim_json->'qualifiers'->'processes' ELSE '[]'::jsonb END) p
+            WHERE p->>'role'=({role}) AND p->>'direction' IN ({quoted})))"""
+    changed, unchanged = has(('increased','decreased')), has(('unchanged',))
     return f"""CASE
+      WHEN {alias}.predicate NOT IN ('AFFECTS','ACTIVATES','INHIBITS','DIFFERS_BETWEEN')
+        OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative') THEN 'unknown'
       WHEN {alias}.claim_json->>'result_status' IN ('not_significant','no_effect_reported','observed_change')
         THEN {alias}.claim_json->>'result_status'
       WHEN {alias}.claim_json->'qualifiers'->>'result_status' IN ('not_significant','no_effect_reported','observed_change')
         THEN {alias}.claim_json->'qualifiers'->>'result_status'
-      WHEN {alias}.claim_json->'subject'->'process'->>'direction'='unchanged'
-        OR {alias}.claim_json->'object'->'process'->>'direction'='unchanged'
-        OR {alias}.claim_json->'qualifiers'->>'direction'='unchanged'
-        OR {alias}.claim_json->'qualifiers'->>'object_direction'='unchanged'
-        OR {alias}.claim_json @> '{{"qualifiers":{{"processes":[{{"direction":"unchanged"}}]}}}}'::jsonb
-        OR ({alias}.negated AND {alias}.predicate='AFFECTS'
-            AND COALESCE({alias}.claim_json->'subject'->'process'->>'direction','') NOT IN ('increased','decreased')
-            AND COALESCE({alias}.claim_json->'object'->'process'->>'direction','') NOT IN ('increased','decreased')
-            AND COALESCE({alias}.claim_json->'qualifiers'->>'direction','') NOT IN ('increased','decreased')
-            AND COALESCE({alias}.claim_json->'qualifiers'->>'object_direction','') NOT IN ('increased','decreased')
-            AND NOT {alias}.claim_json @> '{{"qualifiers":{{"processes":[{{"direction":"increased"}}]}}}}'::jsonb
-            AND NOT {alias}.claim_json @> '{{"qualifiers":{{"processes":[{{"direction":"decreased"}}]}}}}'::jsonb) THEN 'no_effect_reported'
-      WHEN NOT {alias}.negated AND ({alias}.claim_json->'subject'->'process'->>'direction' IN ('increased','decreased')
-        OR {alias}.claim_json->'object'->'process'->>'direction' IN ('increased','decreased')
-        OR {alias}.claim_json->'qualifiers'->>'direction' IN ('increased','decreased')
-        OR {alias}.claim_json->'qualifiers'->>'object_direction' IN ('increased','decreased')
-        OR {alias}.claim_json @> '{{"qualifiers":{{"processes":[{{"direction":"increased"}}]}}}}'::jsonb
-        OR {alias}.claim_json @> '{{"qualifiers":{{"processes":[{{"direction":"decreased"}}]}}}}'::jsonb) THEN 'observed_change'
+      WHEN {alias}.negated THEN 'unknown'
+      WHEN COALESCE({unchanged},false) AND NOT COALESCE({changed},false) THEN 'no_effect_reported'
+      WHEN COALESCE({changed},false) AND NOT COALESCE({unchanged},false) THEN 'observed_change'
       ELSE 'unknown' END"""

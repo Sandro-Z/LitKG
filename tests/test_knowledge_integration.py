@@ -593,12 +593,12 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             return ClaimBundle.model_validate({'claims':[{
                 'subject':{'text':'Probe Q','type':'Drug'},'predicate':'REDUCES',
                 'object':{'text':'IL-6','type':'Protein','mention':'IL-6 secretion' if secretion else 'IL-6 expression',
-                          'process':{'kind':'secretion' if secretion else 'expression','direction':'decreased' if secretion else 'unchanged'}},
+                          'process':{'kind':'secretion' if secretion else 'expression','direction':'decreased'}},
                 'participants':[{'role':'cell_line','entity':{'text':'A549','type':'CellLine'}}] + ([{'role':'species','entity':{'text':'humans','type':'Organism'}}] if secretion else []),
-                'qualifiers':{**({'dose':5,'unit':'nM'} if secretion else {}),'time':'24 h' if secretion else '48 h'},
+                'qualifiers':{'evidence_type':'experimental',**({'dose':5,'unit':'nM'} if secretion else {}),'time':'24 h' if secretion else '48 h'},
                 'evidence':{'sentence':texts[1].split('. ')[0]+'.' if secretion else texts[2]},
                 'additional_evidence':[{'sentence':'This effect may occur in humans.'}] if secretion else [],
-                'confidence':.8,'negated':not secretion,'speculative':secretion}]})
+                'confidence':.8,'source_kind':'primary','negated':not secretion,'speculative':secretion}]})
         with patch.object(self.tasks,'extract_catalog',side_effect=directory), patch.object(self.tasks,'extract_claims',side_effect=model) as model_calls:
             catalog = self.tasks.build_document_catalog.run(self.doc,publish=False)
             for c in chunk_ids:
@@ -614,8 +614,9 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             facts = fetch_facts(cur,self.kb,document_id=self.doc)
             self.assertEqual(len(facts),2)
             self.assertEqual(len(facts[0]['evidence']),2)
-            self.assertEqual([f['negated'] for f in facts],[False,False])
-            self.assertEqual(facts[1]['qualifiers']['result_status'],'no_effect_reported')
+            self.assertEqual([f['negated'] for f in facts],[False,True])
+            self.assertEqual(facts[1]['claim_json']['result_status'],'unknown')
+            self.assertNotIn('result_status',facts[1]['qualifiers'])  # Not reduced does not prove zero change.
             self.assertEqual([f['speculative'] for f in facts],[True,False])
             self.assertEqual({p['role'] for p in facts[0]['participants']},{'subject','object','cell_line','species'})
             self.assertEqual({f['qualifiers']['processes'][0]['kind'] for f in facts},{'expression','secretion'})
@@ -709,7 +710,12 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             result=self.tasks.maintain_knowledge_base.run(job['task_id'])
         self.assertEqual(result['status'],'done',str(result))
         with self.connect() as conn:
-            self.assertEqual(conn.execute('SELECT claim_json FROM claims WHERE id=%s',(claim_id,)).fetchone()['claim_json'],raw)
+            after=conn.execute('SELECT claim_json FROM claims WHERE id=%s',(claim_id,)).fetchone()['claim_json']
+            self.assertEqual(after['semantic_status'],'pending')
+            for field in ('subject','object','evidence','negated','speculative'):
+                self.assertEqual(after[field],raw[field])
+            snapshots=conn.execute('SELECT snapshot FROM claim_history WHERE original_claim_id=%s',(claim_id,)).fetchall()
+            self.assertIn(raw,[s['snapshot']['claim_json'] for s in snapshots])
             fact=fetch_facts(conn.cursor(),self.kb)[0]
             self.assertTrue(fact['negated'] and fact['speculative'])
             self.assertEqual(len(fact['evidence']),1)

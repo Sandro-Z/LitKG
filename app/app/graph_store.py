@@ -23,8 +23,7 @@ from app.normalization import (
 )
 from app.schemas import Claim
 from app.facts import fact_qualifiers, normalized_participants, store_fact
-from app.catalog import PROCESSING_VERSION, digest, load_catalog, resolve_bundle
-from app.schemas import ClaimBundle
+from app.catalog import PROCESSING_VERSION, digest, load_catalog
 
 
 def _identity_locks(identity: EntityIdentity) -> set[str]:
@@ -141,6 +140,7 @@ def _reconcile_exact_names(cur, existing, identity):
         """
         SELECT id, canonical_name, normalized_id, entity_type FROM entities entity
         WHERE entity_type = ANY(%s::TEXT[]) AND canonical_key NOT LIKE '%%|pending|%%'
+          AND canonical_key NOT LIKE '%%|document:%%'
           AND EXISTS (SELECT 1 FROM entity_aliases alias WHERE alias.entity_id = entity.id AND alias.normalized_alias = ANY(%s::TEXT[]))
         ORDER BY id LIMIT 10
         """,
@@ -211,6 +211,7 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
             JOIN entity_aliases alias ON alias.entity_id = entity.id
             WHERE entity.entity_type = ANY(%s::TEXT[])
               AND entity.canonical_key NOT LIKE '%%|pending|%%'
+              AND entity.canonical_key NOT LIKE '%%|document:%%'
               AND alias.normalized_alias = ANY(%s::TEXT[])
             ORDER BY entity.id
             LIMIT 3
@@ -511,10 +512,11 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
     source = cur.fetchone()
     if source and source['claim_catalog_version'] != source['catalog_version']:
         raise ValueError('Stale extraction version; re-extraction is required')
-    if source and source['catalog_status'] == 'done':
+    if source:
         source['abbreviation_map'] = abbreviations or {}
-        entries = load_catalog(cur, document_id, source['catalog_version'])
-        resolve_bundle(ClaimBundle(claims=[claim]), entries, source, source['catalog_version'])
+        entries = load_catalog(cur, document_id, source['catalog_version']) if source['catalog_status'] == 'done' else []
+        from app.claims import revalidate_existing_claim
+        claim = revalidate_existing_claim(claim_json, entries, source, source['catalog_version'], use_catalog=source['catalog_status']=='done')
     projection = _claim_projection(cur, claim, abbreviations, document_id, reconcile_existing=reconcile_existing)
 
     # Old versions could store the same extraction more than once. When
@@ -555,7 +557,11 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
             object_normalized_id = %s,
             object_entity_id = %s,
             evidence_text = %s,
-            claim_fingerprint = %s
+            claim_fingerprint = %s,
+            claim_json = %s,
+            negated = %s,
+            speculative = %s,
+            processing_version = %s
         WHERE id = %s
         """,
         (
@@ -570,6 +576,10 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
             projection["object_entity_id"],
             projection["evidence_text"],
             projection["fingerprint"],
+            Jsonb(claim.model_dump(mode='json')),
+            claim.negated,
+            claim.speculative,
+            PROCESSING_VERSION,
             claim_id,
         ),
     )
