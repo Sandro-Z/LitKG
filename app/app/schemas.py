@@ -1,5 +1,5 @@
 from typing import Any, Optional, Literal
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator, ValidationError
 from app.normalization import normalize_entity_type, clean_text
 import re
 from app.entity_types import TYPE_DEFINITIONS
@@ -180,6 +180,28 @@ class QuestionRequest(BaseModel):
 class MaintenanceRequest(BaseModel):
     mode: Literal["reproject", "reextract", "reparse", "retry", "derived"]
     document_id: Optional[int] = Field(default=None, ge=1)
+
+
+class ClaimSelection(BaseModel):
+    claim_ids: list[int] = Field(default_factory=list, max_length=100000)
+    all_matching: bool = False
+    predicate: Optional[str] = None
+    entity_type: Optional[str] = None
+    result_status: Optional[Literal['observed_change','no_effect_reported','not_significant','unknown']] = None
+
+    @model_validator(mode='after')
+    def validate_scope(self):
+        if self.all_matching == bool(self.claim_ids):
+            raise ValueError('Select explicit claim IDs or all matching claims, exclusively')
+        if any(value < 1 for value in self.claim_ids):
+            raise ValueError('Claim IDs must be positive')
+        self.claim_ids = sorted(set(self.claim_ids))
+        return self
+
+
+class ClaimDeleteRequest(ClaimSelection):
+    selection_hash: str = Field(min_length=64, max_length=64)
+    allow_shared: bool = False
 
 
 class KnowledgeBaseCreate(BaseModel):

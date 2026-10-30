@@ -30,7 +30,8 @@ from app.ingestion import (
 )
 from app.normalization import normalize_entity_type, normalize_predicate
 from app.provenance import add_claim_location
-from app.schemas import KnowledgeBaseCreate, QuestionRequest, MaintenanceRequest
+from app.schemas import KnowledgeBaseCreate, QuestionRequest, MaintenanceRequest, ClaimSelection, ClaimDeleteRequest
+from app.claim_management import preview_claim_delete, delete_selected_claims
 from app.entity_types import TYPE_DEFINITIONS, TYPE_PARENTS
 from app.predicate_registry import REGISTRY_VERSION, PREDICATES, EVIDENCE_CATEGORIES, QUALIFIER_DEFINITIONS
 from app.processes import PROCESS_DEFINITIONS
@@ -650,6 +651,35 @@ def export_knowledge_base_claims(knowledge_base_id: int,
     return Response(content, media_type='text/csv' if format == 'csv' else 'application/json', headers={
         'Content-Disposition': f'attachment; filename="claims-{knowledge_base_id}.{format}"',
         'X-Exported-Count': str(payload['exported_count']), 'X-Total-Count': str(payload['total'])})
+
+
+@app.post('/knowledge-bases/{knowledge_base_id}/claims/delete-preview')
+def preview_knowledge_base_claim_deletion(knowledge_base_id: int, request: ClaimSelection):
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                _get_knowledge_base(cur,knowledge_base_id)
+                return preview_claim_delete(cur,knowledge_base_id,request)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from None
+
+
+@app.post('/knowledge-bases/{knowledge_base_id}/claims/delete')
+def delete_knowledge_base_claims(knowledge_base_id: int, request: ClaimDeleteRequest):
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                _get_knowledge_base(cur,knowledge_base_id)
+                result=delete_selected_claims(cur,knowledge_base_id,request)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from None
+    if result['affected_document_ids']:
+        try:
+            refresh_derived.apply_async(args=[result['affected_document_ids'][0]],queue='extract')
+            result['index_refresh_queued']=True
+        except Exception:
+            result['index_refresh_queued']=False
+    return result
 
 
 @app.get("/knowledge-bases/{knowledge_base_id}/entities")
@@ -1272,6 +1302,15 @@ def start_maintenance(knowledge_base_id: int, request: MaintenanceRequest):
     return {'task_id': job_id, 'mode': request.mode, 'llm_required': request.mode in {'reextract','reparse','retry'},
             'status_url': f'/knowledge-bases/{knowledge_base_id}/maintenance/{job_id}',
             'scope': 'Shared documents are updated in every knowledge base containing them'}
+
+
+@app.get('/knowledge-bases/{knowledge_base_id}/maintenance')
+def list_knowledge_base_maintenance(knowledge_base_id: int, limit: int=Query(20,ge=1,le=100)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur,knowledge_base_id)
+            cur.execute('SELECT * FROM maintenance_jobs WHERE knowledge_base_id=%s ORDER BY updated_at DESC LIMIT %s',(knowledge_base_id,limit))
+            return {'jobs':cur.fetchall()}
 
 
 @app.get('/knowledge-bases/{knowledge_base_id}/maintenance/{job_id}')

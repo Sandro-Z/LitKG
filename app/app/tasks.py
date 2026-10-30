@@ -877,8 +877,8 @@ def maintain_knowledge_base(job_id: str):
             return {"status": "busy"}
         with get_conn() as conn:
             job = conn.execute("SELECT * FROM maintenance_jobs WHERE id=%s::UUID", (job_id,)).fetchone()
-            if not job or job["status"] == "done":
-                return {"status": "done"}
+            if not job or job["status"] in {"done","cancelled"}:
+                return {"status": job['status'] if job else 'done'}
             conn.execute("UPDATE maintenance_jobs SET status='processing',error=NULL,updated_at=now() WHERE id=%s::UUID", (job_id,))
             rows = conn.execute("""SELECT d.* FROM documents d JOIN knowledge_base_documents m ON m.document_id=d.id
                 WHERE m.knowledge_base_id=%s AND (%s::BIGINT IS NULL OR d.id=%s) ORDER BY d.id""",
@@ -886,6 +886,10 @@ def maintain_knowledge_base(job_id: str):
         results = []
         try:
             for document in rows:
+                with get_conn() as conn:
+                    current_job=conn.execute('SELECT status FROM maintenance_jobs WHERE id=%s::UUID',(job_id,)).fetchone()
+                if not current_job or current_job['status']=='cancelled':
+                    return {'status':'cancelled','documents':results}
                 doc_id = document["id"]
                 if job['mode'] != 'retry' and document["status"] in {"parsing", "cataloging", "extracting", "queued"}:
                     results.append({"document_id":doc_id,"status":"skipped_active"})
@@ -959,9 +963,11 @@ def maintain_knowledge_base(job_id: str):
                     results.append({"document_id":doc_id,"status":"failed","error":f"{type(exc).__name__}: {exc}"})
             status = "done" if all(r["status"] == "done" for r in results) else "partial"
             with get_conn() as conn:
-                conn.execute("UPDATE maintenance_jobs SET status=%s,result=%s,updated_at=now() WHERE id=%s::UUID", (status,Jsonb(results),job_id))
+                changed=conn.execute("UPDATE maintenance_jobs SET status=%s,result=%s,updated_at=now() WHERE id=%s::UUID AND status<>'cancelled' RETURNING status", (status,Jsonb(results),job_id)).fetchone()
+                if not changed:
+                    return {'status':'cancelled','documents':results}
             return {"status":status,"documents":results}
         except Exception as exc:
             with get_conn() as conn:
-                conn.execute("UPDATE maintenance_jobs SET status='failed',error=%s,updated_at=now() WHERE id=%s::UUID", (f"{type(exc).__name__}: {exc}",job_id))
+                conn.execute("UPDATE maintenance_jobs SET status='failed',error=%s,updated_at=now() WHERE id=%s::UUID AND status<>'cancelled'", (f"{type(exc).__name__}: {exc}",job_id))
             raise

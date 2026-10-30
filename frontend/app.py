@@ -78,7 +78,16 @@ def api_post_json(path: str, payload: dict):
         json=payload,
         timeout=360,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        try:
+            detail=response.json().get('detail')
+        except ValueError:
+            detail=None
+        if detail:
+            raise RuntimeError(detail if isinstance(detail,str) else json.dumps(detail,ensure_ascii=False)) from None
+        raise
     return response.json()
 
 
@@ -86,6 +95,91 @@ def api_put_json(path: str, payload: dict):
     response = requests.put(f"{API_BASE_URL}{path}", json=payload, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def render_document_reprocessing(knowledge_base_id, documents):
+    st.subheader('重新处理已有文献')
+    labels={d['id']:f"#{d['id']} · {d.get('title') or d['filename']}" for d in documents}
+    all_documents=st.checkbox('全选当前知识库的所有文献',key=f'reprocess_all_{knowledge_base_id}')
+    selected=st.multiselect('选择要重新处理的文献',list(labels),format_func=lambda value:labels[value],
+                            disabled=all_documents,key=f'reprocess_docs_{knowledge_base_id}')
+    mode=st.radio('重新处理方式',['reparse','reextract'],horizontal=True,
+                  format_func=lambda value:{'reparse':'从 PDF 重新解析并抽取','reextract':'保留已保存文本，重新抽取'}[value],key=f'reprocess_mode_{knowledge_base_id}')
+    st.caption('重处理会更新抽取结果；共享文献的结果会同步更新。任务进度显示在下方，不会新增上传批次。')
+    if st.button('重新处理全部文献' if all_documents else f'重新处理选中文献（{len(selected)} 篇）',
+                 disabled=not(all_documents or selected),key=f'reprocess_start_{knowledge_base_id}',type='primary'):
+        started=[]
+        for doc in ([None] if all_documents else selected):
+            try:
+                started.append(api_post_json(f'/knowledge-bases/{knowledge_base_id}/maintenance',{'mode':mode,'document_id':doc}))
+            except Exception as exc:
+                st.error(f'文献 {doc or "全部"} 提交失败：{exc}')
+        if started:
+            st.success(f'已提交 {len(started)} 个重处理任务。')
+    st.subheader('文献处理任务')
+    jobs=api_get(f'/knowledge-bases/{knowledge_base_id}/maintenance',{'limit':20}).get('jobs',[])
+    if jobs:
+        states={'queued':'排队中','processing':'处理中','done':'已完成','partial':'部分完成','failed':'失败','cancelled':'已取消'}
+        modes={'reparse':'重新解析 PDF','reextract':'重新抽取文本','retry':'重试','reproject':'重建图谱','derived':'更新索引'}
+        st.dataframe(pd.DataFrame([{'任务 ID':job['id'],'处理方式':modes.get(job['mode'],job['mode']),
+                     '文献':f"#{job['document_id']}" if job.get('document_id') is not None else '全部','状态':states.get(job['status'],job['status']),
+                     '更新时间':str(job.get('updated_at') or ''),'错误':job.get('error') or ''} for job in jobs]),
+                     use_container_width=True,hide_index=True)
+        job=st.selectbox('查看任务详情',jobs,format_func=lambda j:f"{j['mode']} · {j['status']} · {j['id']}",key=f'doc_job_{knowledge_base_id}')
+        with st.expander('处理进度与文献结果'):
+            st.json(job)
+    else:
+        st.info('暂无维护任务。')
+
+
+def render_claim_selection(knowledge_base_id, claims, filters, total):
+    scope=json.dumps([knowledge_base_id,filters],sort_keys=True)
+    selected_key='claim_selection_'+scope
+    revision_key='claim_selection_revision_'+scope
+    revision=st.session_state.get(revision_key,0)
+    selected=set(st.session_state.get(selected_key,[]))
+    all_matching=st.checkbox(f'全选全部筛选结果（{total} 条，包含其他页）',key=f'claim_all_{scope}_{revision}')
+    if st.button('选中当前页全部',key=f'claim_page_all_{scope}',disabled=all_matching or not claims):
+        st.session_state[selected_key]=sorted(selected|{row['id'] for row in claims})
+        st.session_state[revision_key]=revision+1
+        st.rerun()
+    if claims:
+        columns=['id','subject_text','predicate','object_text','result_status','review_status',
+                 'title','doi','page','page_end','filename','section_title','evidence_text',
+                 'confidence','display_negated','speculative','source_kind']
+        rows=[{'选择':all_matching or row['id'] in selected,**{key:row.get(key) for key in columns}} for row in claims]
+        editor_key=f'claim_editor_{scope}_{revision}_{[r["id"] for r in claims]}'
+        edited=st.data_editor(pd.DataFrame(rows),disabled=columns if not all_matching else ['选择',*columns],
+                              hide_index=True,use_container_width=True,key=editor_key,
+                              column_config={'选择':st.column_config.CheckboxColumn('选择',default=False)})
+        current_ids={r['id'] for r in claims}
+        if not all_matching:
+            selected=(selected-current_ids)|{int(row['id']) for row in edited.to_dict('records') if row['选择']}
+            st.session_state[selected_key]=sorted(selected)
+    else:
+        st.info('当前页没有 claims。')
+    if st.button('取消全部选择',key=f'claim_unselect_{scope}'):
+        st.session_state[selected_key]=[]
+        st.session_state[revision_key]=revision+1
+        st.rerun()
+    if not (all_matching or selected):
+        return
+    body={**filters,'all_matching':all_matching,'claim_ids':[] if all_matching else sorted(selected)}
+    preview=api_post_json(f'/knowledge-bases/{knowledge_base_id}/claims/delete-preview',body)
+    count=preview['count']
+    st.caption(f"将删除 {count} 条 claim，涉及 {len(preview['document_ids'])} 篇文献；PDF 和文本分块保留。重新抽取文献可以再次生成结果。")
+    shared=preview['other_affected_knowledge_bases']
+    allow_shared=st.checkbox(f'同时更新共享文献所在的知识库：{shared}',key=f'claim_shared_{scope}') if shared else False
+    if st.button(f'删除选中的 {count} 条 claim',type='primary',disabled=not count or bool(shared and not allow_shared),key=f'claim_delete_{scope}'):
+        result=api_post_json(f'/knowledge-bases/{knowledge_base_id}/claims/delete',
+                             {**body,'selection_hash':preview['selection_hash'],'allow_shared':allow_shared})
+        st.session_state[selected_key]=[]
+        st.session_state[revision_key]=revision+1
+        st.session_state[f'claim_deleted_{knowledge_base_id}']=result['deleted_count']
+        for key in list(st.session_state):
+            if key.startswith(('claims_export_','facts_export_','kg_search_','answer_')):
+                st.session_state.pop(key,None)
+        st.rerun()
 
 
 def api_delete(path: str, params: dict):
@@ -658,11 +752,14 @@ def main():
                 )
             else:
                 st.info("暂无文献。")
+            render_document_reprocessing(selected_knowledge_base_id,documents)
         except Exception as exc:
             st.error(f"读取文献失败：{exc}")
 
     with tabs[3]:
         st.subheader("跨文献 Claims")
+        if f'claim_deleted_{selected_knowledge_base_id}' in st.session_state:
+            st.success(f"已删除 {st.session_state.pop(f'claim_deleted_{selected_knowledge_base_id}')} 条 claim，PDF 已保留。")
         col1, col2 = st.columns(2)
         predicate = col1.text_input("按关系筛选（可选）")
         entity_type = col2.selectbox(
@@ -679,14 +776,7 @@ def main():
                 params={**filters, 'limit': page_size, 'offset': (page_number-1)*page_size})
             claims = page.get('claims', [])
             st.caption(f"本页 {len(claims)} 条 / 总数量 {page.get('total', '未知')}；当前第 {page_number} 页")
-            if claims:
-                st.dataframe(pd.DataFrame(claims), column_order=[
-                    'id', 'subject_text', 'predicate', 'object_text', 'result_status', 'review_status',
-                    'title', 'doi', 'page', 'page_end', 'filename', 'section_title', 'evidence_text',
-                    'confidence', 'display_negated', 'speculative', 'source_kind'],
-                    use_container_width=True, hide_index=True)
-            else:
-                st.info('当前页没有 claims。')
+            render_claim_selection(selected_knowledge_base_id,claims,filters,page.get('total',0))
             export_key = 'claims_export_' + json.dumps([selected_knowledge_base_id, filters], sort_keys=True)
             if st.button('准备完整导出 CSV / JSON'):
                 st.session_state[export_key] = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims/export", params={**filters, 'format':'json'})

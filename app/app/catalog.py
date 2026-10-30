@@ -543,7 +543,7 @@ def resolve_bundle(bundle, entries, chunk, version, repairs=None):
 def archive_claims(cur, document_id, chunk_id=None):
     cur.execute("""
         SELECT c.*, ch.text AS source_text, ch.page_spans, ch.section_title,
-               d.title, d.doi, d.filename, d.catalog_version
+               d.title, d.doi, d.filename, d.catalog_version AS document_catalog_version
         FROM claims c JOIN chunks ch ON ch.id = c.chunk_id JOIN documents d ON d.id = c.document_id
         WHERE c.document_id = %s AND (%s::BIGINT IS NULL OR c.chunk_id = %s)
     """, (document_id, chunk_id, chunk_id))
