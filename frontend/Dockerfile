@@ -10,4 +10,5 @@ COPY graph.html graph_view.js /frontend/
 
 EXPOSE 8501
 
+COPY export_jobs.py /frontend/export_jobs.py
 CMD ["streamlit", "run", "/frontend/app.py", "--server.address=0.0.0.0", "--server.port=8501"]

@@ -1,3 +1,4 @@
+from export_jobs import render_prepared_export, request_timeout as export_request_timeout
 import os
 import json
 import unicodedata
@@ -66,7 +67,7 @@ def api_get(path: str, params: dict | None = None):
     response = requests.get(
         f"{API_BASE_URL}{path}",
         params=params,
-        timeout=60,
+        timeout=export_request_timeout(path),
     )
     response.raise_for_status()
     return response.json()
@@ -778,27 +779,9 @@ def main():
             st.caption(f"本页 {len(claims)} 条 / 总数量 {page.get('total', '未知')}；当前第 {page_number} 页")
             render_claim_selection(selected_knowledge_base_id,claims,filters,page.get('total',0))
             export_key = 'claims_export_' + json.dumps([selected_knowledge_base_id, filters], sort_keys=True)
-            if st.button('准备完整导出 CSV / JSON'):
-                st.session_state[export_key] = api_get(f"/knowledge-bases/{selected_knowledge_base_id}/claims/export", params={**filters, 'format':'json'})
-            if export_key in st.session_state:
-                exported = st.session_state[export_key]
-                st.success(f"已导出数量/总数量：{exported['exported_count']}/{exported['total']}（导出时快照）")
-                st.download_button('下载完整 JSON（无损）', json.dumps(exported, ensure_ascii=False, indent=2),
-                    file_name=f'claims-{selected_knowledge_base_id}.json', mime='application/json')
-                csv_rows = [{k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for k,v in row.items()} for row in exported['claims']]
-                st.download_button('下载完整 CSV', pd.DataFrame(csv_rows).to_csv(index=False).encode('utf-8-sig'),
-                    file_name=f'claims-{selected_knowledge_base_id}.csv', mime='text/csv')
+            render_prepared_export(st, api_get, path=f'/knowledge-bases/{selected_knowledge_base_id}/claims/export', params={**filters, 'format': 'json'}, state_key=export_key, kind='claims', basename=f'claims-{selected_knowledge_base_id}', prepare_label='准备完整导出 CSV / JSON')
             facts_key = f'facts_export_{selected_knowledge_base_id}'
-            if st.button('准备导出全部当前 Facts（含参与者实体 ID）'):
-                st.session_state[facts_key] = api_get(f'/knowledge-bases/{selected_knowledge_base_id}/facts/export')
-            if facts_key in st.session_state:
-                exported_facts = st.session_state[facts_key]
-                st.success(f"Facts 已导出数量/总数量：{exported_facts['exported_count']}/{exported_facts['total']}；文献数：{exported_facts['document_count']}")
-                st.download_button('下载完整 Facts JSON', json.dumps(exported_facts,ensure_ascii=False,indent=2),
-                    file_name=f'facts-{selected_knowledge_base_id}.json',mime='application/json')
-                fact_rows = [{k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in f.items()} for f in exported_facts['facts']]
-                st.download_button('下载完整 Facts CSV',pd.DataFrame(fact_rows).to_csv(index=False).encode('utf-8-sig'),
-                    file_name=f'facts-{selected_knowledge_base_id}.csv',mime='text/csv')
+            render_prepared_export(st, api_get, path=f'/knowledge-bases/{selected_knowledge_base_id}/facts/export', params=None, state_key=facts_key, kind='facts', basename=f'facts-{selected_knowledge_base_id}', prepare_label='准备导出全部当前 Facts（含参与者实体 ID）')
         except Exception as exc:
             st.error(f'读取或导出 claims 失败：{exc}')
 

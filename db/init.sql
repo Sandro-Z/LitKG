@@ -454,3 +454,7 @@ CREATE TABLE IF NOT EXISTS scoped_repair_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     rolled_back_at TIMESTAMPTZ
 );
+
+-- Review reference lookups used by Claims retrieval and complete exports.
+CREATE INDEX IF NOT EXISTS litkg_review_items_claim_ref_idx ON review_items ((detail ->> 'claim_id'));
+CREATE INDEX IF NOT EXISTS litkg_review_items_chunk_ref_idx ON review_items ((detail ->> 'chunk_id'));

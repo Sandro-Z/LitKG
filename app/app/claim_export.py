@@ -1,4 +1,5 @@
 """Shared claims pagination and complete, snapshot-consistent exports."""
+from app.review_batch_query import ReviewBatchCursor
 import csv
 import io
 import json
@@ -10,6 +11,7 @@ from app.provenance import add_claim_location
 
 def fetch_claim_page(cur, *, knowledge_base_id=None, document_id=None, limit=100,
                      offset=0, after_id=None, predicate=None, entity_type=None, result_status=None):
+    cur = ReviewBatchCursor(cur)
     filters, params = [], []
     if knowledge_base_id is not None:
         filters.append('EXISTS (SELECT 1 FROM knowledge_base_documents member WHERE member.document_id=claim.document_id AND member.knowledge_base_id=%s)')
