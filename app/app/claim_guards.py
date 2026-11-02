@@ -83,7 +83,7 @@ def audit_polarity(claim):
 
 
 def audit_claim(claim):
-    return audit_polarity(claim) + audit_certainty(claim)
+    return audit_polarity(claim) + audit_certainty(claim) + audit_comparison(claim)
 
 
 HEDGE = re.compile(r"\b(?:may(?!(?:\s|,)+\d)|might|could(?! not)|suggest(?:s|ed|ing)?|propos(?:e|es|ed)|(?:is |was |are |were )?thought to|likely|potentially)\b")
@@ -164,3 +164,122 @@ def add_guard_reasons(claim):
         reason = f"semantic: {finding['rule_id']} field={finding['field']} cue={finding['cue']}"
         if reason not in claim.review_reasons:
             claim.review_reasons.append(reason)
+
+
+NUMBER = re.compile(r'(?<![\w.])[-+]?(?:\d+\.\d+|\.\d+|\d+)(?:e[-+]?\d+)?(?!\w|\.\d)')
+COMPARATIVE = re.compile(r'\b(?:more|less|higher|lower|greater|fewer)\b[^.;]{0,100}?\bthan\b')
+MEASURE_UNIT = re.compile(r'\s*(%|(?:[fpnμumk]?g|[fpnμu]?m|[fpnμum]?l|mmol|mol|cells?|fold)(?![a-z]))')
+
+
+def _label(value):
+    if isinstance(value, dict):
+        value = value.get('mention') or value.get('text')
+    return _text(value) if isinstance(value, str) else ''
+
+
+def _number_values(value):
+    from decimal import Decimal
+    if isinstance(value, dict):
+        return {n for v in value.values() for n in _number_values(v)}
+    if isinstance(value, list):
+        return {n for v in value for n in _number_values(v)}
+    if isinstance(value, (str,int,float)) and not isinstance(value,bool):
+        return {Decimal(m.group(0)) for m in NUMBER.finditer(_text(value))}
+    return set()
+
+
+def _measurement_text(claim, text):
+    """Keep measured values, omit figure/citation/statistics/identity numbers."""
+    text = re.sub(r'\[[\d,; -]+\]', ' ', text)
+    text = re.sub(r'\([^)]*\b(?:fig(?:ure)?s?\.?|tables?\b|supplementary)\s*[^)]*\)', ' ', text)
+    text = re.sub(r'\b(?:fig(?:ure)?s?\.?|tables?)\s*[\da-z., -]+', ' ', text)
+    text = P_VALUE.sub(' ', text)
+    text = re.sub(r'\bp[- ]?value\s*(?:>=|<=|[=><≥≤])\s*[-+\d.e]+',' ',text)
+    text = re.sub(r'\b(?:n|r|r2|r\^2)\s*=\s*[-+\d.e]+', ' ', text)
+    entities = [claim.get('subject') or {}, claim.get('object') or {}]
+    entities += [p.get('entity') or {} for p in claim.get('participants',[]) if isinstance(p,dict)]
+    for entity in entities:
+        for name in sorted(_names(entity),key=len,reverse=True):
+            text = re.sub(r'(?<!\w)'+re.escape(name)+r'(?!\w)', ' ', text)
+    for key in ('comparison_group','reference_group'):
+        label = _label((claim.get('qualifiers') or {}).get(key))
+        if label:
+            text = text.replace(label,' ')
+    return text
+
+
+def _measured_values(claim, text):
+    from decimal import Decimal
+    text = _measurement_text(claim,text)
+    values = []
+    for match in NUMBER.finditer(text):
+        unit = MEASURE_UNIT.match(text[match.end():])
+        if '.' in match.group(0) or unit:
+            values.append((Decimal(match.group(0)),unit.group(1) if unit else ''))
+    return values
+
+
+def audit_comparison(claim):
+    """Check declared contrasts; never assign a value to an ambiguous arm."""
+    from decimal import Decimal
+    q = claim.get('qualifiers') or {}
+    quote = _text((claim.get('evidence') or {}).get('sentence'))
+    findings = []
+    def flag(rule, cue, field):
+        findings.append({'rule_id':rule,'cue':cue,'field':field,'action':'needs_review'})
+    focal, reference = (_label(q.get(k)) for k in ('comparison_group','reference_group'))
+    if claim.get('predicate') == 'DIFFERS_BETWEEN':
+        missing = [k for k in ('comparison_group','reference_group') if not _label(q.get(k))]
+        if missing:
+            flag('V4-COMPARISON-ARMS', ', '.join(missing), 'qualifiers')
+        elif re.sub(r'[\s_-]+',' ',focal) == re.sub(r'[\s_-]+',' ',reference):
+            flag('V4-SAME-GROUP',focal,'qualifiers.reference_group')
+    comparative = COMPARATIVE.search(quote)
+    if comparative and re.fullmatch(r'(?:more|less|higher|lower|greater|fewer)\s+than',comparative.group(0)):
+        if re.match(r'\s*~?\s*[-+]?\d',quote[comparative.end():]):
+            comparative = None  # A numerical threshold is not a second study arm.
+    if comparative and not ((focal and reference) or q.get('comparison')):
+        flag('V4-COMPARISON-ARMS',comparative.group(0),'qualifiers.reference_group')
+    if claim.get('predicate') == 'CONSUMES' and not re.search(r'\bproduc\w*\b',quote):
+        op = _pattern(claim.get('object') or {})
+        for participant in claim.get('participants',[]):
+            if participant.get('role') != 'product':
+                continue
+            product = _pattern(participant.get('entity') or {})
+            match = re.search(rf'\bconsum\w*\s+both\s+(?:{product}\s+and\s+{op}|{op}\s+and\s+{product})',quote)
+            if match:
+                flag('V4-PRODUCT-ROLE',match.group(0),'participants.product')
+    # Only explicit numerical contrasts require value preservation. Statistical
+    # p/n, figure references and numbered entity labels are not effect values.
+    if claim.get('predicate') != 'DIFFERS_BETWEEN' and not comparative:
+        return findings
+    measured = _measured_values(claim,quote)
+    if len(measured) >= 2:
+        bound = _number_values(q) | _number_values(claim.get('participants',[]))
+        unbound = sorted({value for value,unit in measured}-bound)
+        if unbound:
+            flag('V4-NUMERIC-UNBOUND',', '.join(str(v) for v in unbound),'qualifiers')
+    direction = q.get('direction')
+    if not (focal and reference and focal != reference and direction in {'increased','decreased'}):
+        return findings
+    # Both groups and the named metric must occur explicitly. Multiple values
+    # are compared only if every possible pairing has the same sign.
+    metric = _label(q.get('metric'))
+    if not metric or not re.search(r'(?<!\w)'+re.escape(metric)+r's?(?!\w)',quote):
+        return findings
+    fm, rm = list(re.finditer(re.escape(focal),quote)), list(re.finditer(re.escape(reference),quote))
+    if len(fm) != 1 or len(rm) != 1:
+        return findings
+    first, second = sorted([(fm[0],'focal'),(rm[0],'reference')],key=lambda pair:pair[0].start())
+    arms = {first[1]:quote[first[0].end():second[0].start()],second[1]:quote[second[0].end():]}
+    measured_arms = {role:_measured_values(claim,text) for role,text in arms.items()}
+    units = {unit for values in measured_arms.values() for value,unit in values}
+    if len(units) > 1:
+        return findings  # No unit conversion or missing-unit inference.
+    values = {role:[value for value,unit in measurements] for role,measurements in measured_arms.items()}
+    a,b = values.get('focal'),values.get('reference')
+    if not a or not b or any(re.search(r'\b(?:confidence|ci|range)\b',text) for text in arms.values()):
+        return findings
+    if (direction == 'increased' and max(a) < min(b)) or (direction == 'decreased' and min(a) > max(b)):
+        flag('V4-NUMERIC-DIRECTION',f'{focal}: {a}; {reference}: {b}; direction={direction}','qualifiers.direction')
+    return findings

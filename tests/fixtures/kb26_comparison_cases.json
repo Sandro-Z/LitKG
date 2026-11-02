@@ -1,0 +1,372 @@
+[
+  {
+    "claim_id": "fact:16242",
+    "claim_json": {
+      "subject": {
+        "text": "Blautia",
+        "type": "MicrobialTaxon",
+        "mention": "Blautia",
+        "process": {
+          "kind": "abundance",
+          "direction": "decreased"
+        }
+      },
+      "object": {
+        "text": "HFD-fed mice",
+        "type": "StudyGroup",
+        "mention": "HFD-fed mice",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "abundance",
+        "direction": "decreased",
+        "reference_group": "CD-fed mice",
+        "comparison_group": "HFD-fed mice"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "The Blautia abundance was reduced in HFD-fed mice compared with CD-fed mice (Supplementary Fig. 27A), consistent with its low representation during human obesity (Supplementary Fig. 1A)."
+      }
+    },
+    "expected_rules": []
+  },
+  {
+    "claim_id": "fact:20857",
+    "claim_json": {
+      "subject": {
+        "text": "bile acid levels",
+        "type": "Metabolite",
+        "mention": "bile acid levels",
+        "process": {
+          "kind": "concentration",
+          "direction": "increased"
+        }
+      },
+      "object": {
+        "text": "GF mice",
+        "type": "StudyGroup",
+        "mention": "GF mice",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "overall bile acid levels",
+        "direction": "increased",
+        "evidence_type": "experimental",
+        "reference_group": "colonized mice",
+        "comparison_group": "GF mice"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "In the CLAMS experiment, in agreement with previous reports (Sayin et al., 2013), GF mice had significantly higher overall bile acid levels than colonized mice (p=0.0012 Bt WT vs GF, p=0.0071 BT KO vs GF)."
+      }
+    },
+    "expected_rules": []
+  },
+  {
+    "claim_id": "fact:23319",
+    "claim_json": {
+      "subject": {
+        "text": "E. tarda",
+        "type": "MicrobialTaxon",
+        "mention": "E. tarda",
+        "process": {
+          "kind": "activity",
+          "direction": "increased"
+        }
+      },
+      "object": {
+        "text": "100 µM",
+        "type": "StudyGroup",
+        "mention": "100 µM",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "deconjugation efficiency",
+        "direction": "increased",
+        "reference_group": "500 µM",
+        "comparison_group": "100 µM"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "While E. tarda deconjugates a higher percentage of BAs at 100 μM, L. scindens and B. dentium, exhibit higher deconjugation efficiency at 500 μM (Fig. 3)."
+      }
+    },
+    "expected_rules": []
+  },
+  {
+    "claim_id": "fact:23320",
+    "claim_json": {
+      "subject": {
+        "text": "L. scindens",
+        "type": "MicrobialTaxon",
+        "mention": "L. scindens",
+        "process": {
+          "kind": "activity",
+          "direction": "increased"
+        }
+      },
+      "object": {
+        "text": "500 µM",
+        "type": "StudyGroup",
+        "mention": "500 µM",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "deconjugation efficiency",
+        "direction": "increased",
+        "reference_group": "100 µM",
+        "comparison_group": "500 µM"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "While E. tarda deconjugates a higher percentage of BAs at 100 μM, L. scindens and B. dentium, exhibit higher deconjugation efficiency at 500 μM (Fig. 3)."
+      }
+    },
+    "expected_rules": []
+  },
+  {
+    "claim_id": "fact:23321",
+    "claim_json": {
+      "subject": {
+        "text": "B. dentium",
+        "type": "MicrobialTaxon",
+        "mention": "B. dentium",
+        "process": {
+          "kind": "activity",
+          "direction": "increased"
+        }
+      },
+      "object": {
+        "text": "500 µM",
+        "type": "StudyGroup",
+        "mention": "500 µM",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "deconjugation efficiency",
+        "direction": "increased",
+        "reference_group": "100 µM",
+        "comparison_group": "500 µM"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "While E. tarda deconjugates a higher percentage of BAs at 100 μM, L. scindens and B. dentium, exhibit higher deconjugation efficiency at 500 μM (Fig. 3)."
+      }
+    },
+    "expected_rules": []
+  },
+  {
+    "claim_id": "fact:23332",
+    "claim_json": {
+      "subject": {
+        "text": "Bacteroides caccae",
+        "type": "MicrobialTaxon",
+        "mention": "Bacteroides caccae",
+        "process": null
+      },
+      "object": {
+        "text": "conjugated secondary bile acids",
+        "type": "Metabolite",
+        "mention": "conjugated secondary BAs",
+        "process": null
+      },
+      "predicate": "PRODUCES",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Bacteroides caccae, B. thetaiotaomicron VPI-5482, and B. thetaiotaomicron 3731 produce conjugated secondary BAs more extensively at 500 μM BA concentrations than at 100 μM (Fig. 1)."
+      }
+    },
+    "expected_rules": [
+      "V4-COMPARISON-ARMS"
+    ]
+  },
+  {
+    "claim_id": "fact:23333",
+    "claim_json": {
+      "subject": {
+        "text": "B. thetaiotaomicron VPI-5482",
+        "type": "MicrobialStrain",
+        "mention": "B. thetaiotaomicron VPI-5482",
+        "process": null
+      },
+      "object": {
+        "text": "conjugated secondary bile acids",
+        "type": "Metabolite",
+        "mention": "conjugated secondary BAs",
+        "process": null
+      },
+      "predicate": "PRODUCES",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Bacteroides caccae, B. thetaiotaomicron VPI-5482, and B. thetaiotaomicron 3731 produce conjugated secondary BAs more extensively at 500 μM BA concentrations than at 100 μM (Fig. 1)."
+      }
+    },
+    "expected_rules": [
+      "V4-COMPARISON-ARMS"
+    ]
+  },
+  {
+    "claim_id": "fact:23334",
+    "claim_json": {
+      "subject": {
+        "text": "B. thetaiotaomicron 3731",
+        "type": "MicrobialStrain",
+        "mention": "B. thetaiotaomicron 3731",
+        "process": null
+      },
+      "object": {
+        "text": "conjugated secondary bile acids",
+        "type": "Metabolite",
+        "mention": "conjugated secondary BAs",
+        "process": null
+      },
+      "predicate": "PRODUCES",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Bacteroides caccae, B. thetaiotaomicron VPI-5482, and B. thetaiotaomicron 3731 produce conjugated secondary BAs more extensively at 500 μM BA concentrations than at 100 μM (Fig. 1)."
+      }
+    },
+    "expected_rules": [
+      "V4-COMPARISON-ARMS"
+    ]
+  },
+  {
+    "claim_id": "fact:23372",
+    "claim_json": {
+      "subject": {
+        "text": "B. thetaiotaomicron",
+        "type": "MicrobialTaxon",
+        "mention": "B. thetaiotaomicron",
+        "process": null
+      },
+      "object": {
+        "text": "monocultures",
+        "type": "StudyGroup",
+        "mention": "monocultures",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "OD",
+        "direction": "increased",
+        "reference_group": "coculture",
+        "comparison_group": "monocultures"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "For B. thetaiotaomicron and C. symbiosum, monocultures starting ODs were 0.03 and 0.12, respectively, with the coculture OD at ~0.15."
+      }
+    },
+    "expected_rules": [
+      "V4-NUMERIC-UNBOUND",
+      "V4-NUMERIC-DIRECTION"
+    ]
+  },
+  {
+    "claim_id": "fact:23373",
+    "claim_json": {
+      "subject": {
+        "text": "C. symbiosum",
+        "type": "MicrobialTaxon",
+        "mention": "C. symbiosum",
+        "process": null
+      },
+      "object": {
+        "text": "monocultures",
+        "type": "StudyGroup",
+        "mention": "monocultures",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "OD",
+        "direction": "increased",
+        "reference_group": "coculture",
+        "comparison_group": "monocultures"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "For B. thetaiotaomicron and C. symbiosum, monocultures starting ODs were 0.03 and 0.12, respectively, with the coculture OD at ~0.15."
+      }
+    },
+    "expected_rules": [
+      "V4-NUMERIC-UNBOUND",
+      "V4-NUMERIC-DIRECTION"
+    ]
+  },
+  {
+    "claim_id": "fact:23364",
+    "claim_json": {
+      "subject": {
+        "text": "Strain 1RE7",
+        "type": "MicrobialStrain",
+        "mention": "Strain 1RE7",
+        "process": null
+      },
+      "object": {
+        "text": "quercetin",
+        "type": "DietaryComponent",
+        "mention": "quercetin",
+        "process": null
+      },
+      "predicate": "CONSUMES",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "product",
+          "entity": {
+            "text": "rutin",
+            "type": "DietaryComponent",
+            "mention": "rutin",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "The strain consumes both rutin and quercetin."
+      }
+    },
+    "expected_rules": [
+      "V4-PRODUCT-ROLE"
+    ]
+  }
+]

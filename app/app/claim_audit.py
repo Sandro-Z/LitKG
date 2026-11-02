@@ -16,6 +16,8 @@ def fixture_claim(row):
     for p in row.get('participants', []):
         if p.get('role') in {'subject', 'object'}:
             claim[p['role']] = copy.deepcopy(p['entity'])
+    claim['participants'] = [{'role':p['role'],'entity':copy.deepcopy(p['entity'])}
+                             for p in row.get('participants',[]) if p.get('role') not in {'subject','object'} and isinstance(p.get('entity'),dict)]
     claim['evidence'] = copy.deepcopy(row.get('evidence') or {'sentence': row.get('evidence_text', '')})
     return claim
 
