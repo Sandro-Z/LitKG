@@ -83,7 +83,7 @@ def audit_polarity(claim):
 
 
 def audit_claim(claim):
-    return audit_polarity(claim) + audit_certainty(claim) + audit_comparison(claim)
+    return audit_polarity(claim) + audit_certainty(claim) + audit_comparison(claim) + audit_entity_text(claim)
 
 
 HEDGE = re.compile(r"\b(?:may(?!(?:\s|,)+\d)|might|could(?! not)|suggest(?:s|ed|ing)?|propos(?:e|es|ed)|(?:is |was |are |were )?thought to|likely|potentially)\b")
@@ -282,4 +282,56 @@ def audit_comparison(claim):
         return findings
     if (direction == 'increased' and max(a) < min(b)) or (direction == 'decreased' and min(a) > max(b)):
         flag('V4-NUMERIC-DIRECTION',f'{focal}: {a}; {reference}: {b}; direction={direction}','qualifiers.direction')
+    return findings
+
+
+ENTITY_WORD_LIMIT = 20
+FINITE_ENTITY_VERB = re.compile(r'\b(?:(?:is|are|was|were|has|have)\s+(?:(?:being|been)\s+)?(?:produced|expressed|consumed|increased|decreased|converted|inhibited|activated)|increases|decreases|produces|consumes|activates|inhibits|causes|induces|binds|converts|correlates)\b')
+
+
+def _guard_entities(claim):
+    for role in ('subject','object'):
+        if isinstance(claim.get(role),dict):
+            yield role,claim[role]
+    for index,participant in enumerate(claim.get('participants',[])):
+        if isinstance(participant,dict) and isinstance(participant.get('entity'),dict):
+            yield f'participants.{index}.entity',participant['entity']
+
+
+def _slot_strings(value, prefix):
+    if isinstance(value,str):
+        yield prefix,value
+    elif isinstance(value,dict):
+        for key,item in value.items():
+            yield from _slot_strings(item,prefix+'.'+str(key))
+    elif isinstance(value,list):
+        for index,item in enumerate(value):
+            yield from _slot_strings(item,prefix+'.'+str(index))
+
+
+def audit_entity_text(claim):
+    findings = []
+    def flag(rule,cue,field):
+        findings.append({'rule_id':rule,'cue':cue,'field':field,'action':'needs_review'})
+    for path,entity in _guard_entities(claim):
+        text = _text(entity.get('text'))
+        if len(text.split()) > ENTITY_WORD_LIMIT:
+            flag('V5-ENTITY-LENGTH',f'{len(text.split())} words; limit={ENTITY_WORD_LIMIT}',path+'.text')
+        verb = FINITE_ENTITY_VERB.search(text)
+        if verb:
+            flag('V5-ENTITY-CLAUSE',verb.group(0),path+'.text')
+    quote = _text((claim.get('evidence') or {}).get('sentence'))
+    slots = list(_slot_strings(claim.get('qualifiers') or {},'qualifiers'))
+    slots += [(path+'.text',entity.get('text','')) for path,entity in _guard_entities(claim)]
+    for path,value in slots:
+        text = _text(value)
+        if re.search(r'(?:\.{3}|…)$|\s+(?:and|or|of|to|with|by)$',text):
+            flag('V5-TRUNCATED-SLOT',text,path)
+            continue
+        tail = re.search(r'[a-z]{4,}$',text)
+        if not tail or not quote or re.search(r'(?<!\w)'+re.escape(text)+r'(?!\w)',quote):
+            continue
+        partial = re.search(r'(?<!\w)'+re.escape(text)+r'([a-z]{3,})\b',quote)
+        if partial:
+            flag('V5-TRUNCATED-SLOT',text,path)
     return findings

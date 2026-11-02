@@ -11,6 +11,7 @@ from app.normalization import (
     compatible_entity_types,
     entity_family,
     entity_identity,
+    entity_alias_keys,
     identifier_namespace,
     identity_identifier_key,
     identity_modifiers,
@@ -144,12 +145,13 @@ def _reconcile_exact_names(cur, existing, identity):
           AND EXISTS (SELECT 1 FROM entity_aliases alias WHERE alias.entity_id = entity.id AND alias.normalized_alias = ANY(%s::TEXT[]))
         ORDER BY id LIMIT 10
         """,
-        (compatible_entity_types(identity.entity_type), [identity.normalized_alias, normalize_alias(identity.canonical_name)]),
+        (compatible_entity_types(identity.entity_type), sorted(entity_alias_keys(identity.canonical_name,identity.entity_type))),
     )
     rows = cur.fetchall()
     if len(rows) == 10:
         return existing
-    candidates = [row for row in rows if normalize_entity_alias(row["canonical_name"], identity.entity_type) == identity.normalized_alias]
+    candidates = [row for row in rows if normalize_entity_alias(row["canonical_name"], identity.entity_type) == identity.normalized_alias
+                  and identity_modifiers(row['canonical_name']) == identity_modifiers(identity.canonical_name)]
     if not any(row["id"] == existing["id"] for row in candidates):
         return existing
     if len(candidates) < 2:
@@ -200,10 +202,7 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
     if not existing and not identity.document_scoped and not identity.context_ambiguous and not identity.local_label:
         # A document-defined abbreviation must match its expansion, never a
         # globally shared short symbol such as AR with another definition.
-        lookup_keys = {
-            identity.normalized_alias,
-            normalize_alias(identity.canonical_name),
-        }
+        lookup_keys = entity_alias_keys(identity.canonical_name,identity.entity_type)
         cur.execute(
             """
             SELECT DISTINCT entity.id, entity.canonical_name, entity.normalized_id, entity.entity_type
@@ -285,6 +284,9 @@ def upsert_entity(cur, identity: EntityIdentity, *, reconcile_existing: bool = F
                 """,
                 (entity_id, alias, key),
             )
+    if reconcile_existing and existing is None:
+        cur.execute('SELECT id,canonical_name,normalized_id,entity_type FROM entities WHERE id=%s',(entity_id,))
+        entity_id = _reconcile_exact_names(cur,cur.fetchone(),identity)['id']
     return entity_id
 
 

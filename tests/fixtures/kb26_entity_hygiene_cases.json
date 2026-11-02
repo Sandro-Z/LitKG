@@ -1,0 +1,201 @@
+[
+  {
+    "claim_id": "fact:19417",
+    "claim_json": {
+      "subject": {
+        "text": "Olfr78",
+        "type": "Protein",
+        "mention": "Olfr78",
+        "process": null
+      },
+      "object": {
+        "text": "acetate is produced by enteric bacteria",
+        "type": "Metabolite",
+        "mention": "acetate",
+        "process": null
+      },
+      "predicate": "BINDS_TO",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "ligand",
+          "entity": {
+            "text": "propionate",
+            "type": "Metabolite",
+            "mention": "propionate",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "e receptor Olfr78 in mice, OR51E2 59 being the human equivalent, mainly binds acetate and propionate and is expressed on vascular smooth muscle cells of peripheral vasculature and the renal afferent arteriole."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19418",
+    "claim_json": {
+      "subject": {
+        "text": "OR51E2",
+        "type": "Protein",
+        "mention": "OR51E2",
+        "process": null
+      },
+      "object": {
+        "text": "acetate is produced by enteric bacteria",
+        "type": "Metabolite",
+        "mention": "acetate",
+        "process": null
+      },
+      "predicate": "BINDS_TO",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "ligand",
+          "entity": {
+            "text": "propionate",
+            "type": "Metabolite",
+            "mention": "propionate",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "e receptor Olfr78 in mice, OR51E2 59 being the human equivalent, mainly binds acetate and propionate and is expressed on vascular smooth muscle cells of peripheral vasculature and the renal afferent arteriole."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19419",
+    "claim_json": {
+      "subject": {
+        "text": "acetate is produced by enteric bacteria",
+        "type": "Metabolite",
+        "mention": "acetate",
+        "process": null
+      },
+      "object": {
+        "text": "cyclic adenosine monophosphate (cAMP)",
+        "type": "Metabolite",
+        "mention": "cyclic adenosine monophosphate (cAMP)",
+        "process": {
+          "kind": "concentration",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [
+        {
+          "role": "cell_type",
+          "entity": {
+            "text": "vascular smooth muscle cells",
+            "type": "CellType",
+            "mention": "vascular smooth muscle cells",
+            "process": null
+          }
+        },
+        {
+          "role": "ligand",
+          "entity": {
+            "text": "propionate",
+            "type": "Metabolite",
+            "mention": "propionate",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "In vascular smooth muscle cells, binding of acetate or propionate to the receptor leads to an increase in cyclic adenosine monophosphate (cAMP), a second messenger with a wide variety of possible effects."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19421",
+    "claim_json": {
+      "subject": {
+        "text": "acetate is produced by enteric bacteria",
+        "type": "Metabolite",
+        "mention": "acetate",
+        "process": null
+      },
+      "object": {
+        "text": "renin",
+        "type": "Protein",
+        "mention": "renin",
+        "process": {
+          "kind": "secretion",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [
+        {
+          "role": "cell_type",
+          "entity": {
+            "text": "renal afferent arteriole cells",
+            "type": "CellType",
+            "mention": "renal afferent arteriole cells",
+            "process": null
+          }
+        },
+        {
+          "role": "ligand",
+          "entity": {
+            "text": "propionate",
+            "type": "Metabolite",
+            "mention": "propionate",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "In renal afferent arteriole cells, binding of acetate or propionate results in an increase in renin release which can contribute to an increase in blood pressure"
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19430",
+    "claim_json": {
+      "subject": {
+        "text": "acetate is produced by enteric bacteria",
+        "type": "Metabolite",
+        "mention": "acetate",
+        "process": null
+      },
+      "object": {
+        "text": "liver",
+        "type": "AnatomicalStructure",
+        "mention": "liver",
+        "process": {
+          "kind": "activity",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "process_aspect": "various functions"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [],
+      "evidence": {
+        "sentence": "About 70% of acetate is taken up by liver and used for various functions (Figure 5a)"
+      }
+    }
+  }
+]

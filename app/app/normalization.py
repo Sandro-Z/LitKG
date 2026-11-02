@@ -87,9 +87,34 @@ def normalize_entity_alias(value: str | None, entity_type: str) -> str:
     elif canonical_type == "Disease":
         text = re.sub(r"[\s_-]+", " ", text)
     else:
-        # Chemical hyphens can carry stereochemical meaning.
-        text = re.sub(r"\s*-\s*", "-", text)
+        # Keep strain/genome/sequence punctuation and stereochemical notation.
+        protected = canonical_type in {'MicrobialStrain','Genome','SequenceFeature','Other'}
+        stereo = canonical_type in {'Drug','Compound','Metabolite'} and re.search(r'\b(?:[dlrsez]|cis|trans)[-_ ]',text)
+        if protected or stereo:
+            text = re.sub(r"\s*-\s*", "-", text)
+        else:
+            text = re.sub(r'(?<=\w)[\s_-]+(?=\w)',' ',text)
+        if canonical_type in {'Drug','Compound','Metabolite'}:
+            text = re.sub(r'\s+([+-])$',r'\1',text)
     return text
+
+
+def entity_alias_keys(value: str, entity_type: str) -> set[str]:
+    """Finite indexed lookup keys for legacy separator styles, not fuzzy names."""
+    raw = normalize_alias(value)
+    normalized = normalize_entity_alias(value,entity_type)
+    canonical_type = normalize_entity_type(entity_type)
+    protected = canonical_type in {'MicrobialStrain','Genome','SequenceFeature','Other'}
+    stereo = entity_family(entity_type) == 'Chemical' and re.search(r'\b(?:[dlrsez]|cis|trans)[-_ ]',raw)
+    if protected or stereo:
+        return {raw,normalized}
+    words = re.sub(r'(?<=\w)[\s_-]+(?=\w)',' ',raw.translate(_GREEK))
+    if entity_family(entity_type) == 'Chemical':
+        words = re.sub(r'\s+([+-])$',r'\1',words)
+    keys = {raw,normalized,words,re.sub(r'(?<=\w) (?=\w)','-',words),re.sub(r'(?<=\w) (?=\w)','_',words)}
+    if entity_family(entity_type) == 'Chemical' and normalized.endswith(('+','-')):
+        keys.add(normalized[:-1]+' '+normalized[-1])
+    return keys
 
 
 def normalize_external_id(value: str | None) -> str | None:
