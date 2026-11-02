@@ -129,6 +129,8 @@ def display_negated(value):
 
 def check_semantics(claim, repairs):
     """Reject structural errors; quarantine semantic risks as reviewable claims."""
+    from app.claim_guards import add_guard_reasons
+    add_guard_reasons(claim)
     s, o = claim.subject, claim.object
     quote = ' '.join(e.sentence for e in [claim.evidence, *claim.additional_evidence])
     same = s.text.casefold() == o.text.casefold() and s.type == o.type

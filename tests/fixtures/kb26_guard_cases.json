@@ -1,0 +1,574 @@
+[
+  {
+    "claim_id": "fact:14711",
+    "claim_json": {
+      "subject": {
+        "text": "tumor mutation burden",
+        "type": "Phenotype",
+        "mention": "tumor mutation burden",
+        "process": null
+      },
+      "object": {
+        "text": "clinical outcome",
+        "type": "ClinicalOutcome",
+        "mention": "clinical outcome",
+        "process": null
+      },
+      "predicate": "PREDICTS",
+      "qualifiers": {
+        "prediction_target": "clinical outcome"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Insufficient tumor tissue was available to evaluate the role of tumor mutation burden, PD-L1 expression, and interferon-g (IFN-g) gene expression signature in predicting clinical outcome."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:14712",
+    "claim_json": {
+      "subject": {
+        "text": "PD-L1 expression",
+        "type": "Phenotype",
+        "mention": "PD-L1 expression",
+        "process": null
+      },
+      "object": {
+        "text": "clinical outcome",
+        "type": "ClinicalOutcome",
+        "mention": "clinical outcome",
+        "process": null
+      },
+      "predicate": "PREDICTS",
+      "qualifiers": {
+        "prediction_target": "clinical outcome"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Insufficient tumor tissue was available to evaluate the role of tumor mutation burden, PD-L1 expression, and interferon-g (IFN-g) gene expression signature in predicting clinical outcome."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:14713",
+    "claim_json": {
+      "subject": {
+        "text": "interferon-g (IFN-g) gene expression signature",
+        "type": "Phenotype",
+        "mention": "interferon-g (IFN-g) gene expression signature",
+        "process": null
+      },
+      "object": {
+        "text": "clinical outcome",
+        "type": "ClinicalOutcome",
+        "mention": "clinical outcome",
+        "process": null
+      },
+      "predicate": "PREDICTS",
+      "qualifiers": {
+        "prediction_target": "clinical outcome"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Insufficient tumor tissue was available to evaluate the role of tumor mutation burden, PD-L1 expression, and interferon-g (IFN-g) gene expression signature in predicting clinical outcome."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:15350",
+    "claim_json": {
+      "subject": {
+        "text": "gene counts",
+        "type": "DiversityMetric",
+        "mention": "gene counts",
+        "process": null
+      },
+      "object": {
+        "text": "body mass index",
+        "type": "Phenotype",
+        "mention": "BMI",
+        "process": null
+      },
+      "predicate": "CORRELATED_WITH",
+      "qualifiers": {
+        "evidence_type": "observational",
+        "association_direction": "unspecified"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "All but two (BMI and weight) of the observed differences between LGC and HGC individuals were found significantly associated with the gene counts (Table 1)."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:15351",
+    "claim_json": {
+      "subject": {
+        "text": "gene counts",
+        "type": "DiversityMetric",
+        "mention": "gene counts",
+        "process": null
+      },
+      "object": {
+        "text": "weight",
+        "type": "Phenotype",
+        "mention": "weight",
+        "process": null
+      },
+      "predicate": "CORRELATED_WITH",
+      "qualifiers": {
+        "evidence_type": "observational",
+        "association_direction": "unspecified"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "All but two (BMI and weight) of the observed differences between LGC and HGC individuals were found significantly associated with the gene counts (Table 1)."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:16212",
+    "claim_json": {
+      "subject": {
+        "text": "Blautia wexlerae",
+        "type": "MicrobialTaxon",
+        "mention": "B. wexlerae",
+        "process": null
+      },
+      "object": {
+        "text": "choline",
+        "type": "Metabolite",
+        "mention": "choline",
+        "process": null
+      },
+      "predicate": "CONSUMES",
+      "qualifiers": {
+        "result_interpretation": "not_assessed"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Indeed, serine-but not choline-was decreased in B. wexlerae-cultured supernatant but not in that from other major intestinal bacteria, suggesting that B. wexlerae may uniquely utilize extracellular serine rather than choline to synthesize acetylcholine (Supplementary Fig. 22B)."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:16219",
+    "claim_json": {
+      "subject": {
+        "text": "Blautia abundance",
+        "type": "MicrobialTaxon",
+        "mention": "Blautia abundance",
+        "process": null
+      },
+      "object": {
+        "text": "serum or fecal L-ornithine levels",
+        "type": "Metabolite",
+        "mention": "serum or fecal L-ornithine levels",
+        "process": null
+      },
+      "predicate": "CORRELATED_WITH",
+      "qualifiers": {
+        "association_direction": "unspecified"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "In humans, no relationship between Blautia abundance and serum or fecal L-ornithine levels has yet been identified"
+      }
+    }
+  },
+  {
+    "claim_id": "fact:17863",
+    "claim_json": {
+      "subject": {
+        "text": "Gram-negative bacteria",
+        "type": "MicrobialTaxon",
+        "mention": "Gram-negative bacteria",
+        "process": null
+      },
+      "object": {
+        "text": "Complex, heavier and larger compounds",
+        "type": "Compound",
+        "mention": "Complex, heavier and larger compounds",
+        "process": {
+          "kind": "activity",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Complex, heavier and larger compounds preferentially targeted Gram-positive bacteria, whereas Gram-negative bacteria were protected against such bulkier drugs by their selective outer membrane barrier (ED Fig. 12)."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19471",
+    "claim_json": {
+      "subject": {
+        "text": "HDAC",
+        "type": "Protein",
+        "mention": "HDAC",
+        "process": null
+      },
+      "object": {
+        "text": "peptide YY",
+        "type": "Protein",
+        "mention": "PYY",
+        "process": {
+          "kind": "expression",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Additionally, butyrate's inhibitory action on HDAC leads to an increased expression of PYY in human L-cells."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19526",
+    "claim_json": {
+      "subject": {
+        "text": "butyrate-induced inhibition of HDAC",
+        "type": "BiologicalProcess",
+        "mention": "butyrate-induced inhibition of HDAC",
+        "process": {
+          "kind": "activity",
+          "direction": "decreased"
+        }
+      },
+      "object": {
+        "text": "IL-8 production",
+        "type": "Protein",
+        "mention": "IL-8 production",
+        "process": {
+          "kind": "production",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Additionally, butyrate-induced inhibition of HDAC leads to increased protein acetylation and a decrease of IL-8 production in intestinal epithelial cells."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19540",
+    "claim_json": {
+      "subject": {
+        "text": "HDAC",
+        "type": "Protein",
+        "mention": "HDAC",
+        "process": null
+      },
+      "object": {
+        "text": "regulatory T-cells",
+        "type": "CellType",
+        "mention": "regulatory T-cells",
+        "process": {
+          "kind": "abundance",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": true,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "The proposed causal mechanism is currently attributed to butyrate's inhibitory effects on HDAC, where inhibition of HDAC is proposed to cause increases in regulatory T-cells."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19545",
+    "claim_json": {
+      "subject": {
+        "text": "HDAC",
+        "type": "Protein",
+        "mention": "HDAC",
+        "process": null
+      },
+      "object": {
+        "text": "INF-γ",
+        "type": "Protein",
+        "mention": "INF-γ",
+        "process": {
+          "kind": "expression",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Additionally, in cytotoxic T-cells, butyrate and propionate inhibition of HDAC has been shown to modulate gene expression by promoting INF-γ expression."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19549",
+    "claim_json": {
+      "subject": {
+        "text": "butyrate",
+        "type": "Metabolite",
+        "mention": "butyrate",
+        "process": null
+      },
+      "object": {
+        "text": "anti-inflammatory properties",
+        "type": "BiologicalProcess",
+        "mention": "anti-inflammatory properties",
+        "process": {
+          "kind": "activity",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "esearch substantially supports that the SCFA butyrate, specifically, has anti-inflammatory properties thought to be owing to an epigenetic mechanism 134 or to the effects of SCFA receptors."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:19550",
+    "claim_json": {
+      "subject": {
+        "text": "these receptor effects",
+        "type": "Protein",
+        "mention": "these receptor effects",
+        "process": null
+      },
+      "object": {
+        "text": "anti-microbial",
+        "type": "BiologicalProcess",
+        "mention": "anti-microbial",
+        "process": {
+          "kind": "activity",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "It has also been shown that these receptor effects are anti-inflammatory, anti-microbial, and decrease intestinal barrier leakiness 126 by maintaining tight junctions and preventing dysbiosis-associated gut permeability. 135"
+      }
+    }
+  },
+  {
+    "claim_id": "fact:20470",
+    "claim_json": {
+      "subject": {
+        "text": "emergence of enterotypes",
+        "type": "BiologicalProcess",
+        "mention": "emergence of enterotypes",
+        "process": null
+      },
+      "object": {
+        "text": "community structure",
+        "type": "MicrobialCommunity",
+        "mention": "community structure",
+        "process": null
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "We find that the emergence of enterotypes is sensitive to the community structure of communities within each body site, and importantly also to the analysis methods employed."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:20471",
+    "claim_json": {
+      "subject": {
+        "text": "emergence of enterotypes",
+        "type": "BiologicalProcess",
+        "mention": "emergence of enterotypes",
+        "process": null
+      },
+      "object": {
+        "text": "analysis methods",
+        "type": "Assay",
+        "mention": "analysis methods",
+        "process": null
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "We find that the emergence of enterotypes is sensitive to the community structure of communities within each body site, and importantly also to the analysis methods employed."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:23344",
+    "claim_json": {
+      "subject": {
+        "text": "functional transporters",
+        "type": "Protein",
+        "mention": "functional transporters",
+        "process": null
+      },
+      "object": {
+        "text": "importing conjugated BAs",
+        "type": "BiologicalProcess",
+        "mention": "importing conjugated BAs",
+        "process": {
+          "kind": "activity",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "author_statement"
+      },
+      "negated": false,
+      "speculative": true,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "This lack of activity may result from the absence of functional transporters for importing conjugated BAs"
+      }
+    }
+  },
+  {
+    "claim_id": "fact:23368",
+    "claim_json": {
+      "subject": {
+        "text": "Hungate tubes",
+        "type": "ExperimentalModel",
+        "mention": "Hungate tubes",
+        "process": null
+      },
+      "object": {
+        "text": "Colossal Mega Medium",
+        "type": "Diet",
+        "mention": "CMM",
+        "process": null
+      },
+      "predicate": "PART_OF",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "cultures were started from freezer stocks and grown overnight to a high density (O.D. 600 range of 0.349-1.9, measured directly in the tube) in Hungate tubes containing CMM with an atmosphere of 75% N 2 , 20% CO 2, 5% H 2 at 37 °C."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:23369",
+    "claim_json": {
+      "subject": {
+        "text": "Hungate tubes",
+        "type": "ExperimentalModel",
+        "mention": "Hungate tubes",
+        "process": null
+      },
+      "object": {
+        "text": "Colossal Mega Medium",
+        "type": "Diet",
+        "mention": "CMM",
+        "process": null
+      },
+      "predicate": "PART_OF",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "These cultures were then used to inoculate (1:15 dilution) 3 mL of CMM in Hungate tubes amended with BAs."
+      }
+    }
+  },
+  {
+    "claim_id": "fact:23383",
+    "claim_json": {
+      "subject": {
+        "text": "taurine-preferring BSH",
+        "type": "Protein",
+        "mention": "taurine-preferring BSH",
+        "process": null
+      },
+      "object": {
+        "text": "G-X-G",
+        "type": "SequenceFeature",
+        "mention": "G-X-G",
+        "process": null
+      },
+      "predicate": "PART_OF",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "a taurine-preferring BSH contains \"G-X-G\" motif"
+      }
+    }
+  },
+  {
+    "claim_id": "fact:23384",
+    "claim_json": {
+      "subject": {
+        "text": "glycine-preferring BSH",
+        "type": "Protein",
+        "mention": "glycine-preferring BSH",
+        "process": null
+      },
+      "object": {
+        "text": "S-R-X",
+        "type": "SequenceFeature",
+        "mention": "S-R-X",
+        "process": null
+      },
+      "predicate": "PART_OF",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "a glycine-preferring BSH contains \"S-R-X\" motif"
+      }
+    }
+  }
+]

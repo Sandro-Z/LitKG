@@ -399,6 +399,8 @@ def load_catalog(cur, document_id, version):
 
 def add_review(cur, document_id, version, kind, detail, status='pending'):
     key = [kind, detail]
+    if kind == 'claim_audit':
+        key = [kind, detail['claim_id']]
     if kind in {'catalog_rejection', 'claim_rejection'}:
         label = 'entity' if kind == 'catalog_rejection' else 'claim'
         key = [kind, detail.get('chunk_id'), detail.get('start'), detail.get(label + '_index'), detail.get(label)]

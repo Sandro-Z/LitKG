@@ -226,6 +226,16 @@ def apply_plan(plan):
                     chunk_map[cid] = updated
             written = []
             allowed_ids = {c['id'] for c in claims}
+            if plan.get('mode') == 'audit':
+                from app.claim_guards import audit_claim
+                if plan['changes'] or plan['corrections'] or plan['input_issues']:
+                    raise ValueError('Audit plans may only add review conclusions')
+                for issue in plan['reviews']:
+                    original = next((c for c in claims if c['id'] == issue.get('claim_id')), None)
+                    if original is None or issue.get('chunk_id') != original['chunk_id']:
+                        raise ValueError('Audit review outside selected claims')
+                    if issue.get('findings') != audit_claim(original['claim_json']) or issue.get('active') != bool(issue['findings']):
+                        raise ValueError('Audit rules changed since preview; create a new plan')
             for change in plan['changes']:
                 if change['operation'] == 'quarantine':
                     if change['claim_id'] not in allowed_ids:
@@ -262,7 +272,8 @@ def apply_plan(plan):
                 add_review(cur, doc_id, document.get('catalog_version'), 'input_quality',
                     {**issue, 'run_id': plan['run_id'], 'corrections': matching}, status='resolved' if matching else 'pending')
             for issue in plan['reviews']:
-                add_review(cur, doc_id, document.get('catalog_version'), 'claim_rejection', {**issue, 'run_id': plan['run_id']})
+                kind = 'claim_audit' if plan.get('mode') == 'audit' else 'claim_rejection'
+                add_review(cur, doc_id, document.get('catalog_version'), kind, {**issue, 'run_id': plan['run_id']})
             cur.execute('INSERT INTO derived_dirty_documents(document_id) VALUES (%s) ON CONFLICT(document_id) DO UPDATE SET revision=derived_dirty_documents.revision+1', (doc_id,))
             # Record all claims in affected chunks to detect concurrent additions
             # before rollback, even for a claim-scoped repair.

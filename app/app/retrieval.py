@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from app.catalog import PROCESSING_VERSION, digest, add_review
 from app.graph_query import substring_pattern
+from app.claim_guards import audit_pending_sql
 from app.normalization import stable_json
 
 
@@ -65,7 +66,7 @@ def _put(cur, kb, kind, source_id, content, sources, warnings):
 
 
 def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=100, offset=0, after_id=None):
-    cur.execute("""SELECT f.*, c.document_id, c.chunk_id, c.confidence, c.claim_json,
+    cur.execute(f"""SELECT {audit_pending_sql('c')} AS audit_pending, f.*, c.document_id, c.chunk_id, c.confidence, c.claim_json,
         c.extraction_model, c.processing_version AS claim_processing_version, ch.extraction_version AS chunk_extraction_version,
         d.title, d.doi, d.filename, ch.text AS source_text, ch.section_title,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'kind',r.kind,'status',r.status,'note',r.note) ORDER BY r.id)
@@ -235,20 +236,22 @@ def retrieve(cur, kb, question, limit=12, hops=1):
     # including intermediate nodes, preventing cross-KB traversal.
     ids = list(seeds)
     for _ in range(hops):
-        cur.execute("""SELECT DISTINCT f.id FROM facts f JOIN claims c ON c.id=f.claim_id
+        cur.execute(f"""SELECT DISTINCT f.id FROM facts f JOIN claims c ON c.id=f.claim_id
             JOIN documents d ON d.id=c.document_id JOIN knowledge_base_documents m ON m.document_id=c.document_id
             JOIN fact_participants p ON p.fact_id=f.id WHERE m.knowledge_base_id=%s
             AND f.catalog_version IS NOT DISTINCT FROM d.catalog_version AND d.catalog_status IN ('done','legacy')
             AND COALESCE(c.claim_json->>'semantic_status','unknown') <> 'pending'
+            AND NOT ({audit_pending_sql('c')})
             AND (p.entity_id=ANY(%s::BIGINT[]) OR p.entity_id IN (
                 SELECT p2.entity_id FROM fact_participants p2 JOIN facts f2 ON f2.id=p2.fact_id
                 JOIN claims c2 ON c2.id=f2.claim_id JOIN knowledge_base_documents m2 ON m2.document_id=c2.document_id
                 WHERE m2.knowledge_base_id=%s AND f2.id=ANY(%s::BIGINT[])
-                AND COALESCE(c2.claim_json->>'semantic_status','unknown') <> 'pending'))
+                AND COALESCE(c2.claim_json->>'semantic_status','unknown') <> 'pending'
+                AND NOT ({audit_pending_sql('c2')})))
             ORDER BY f.id LIMIT %s""", (kb, entities, kb, ids, limit*3))
         ids = list(dict.fromkeys(ids + [r["id"] for r in cur.fetchall()]))[:limit*3]
     rows = fetch_facts(cur, kb, fact_ids=ids, limit=limit*3) if ids else []
-    rows = [row for row in rows if (row.get('claim_json') or {}).get('semantic_status') != 'pending']
+    rows = [row for row in rows if (row.get('claim_json') or {}).get('semantic_status') != 'pending' and not row.get('audit_pending')]
     rows.sort(key=lambda r: (-scores["fact"].get(r["id"], 0), r["id"]))
     citations, facts, budget = [], [], 36000
     for row in rows:

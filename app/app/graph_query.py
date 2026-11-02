@@ -5,6 +5,7 @@ from app.normalization import normalize_entity_type, normalize_predicate
 from app.graph_diagnostics import connectivity_metrics
 from app.provenance import evidence_location
 from app.claim_semantics import result_sql, result_view, display_negated
+from app.claim_guards import audit_pending_sql
 from app.predicate_registry import PREDICATES
 
 
@@ -15,7 +16,8 @@ def substring_pattern(query: str) -> str:
 
 
 def current_claim_clause(alias='c', include_pending=False):
-    reviewed = '' if include_pending else f" AND COALESCE({alias}.claim_json->>'semantic_status','unknown') <> 'pending'"
+    reviewed = '' if include_pending else f""" AND COALESCE({alias}.claim_json->>'semantic_status','unknown') <> 'pending'
+        AND NOT ({audit_pending_sql(alias)})"""
     return f"""EXISTS (SELECT 1 FROM documents source_document WHERE source_document.id={alias}.document_id
         AND source_document.catalog_status IN ('done','legacy')
         AND {alias}.catalog_version IS NOT DISTINCT FROM source_document.catalog_version)""" + reviewed
@@ -168,7 +170,7 @@ def fetch_graph(
                 c.id AS claim_id,
                 c.document_id,
                 c.evidence_text,
-                COALESCE(c.claim_json->>'semantic_status','unknown')='pending' AS semantic_pending,
+                (COALESCE(c.claim_json->>'semantic_status','unknown')='pending' OR {audit_pending_sql('c')}) AS semantic_pending,
                 c.confidence
             FROM relation_evidence re
             JOIN claims c ON c.id = re.claim_id
