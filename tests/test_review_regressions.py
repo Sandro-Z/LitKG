@@ -98,7 +98,11 @@ class ReviewSemanticsTests(unittest.TestCase):
         self.assertEqual(prepared(wrong).claims[0].semantic_status, 'pending')
         valid = candidate('IL-2 autoregulates IL-2 expression.', entity('IL-2','Protein'),
             entity('IL-2','Protein', {'kind':'expression','direction':'increased'}))
-        self.assertEqual(prepared(valid).claims[0].semantic_status, 'accepted')
+        # P1 V6 requires review for every self-loop, including explicit
+        # autoregulation. The assertion remains available as a pending claim.
+        reviewed=prepared(valid).claims[0]
+        self.assertEqual(reviewed.semantic_status, 'pending')
+        self.assertTrue(any('V6-SELF-LOOP' in r for r in reviewed.review_reasons))
 
     def test_method_self_measurement_and_recruitment_are_rejected_but_real_measurement_passes(self):
         bad = candidate('Flow cytometry measured CD8 cells.', entity('Flow cytometry','Assay'), entity('Flow cytometry','Assay'), 'MEASURED_BY')

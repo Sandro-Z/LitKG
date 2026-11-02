@@ -227,14 +227,14 @@ def apply_plan(plan):
             written = []
             allowed_ids = {c['id'] for c in claims}
             if plan.get('mode') == 'audit':
-                from app.claim_guards import audit_claim
+                from app.claim_audit import audit_row
                 if plan['changes'] or plan['corrections'] or plan['input_issues']:
                     raise ValueError('Audit plans may only add review conclusions')
                 for issue in plan['reviews']:
                     original = next((c for c in claims if c['id'] == issue.get('claim_id')), None)
                     if original is None or issue.get('chunk_id') != original['chunk_id']:
                         raise ValueError('Audit review outside selected claims')
-                    if issue.get('findings') != audit_claim(original['claim_json']) or issue.get('active') != bool(issue['findings']):
+                    if issue.get('findings') != audit_row(original,section=chunk_map[original['chunk_id']].get('section_title') or '') or issue.get('active') != bool(issue['findings']):
                         raise ValueError('Audit rules changed since preview; create a new plan')
             for change in plan['changes']:
                 if change['operation'] == 'quarantine':

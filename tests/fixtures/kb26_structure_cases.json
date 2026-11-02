@@ -1,0 +1,498 @@
+[
+  {
+    "claim_id": "fact:17929",
+    "claim_json": {
+      "subject": {
+        "text": "fraction of affected species",
+        "type": "Other",
+        "mention": "fraction of affected species",
+        "process": null
+      },
+      "object": {
+        "text": "chemical property",
+        "type": "Other",
+        "mention": "chemical property",
+        "process": null
+      },
+      "predicate": "CORRELATED_WITH",
+      "qualifiers": {
+        "association_direction": "unspecified"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [],
+      "evidence": {
+        "sentence": "For each chemical property, we used a Type II ANOVA to test for linear dependency between the fraction of affected species and the chemical property (slope)."
+      }
+    },
+    "expected_rule": "V6-METHOD-INTENT"
+  },
+  {
+    "claim_id": "fact:21703",
+    "claim_json": {
+      "subject": {
+        "text": "meta-analyses of shotgun metagenomic data",
+        "type": "Assay",
+        "mention": "meta-analyses of shotgun metagenomic data",
+        "process": null
+      },
+      "object": {
+        "text": "features of general dysbiosis",
+        "type": "Phenotype",
+        "mention": "features of general dysbiosis",
+        "process": {
+          "kind": "activity",
+          "direction": "increased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "author_statement"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [],
+      "evidence": {
+        "sentence": "Thus far however, meta-analyses of shotgun metagenomic data have either reported on features of general dysbiosis in comparisons across multiple diseases [19], or have left it unclear how well microbiome signatures generalize across studies of the same disease when data are rigorously separated to avoid over-optimistic evaluations of their prediction accuracy [20]."
+      }
+    },
+    "expected_rule": "V6-DISCOURSE-EFFECT"
+  },
+  {
+    "claim_id": "fact:22698",
+    "claim_json": {
+      "subject": {
+        "text": "C10(pB6)",
+        "type": "MicrobialStrain",
+        "mention": "C10(pB6)",
+        "process": null
+      },
+      "object": {
+        "text": "C10(pB6)",
+        "type": "StudyGroup",
+        "mention": "C10(pB6)",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "growth",
+        "direction": "decreased",
+        "reference_group": "wild-type",
+        "comparison_group": "C10(pB6)"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [
+        {
+          "role": "comparison_group",
+          "entity": {
+            "text": "C10(pB6)",
+            "type": "StudyGroup",
+            "mention": "C10(pB6)",
+            "process": null
+          }
+        },
+        {
+          "role": "reference_group",
+          "entity": {
+            "text": "wild-type",
+            "type": "StudyGroup",
+            "mention": "wild-type",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "In contrast, the two strains exhibited a marked discrepancy in their ability to grow on choline. Whereas the wild-type strain could both ferment choline and use it for growth with sulfate as a terminal electron acceptor, strain C10(pB6) was unable to grow in either choline-containing media."
+      }
+    },
+    "expected_rule": "V6-SELF-LOOP"
+  },
+  {
+    "claim_id": "fact:22858",
+    "claim_json": {
+      "subject": {
+        "text": "Gut methanogens",
+        "type": "MicrobialCommunity",
+        "mention": "Gut methanogens",
+        "process": null
+      },
+      "object": {
+        "text": "Gut methanogens",
+        "type": "StudyGroup",
+        "mention": "Gut methanogens",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "abundance",
+        "direction": "decreased",
+        "reference_group": "non-gut-associated methanogens",
+        "comparison_group": "Gut methanogens"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [
+        {
+          "role": "comparison_group",
+          "entity": {
+            "text": "Gut methanogens",
+            "type": "StudyGroup",
+            "mention": "Gut methanogens",
+            "process": null
+          }
+        },
+        {
+          "role": "reference_group",
+          "entity": {
+            "text": "non-gut-associated methanogens",
+            "type": "StudyGroup",
+            "mention": "non-gut-associated methanogens",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "Gut methanogens (highlighted in orange) have no GH or CE family members but have a larger proportion of family 2 GTs (⌿, P Ͻ 0.00005 on the basis of binomial test for enrichment vs. non-gut-associated methanogens)."
+      }
+    },
+    "expected_rule": "V6-SELF-LOOP"
+  },
+  {
+    "claim_id": "fact:23069",
+    "claim_json": {
+      "subject": {
+        "text": "fldC mutant",
+        "type": "MicrobialStrain",
+        "mention": "fldC mutant",
+        "process": null
+      },
+      "object": {
+        "text": "fldC mutant",
+        "type": "StudyGroup",
+        "mention": "fldC mutant",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "IPA accumulation",
+        "direction": "decreased",
+        "reference_group": "wild-type C. sporogenes",
+        "comparison_group": "fldC mutant"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "participants": [
+        {
+          "role": "comparison_group",
+          "entity": {
+            "text": "fldC mutant",
+            "type": "StudyGroup",
+            "mention": "fldC mutant",
+            "process": null
+          }
+        },
+        {
+          "role": "reference_group",
+          "entity": {
+            "text": "wild-type C. sporogenes",
+            "type": "StudyGroup",
+            "mention": "wild-type C. sporogenes",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "Liquid chromatography-tandem mass spectrometry (LC-MS/MS) analysis of the supernatants showed that IPA accumulated in the supernatant of wild-type C. sporogenes, but not the fldC mutant (Fig. 2c)."
+      }
+    },
+    "expected_rule": "V6-SELF-LOOP"
+  },
+  {
+    "claim_id": "fact:23108",
+    "claim_json": {
+      "subject": {
+        "text": "wild-type",
+        "type": "MicrobialStrain",
+        "mention": "wild-type",
+        "process": null
+      },
+      "object": {
+        "text": "mutant strains",
+        "type": "StudyGroup",
+        "mention": "mutant strains",
+        "process": null
+      },
+      "predicate": "DIFFERS_BETWEEN",
+      "qualifiers": {
+        "metric": "cell densities",
+        "direction": "unspecified",
+        "reference_group": "wild-type",
+        "comparison_group": "mutant strains"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "comparison_group",
+          "entity": {
+            "text": "mutant strains",
+            "type": "StudyGroup",
+            "mention": "mutant strains",
+            "process": null
+          }
+        },
+        {
+          "role": "reference_group",
+          "entity": {
+            "text": "wild-type",
+            "type": "StudyGroup",
+            "mention": "wild-type",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "To evaluate whether there were any major differences in cell densities between wild-type and mutant strains, we determined the total protein content in each of the resting cell suspensions."
+      }
+    },
+    "expected_rule": "V6-METHOD-INTENT"
+  },
+  {
+    "claim_id": "fact:23322",
+    "claim_json": {
+      "subject": {
+        "text": "T. sanguinis 49",
+        "type": "MicrobialStrain",
+        "mention": "T. sanguinis 49",
+        "process": null
+      },
+      "object": {
+        "text": "T. sanguinis 49",
+        "type": "MicrobialStrain",
+        "mention": "T. sanguinis 49",
+        "process": {
+          "kind": "growth",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "author_statement"
+      },
+      "negated": false,
+      "speculative": true,
+      "result_status": "observed_change",
+      "participants": [],
+      "evidence": {
+        "sentence": "Bacteria also exhibit stronger substrate preferences at elevated BA concentrations, possibly due to inhibited growth at high BA levels, as observed with T. sanguinis 49 ."
+      }
+    },
+    "expected_rule": "V6-SELF-LOOP"
+  },
+  {
+    "claim_id": "fact:23370",
+    "claim_json": {
+      "subject": {
+        "text": "uninoculated controls",
+        "type": "StudyGroup",
+        "mention": "uninoculated controls",
+        "process": null
+      },
+      "object": {
+        "text": "bile acids",
+        "type": "Metabolite",
+        "mention": "BAs",
+        "process": {
+          "kind": "degradation",
+          "direction": "unspecified"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "assay",
+          "entity": {
+            "text": "spontaneous BA degradation or transformation",
+            "type": "MicrobialFunction",
+            "mention": "spontaneous BA degradation or transformation",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "In addition, we tested for spontaneous BA degradation or transformation in uninoculated controls containing BAs that were run every 50 samples."
+      }
+    },
+    "expected_rule": "V6-CONTROL-AGENT"
+  },
+  {
+    "claim_id": "fact:23371",
+    "claim_json": {
+      "subject": {
+        "text": "uninoculated controls",
+        "type": "StudyGroup",
+        "mention": "uninoculated controls",
+        "process": null
+      },
+      "object": {
+        "text": "bile acids",
+        "type": "Metabolite",
+        "mention": "BAs",
+        "process": {
+          "kind": "degradation",
+          "direction": "unspecified"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "assay",
+          "entity": {
+            "text": "spontaneous BA degradation and transformation",
+            "type": "MicrobialFunction",
+            "mention": "spontaneous BA degradation and transformation",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "Uninoculated controls containing BAs were used to assess spontaneous BA degradation and transformation."
+      }
+    },
+    "expected_rule": "V6-CONTROL-AGENT"
+  },
+  {
+    "claim_id": "fact:23374",
+    "claim_json": {
+      "subject": {
+        "text": "bile acids",
+        "type": "Metabolite",
+        "mention": "BAs",
+        "process": null
+      },
+      "object": {
+        "text": "spontaneous BA degradation",
+        "type": "MicrobialFunction",
+        "mention": "spontaneous BA degradation",
+        "process": {
+          "kind": "degradation",
+          "direction": "unspecified"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [],
+      "evidence": {
+        "sentence": "Uninoculated controls containing BAs were used to assess spontaneous BA degradation and transformation."
+      }
+    },
+    "expected_rule": "V6-METHOD-INTENT"
+  },
+  {
+    "claim_id": "fact:23375",
+    "claim_json": {
+      "subject": {
+        "text": "bile acids",
+        "type": "Metabolite",
+        "mention": "BAs",
+        "process": null
+      },
+      "object": {
+        "text": "transformation",
+        "type": "MicrobialFunction",
+        "mention": "transformation",
+        "process": {
+          "kind": "conversion",
+          "direction": "unspecified"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {},
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [],
+      "evidence": {
+        "sentence": "Uninoculated controls containing BAs were used to assess spontaneous BA degradation and transformation."
+      }
+    },
+    "expected_rule": "V6-METHOD-INTENT"
+  },
+  {
+    "claim_id": "fact:23381",
+    "claim_json": {
+      "subject": {
+        "text": "unconjugated BAs",
+        "type": "Metabolite",
+        "mention": "unconjugated BAs",
+        "process": null
+      },
+      "object": {
+        "text": "unconjugated BAs",
+        "type": "Metabolite",
+        "mention": "unconjugated BAs",
+        "process": {
+          "kind": "concentration",
+          "direction": "unchanged"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "metric": "concentration",
+        "direction": "unchanged",
+        "reference_group": "uninoculated controls",
+        "comparison_group": "uninoculated controls",
+        "result_interpretation": "unresolved_negative"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "participants": [
+        {
+          "role": "comparison_group",
+          "entity": {
+            "text": "uninoculated controls",
+            "type": "StudyGroup",
+            "mention": "uninoculated controls",
+            "process": null
+          }
+        },
+        {
+          "role": "reference_group",
+          "entity": {
+            "text": "uninoculated controls",
+            "type": "StudyGroup",
+            "mention": "uninoculated controls",
+            "process": null
+          }
+        }
+      ],
+      "evidence": {
+        "sentence": "For BA measurements in time series analyses, unconjugated BAs were normalized to conjugated BA measurements in uninoculated controls."
+      }
+    },
+    "expected_rule": "V6-SELF-LOOP"
+  }
+]

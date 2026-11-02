@@ -25,7 +25,7 @@ QUALIFIER_DEFINITIONS = {
     "metric": "Measured aspect or named metric; e.g. relative abundance, prevalence or Shannon index",
     "direction": "increased | decreased | unchanged | unspecified; focal group relative to reference group",
     "object_direction": "Legacy directional verb with unknown object aspect; preserve direction without inventing a process",
-    "result_interpretation": "not_assessed | not_detected | absence_reported | unresolved_negative | speculative | not_significant; unavailable/speculative results are not measured null effects",
+    "result_interpretation": "not_assessed | not_detected | absence_reported | unresolved_negative | speculative | not_significant | method_description; unavailable/speculative/method descriptions are not measured null effects",
     "p_value": "Reported numerical p-value; never infer an unreported value or significance threshold",
     "object.process": "Attach kind/direction to the affected object; projected as qualifiers.processes with role=object",
     "substrate": "Named substrate participant; do not encode it in the predicate",

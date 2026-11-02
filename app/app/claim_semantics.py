@@ -14,7 +14,7 @@ CAUSAL = {'CAUSES', 'TREATS', 'PREVENTS', 'AFFECTS', 'ACTIVATES', 'INHIBITS'}
 OUTCOMES = {'AFFECTS', 'ACTIVATES', 'INHIBITS', 'DIFFERS_BETWEEN'}
 NOT_ASSESSED = re.compile(r'\b(?:not (?:tested|assessed|measured|examined|evaluated)|did not (?:test|assess|measure|examine|evaluate))\b', re.I)
 NOT_DETECTED = re.compile(r'\b(?:not detected|undetectable|below (?:the )?(?:limit of detection|detection limit))\b', re.I)
-NON_OUTCOMES = {'not_assessed', 'not_detected', 'absence_reported', 'unresolved_negative', 'speculative'}
+NON_OUTCOMES = {'not_assessed', 'not_detected', 'absence_reported', 'unresolved_negative', 'speculative', 'method_description'}
 PROCEDURAL = re.compile(r'\b(?:DNA extraction|RNA extraction|liquid handling|pipetting|centrifugation|genome assembly|gene annotation|functional annotation|read mapping|data plotting|statistical analysis)\b', re.I)
 
 
@@ -68,7 +68,7 @@ def result_view(value):
     return 'unknown'
 
 
-def normalize_result(claim, repairs):
+def normalize_result(claim, repairs, *, section=None):
     before = claim.model_dump(mode='json')
     status = result_view(before)
     quote = claim.evidence.sentence
@@ -110,6 +110,11 @@ def normalize_result(claim, repairs):
     if status == 'observed_change' and (claim.speculative or certainty['hedge']):
         status = 'unknown'
         claim.qualifiers['result_interpretation'] = 'speculative'
+    from app.claim_guards import is_methods_section
+    source_section=claim.evidence.section if section is None else section
+    if status=='observed_change' and is_methods_section(source_section):
+        status='unknown'
+        claim.qualifiers['result_interpretation']='method_description'
     claim.result_status = status
     if status == 'no_effect_reported' and claim.predicate in {'AFFECTS', 'DIFFERS_BETWEEN'}:
         claim.negated = False
@@ -146,10 +151,10 @@ def display_negated(value):
         and result_view(value) in {'no_effect_reported','not_significant'}))
 
 
-def check_semantics(claim, repairs):
+def check_semantics(claim, repairs, *, section=None):
     """Reject structural errors; quarantine semantic risks as reviewable claims."""
     from app.claim_guards import add_guard_reasons
-    add_guard_reasons(claim)
+    add_guard_reasons(claim,section=section)
     s, o = claim.subject, claim.object
     quote = ' '.join(e.sentence for e in [claim.evidence, *claim.additional_evidence])
     same = s.text.casefold() == o.text.casefold() and s.type == o.type
@@ -250,7 +255,7 @@ def result_sql(alias):
     changed, unchanged = has(('increased','decreased')), has(('unchanged',))
     return f"""CASE
       WHEN {alias}.predicate NOT IN ('AFFECTS','ACTIVATES','INHIBITS','DIFFERS_BETWEEN')
-        OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative','speculative') THEN 'unknown'
+        OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative','speculative','method_description') THEN 'unknown'
       WHEN COALESCE(to_jsonb({alias})->>'speculative',{alias}.claim_json->>'speculative','false')='true' AND (
         COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')='observed_change'
         OR (COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')=''

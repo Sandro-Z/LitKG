@@ -82,8 +82,9 @@ def audit_polarity(claim):
     return findings
 
 
-def audit_claim(claim):
-    return audit_polarity(claim) + audit_certainty(claim) + audit_comparison(claim) + audit_entity_text(claim)
+def audit_claim(claim, *, section=None, subject_entity_id=None, object_entity_id=None):
+    return (audit_polarity(claim) + audit_certainty(claim) + audit_comparison(claim) + audit_entity_text(claim)
+            + audit_structure(claim,section=section,subject_entity_id=subject_entity_id,object_entity_id=object_entity_id))
 
 
 HEDGE = re.compile(r"\b(?:may(?!(?:\s|,)+\d)|might|could(?! not)|suggest(?:s|ed|ing)?|propos(?:e|es|ed)|(?:is |was |are |were )?thought to|likely|potentially)\b")
@@ -158,9 +159,9 @@ def audit_certainty(claim):
     return findings
 
 
-def add_guard_reasons(claim):
+def add_guard_reasons(claim, *, section=None):
     """Use the existing semantic pending/review route for new candidates."""
-    for finding in audit_claim(claim.model_dump(mode='json')):
+    for finding in audit_claim(claim.model_dump(mode='json'),section=section):
         reason = f"semantic: {finding['rule_id']} field={finding['field']} cue={finding['cue']}"
         if reason not in claim.review_reasons:
             claim.review_reasons.append(reason)
@@ -334,4 +335,54 @@ def audit_entity_text(claim):
         partial = re.search(r'(?<!\w)'+re.escape(text)+r'([a-z]{3,})\b',quote)
         if partial:
             flag('V5-TRUNCATED-SLOT',text,path)
+    return findings
+
+
+METHOD_SECTION = re.compile(r'^(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials(?:\s+(?:and|&)\s+methods)?|methods|statistical\s+analys(?:is|es))\b')
+BIOLOGICAL_ASSERTIONS = {'AFFECTS','ACTIVATES','INHIBITS','CAUSES','TREATS','PREVENTS','PRODUCES','CONSUMES','TRANSFORMS',
+                         'PREDICTS','ASSOCIATED_WITH','CORRELATED_WITH','COLONIZES','DIFFERS_BETWEEN'}
+METHOD_INTENT = re.compile(r'\b(?:to evaluate whether|(?:we )?used [^.;]{0,70} to test(?: for)?|(?:was|were) used to (?:assess|evaluate|measure|test)|(?:we )?tested for|were normalized to)\b')
+REPORTED_RESULT = re.compile(r'\b(?:found|showed|revealed|demonstrated|observed|resulted in)\b|\b(?:and|but)\b[^.;]*\b(?:increased|decreased|remained)\b')
+CONTROL_AGENT = re.compile(r'\b(?:(?:uninoculated|blank|negative|positive) controls?|(?:internal|reference|calibration|analytical|chemical) standards?|reagents?)\b')
+
+
+def is_methods_section(section):
+    return any(METHOD_SECTION.search(part.strip()) for part in re.split(r'/|>|::',_text(section)))
+
+
+def audit_structure(claim, *, section=None, subject_entity_id=None, object_entity_id=None):
+    findings=[]
+    def flag(rule,cue,field,**extra):
+        findings.append({'rule_id':rule,'cue':cue,'field':field,'action':'needs_review',**extra})
+    s,o=claim.get('subject') or {},claim.get('object') or {}
+    same_name=bool(_text(s.get('text'))) and _text(s.get('text'))==_text(o.get('text'))
+    known_ids=all(isinstance(v,int) and not isinstance(v,bool) and v>0 for v in (subject_entity_id,object_entity_id))
+    same=subject_entity_id==object_entity_id if known_ids else same_name and s.get('type')==o.get('type')
+    if not known_ids and s.get('normalized_id') and o.get('normalized_id') and s['normalized_id']!=o['normalized_id']:
+        same=False
+    if same or (claim.get('predicate')=='DIFFERS_BETWEEN' and same_name):
+        flag('V6-SELF-LOOP','same entity IDs' if known_ids and same else 'same endpoint labels','subject/object')
+    q=claim.get('qualifiers') or {}
+    section=(claim.get('evidence') or {}).get('section') if section is None else section
+    status=claim.get('result_status','unknown')
+    if status=='unknown':status=q.get('result_status','unknown')
+    endpoint='subject' if claim.get('predicate')=='DIFFERS_BETWEEN' else 'object'
+    directions=_direction(claim,endpoint)
+    implied=(status=='unknown' and not claim.get('negated') and not claim.get('speculative')
+             and bool(directions & {'increased','decreased'}) and 'unchanged' not in directions
+             and q.get('result_interpretation') not in {'not_assessed','not_detected','absence_reported','unresolved_negative','speculative'})
+    if (is_methods_section(section) and (status=='observed_change' or implied)) or q.get('result_interpretation')=='method_description':
+        flag('V6-METHOD-RESULT',_text(section) or 'method_description','result_status',recommended_status='unknown')
+    if claim.get('predicate') in BIOLOGICAL_ASSERTIONS:
+        control=CONTROL_AGENT.search(re.sub(r'[_-]+',' ',_text(s.get('text'))))
+        if control:
+            flag('V6-CONTROL-AGENT',control.group(0),'subject')
+        quote=_text((claim.get('evidence') or {}).get('sentence'))
+        intent=METHOD_INTENT.search(quote)
+        if intent and not REPORTED_RESULT.search(quote) and re.search(_pattern(o),quote):
+            flag('V6-METHOD-INTENT',intent.group(0),'predicate')
+        if s.get('type')=='Assay' and re.search(_pattern(s),quote):
+            discourse=re.search(r'\bhave\s+(?:either\s+)?reported on\b',quote)
+            if discourse:
+                flag('V6-DISCOURSE-EFFECT',discourse.group(0),'subject')
     return findings

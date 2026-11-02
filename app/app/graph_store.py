@@ -24,7 +24,7 @@ from app.normalization import (
 )
 from app.schemas import Claim
 from app.facts import fact_qualifiers, normalized_participants, store_fact
-from app.catalog import PROCESSING_VERSION, digest, load_catalog
+from app.catalog import PROCESSING_VERSION, digest, load_catalog, add_review
 
 
 def _identity_locks(identity: EntityIdentity) -> set[str]:
@@ -90,6 +90,9 @@ def _merge_entities(cur, target, sources):
             cur.execute("DELETE FROM relations WHERE id = %s", (relation["id"],))
     cur.execute("UPDATE claims SET subject_entity_id = %s WHERE subject_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
     cur.execute("UPDATE claims SET object_entity_id = %s WHERE object_entity_id = ANY(%s::BIGINT[])", (target_id, source_ids))
+    cur.execute('SELECT id FROM claims WHERE subject_entity_id=%s AND object_entity_id=%s',(target_id,target_id))
+    for row in cur.fetchall():
+        _record_projection_audit(cur,row['id'])
     # Complete facts and directory entries refer to the same normalized IDs.
     cur.execute("""INSERT INTO fact_participants (fact_id, entity_id, role, mention)
         SELECT fact_id, %s, role, mention FROM fact_participants WHERE entity_id = ANY(%s::BIGINT[])
@@ -410,6 +413,18 @@ def _upsert_relation_evidence(
     return relation_id
 
 
+def _record_projection_audit(cur, claim_id):
+    """Catch aliases/merges resolving different labels to the same actual ID."""
+    cur.execute('''SELECT c.*,ch.section_title FROM claims c JOIN chunks ch ON ch.id=c.chunk_id
+        WHERE c.id=%s AND c.subject_entity_id=c.object_entity_id''',(claim_id,))
+    row=cur.fetchone()
+    if row:
+        from app.claim_audit import audit_row
+        findings=audit_row(row)
+        add_review(cur,row['document_id'],row['catalog_version'],'claim_audit',
+                   {'claim_id':claim_id,'chunk_id':row['chunk_id'],'findings':findings,'active':bool(findings)})
+
+
 def store_claim(
     cur,
     *,
@@ -500,6 +515,8 @@ def store_claim(
         speculative=claim.speculative,
     )
     store_fact(cur, claim_id, relation_id, claim, projection, document_id)
+    if projection['subject_entity_id']==projection['object_entity_id']:
+        _record_projection_audit(cur,claim_id)
     return claim_id, relation_id
 
 
@@ -508,7 +525,7 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
         cur.execute("SELECT document_id FROM claims WHERE id = %s", (claim_id,))
         document_id = cur.fetchone()["document_id"]
     claim = Claim.model_validate(claim_json)
-    cur.execute("""SELECT d.catalog_version,d.catalog_status,ch.id,ch.text,c.catalog_version AS claim_catalog_version
+    cur.execute("""SELECT d.catalog_version,d.catalog_status,ch.id,ch.text,ch.section_title,c.catalog_version AS claim_catalog_version
         FROM claims c JOIN documents d ON d.id=c.document_id JOIN chunks ch ON ch.id=c.chunk_id
         WHERE c.id=%s""", (claim_id,))
     source = cur.fetchone()
@@ -593,6 +610,8 @@ def project_existing_claim(cur, claim_id: int, claim_json: dict[str, Any], abbre
         speculative=claim.speculative,
     )
     store_fact(cur, claim_id, relation_id, claim, projection, document_id)
+    if projection['subject_entity_id']==projection['object_entity_id']:
+        _record_projection_audit(cur,claim_id)
     return relation_id
 
 

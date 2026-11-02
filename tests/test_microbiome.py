@@ -212,10 +212,13 @@ class MicrobiomeTests(unittest.TestCase):
         fact = dict(predicate='AFFECTS', qualifiers=copy.deepcopy(qualifiers), negated=False, speculative=False)
         cur = MagicMock()
         cur.fetchall.side_effect = [[{'id':10, 'document_id':1}], [relation],
+                                   [],  # V6: no actual self-loop was created.
                                    [{'role':'metabolite', 'entity_id':4}]]
         cur.fetchone.side_effect = [{'id':21}, fact]
         _merge_entities(cur, {'id':4, 'normalized_id':None},
                         [{'id':3, 'normalized_id':None, 'entity_type':'Metabolite'}])
+        self.assertTrue(any('subject_entity_id=%s AND object_entity_id=%s' in call.args[0]
+                            for call in cur.execute.call_args_list))
         inserts = [c.args[1] for c in cur.execute.call_args_list if 'INSERT INTO relations' in c.args[0]]
         updates = [c.args[1] for c in cur.execute.call_args_list if 'UPDATE facts SET fact_key=' in c.args[0]]
         for projected in [inserts[0][3].obj, updates[0][1].obj]:

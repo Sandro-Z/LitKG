@@ -44,6 +44,46 @@ V5阶段实测：完整PostgreSQL回归386项、5项可选浏览器跳过，27.3
 
 ## 验证命令
 
+## V6：自环、方法区与角色
+
+改动：claim_guards.py、claim_semantics.py、claims.py、claim_audit.py、review_repair.py、graph_store.py、predicate_registry.py；
+新增test_claim_structure.py、test_claim_structure_integration.py和12条真实结构夹具；更新两项既有回归的V6政策/新增查询预期。
+
+|规则|触发条件|动作|边界|
+|---|---|---|---|
+|V6-SELF-LOOP|实际两端ID相同，或无ID时同名同类；同名DIFFERS_BETWEEN两端也需复核|needs_review|已知不同ID、Gene/Protein同名不当作实体自环；明确自调节仍按本轮政策复核，不删除|
+|V6-METHOD-RESULT|服务器Methods/Materials/Statistical analysis中observed_change，或已标记method_description|新候选降unknown并保留方法风险；旧记录只入队|Results中仅提到methods不触发；服务器章节优先于模型字段|
+|V6-CONTROL-AGENT|生物学断言以uninoculated/blank controls、标准品或reagent为施动者|needs_review|healthy controls以及作为参照参与者的对照不触发|
+|V6-METHOD-INTENT|明确to evaluate whether/used to assess/tested for/normalized to等目的或操作，未报告结果|needs_review|有found/showed等明确结果不按目的句处理|
+|V6-DISCOURSE-EFFECT|Assay施动者的have reported on文献叙述被当作生物效应|needs_review|不把真实Intervention当作研究方法|
+
+实际ID检查同时接入写入、重投影和既有实体合并事务，覆盖不同名称归入同一节点及合并新产生的自环。
+批量预览、应用复核和回滚使用相同的服务器章节/端点ID上下文；原始claim_json、句子和ID不由审计命令修改。
+仅给既有result_interpretation增加method_description值，不新增result_status枚举或表；Python与SQL均按unknown读取。
+
+完整PostgreSQL实测关键输出：
+
+```text
+Ran 398 tests in 27.369s
+OK (skipped=5)
+```
+
+5项仅为可选浏览器测试，数据库集成均实际运行。验证包括Methods审计/回滚、模型章节不能覆盖服务器章节、不同名称同一实际ID、格式合并产生自环以及原始JSON保留。
+
+累计P0+P1夹具预览：267/1175命中，涉及51篇文献；台账44/79（55.7%），仍未达到90%；SUPPORTED误报0/300；D1 21/21、D2六场景保持通过。
+审计附件未保存section，section_known=0，因此附件统计不包含依赖章节的Methods规则覆盖；该规则由带服务器章节的单元/真实数据库测试验证，不能声称已在8758条生产claim上测得同样效果。
+
+## 最终运行与未覆盖
+
+本轮未部署、未推送、未访问正式数据库，也未执行历史实体合并或全库重建。原有.gitignore修改和未跟踪文件保留。
+全部批量审计仍默认dry-run；apply只写复核结论。格式合并复用原事务，但只在相应既有写入/显式重建路径被调用时发生。
+既有重投影对重复claim的处理未在本轮重写；没有自动触发历史重建，应先按现有流程检查重复项与共享影响。
+
+未覆盖：隐含施受事/中介符号、缺失核心发现、跨句指代、无法绑定的混合数值、单位换算、拼写纠错、文章边界和完整ontology advisory治理。
+未换模型、重写提示词或前端，不为连通率强行合并，不静默删改审计对象。
+
+## 验证命令
+
 ```bash
 PYTHONPATH=app:tests python -m unittest test_claim_comparison -v
 PYTHONPATH=app python scripts/check_claim_guard_fixtures.py --audit-dir audit --output /tmp/p1-guard-report.json

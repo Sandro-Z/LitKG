@@ -25,13 +25,24 @@ def fixture_claim(row):
 def summarize(rows):
     rules, docs, hits = Counter(), Counter(), []
     for row in rows:
-        findings = audit_claim(fixture_claim(row))
+        findings = audit_row(row)
         if findings:
             rules.update({x['rule_id'] for x in findings})
             docs[str(row['document_id'])] += 1
             hits.append({'claim_id': row.get('claim_id', row.get('id')), 'document_id': row['document_id'], 'findings': findings})
     return {'dry_run': True, 'total': len(rows), 'hit_count': len(hits), 'by_rule': dict(sorted(rules.items())),
-            'by_document': dict(sorted(docs.items())), 'would_enqueue': len(hits), 'would_downgrade': 0, 'hits': hits}
+            'by_document': dict(sorted(docs.items())), 'would_enqueue': len(hits), 'would_downgrade': 0, 'hits': hits,
+            'context_coverage':{'section_known':sum(bool(row.get('section_title') or row.get('section') or (fixture_claim(row).get('evidence') or {}).get('section')) for row in rows)}}
+
+
+def audit_row(row, *, section=None):
+    ids={role:row.get(role+'_entity_id') for role in ('subject','object')}
+    for participant in row.get('participants',[]):
+        if participant.get('role') in ids and ids[participant['role']] is None:
+            ids[participant['role']]=participant.get('entity_id')
+    if section is None:
+        section=row.get('section_title',row.get('section'))
+    return audit_claim(fixture_claim(row),section=section,subject_entity_id=ids['subject'],object_entity_id=ids['object'])
 
 
 def make_audit_plan(document, chunks, claims, *, active_claim_ids=()):
@@ -41,8 +52,9 @@ def make_audit_plan(document, chunks, claims, *, active_claim_ids=()):
     if document['status'] in ACTIVE or any(c['status'] in ACTIVE for c in chunks):
         raise ValueError('Selected document/chunk is active; retry after processing completes')
     reviews = []
+    chunk_map={c['id']:c for c in chunks}
     for c in claims:
-        findings = audit_claim(c['claim_json'])
+        findings = audit_row(c,section=chunk_map.get(c['chunk_id'],{}).get('section_title') or '')
         if findings or c['id'] in active_claim_ids:
             reviews.append({'claim_id': c['id'], 'chunk_id': c['chunk_id'], 'findings': findings, 'active': bool(findings)})
     before = source_state(document, chunks, claims)
@@ -90,7 +102,8 @@ def main():
                 doc_ids = [d['document_id'] for d in cur.fetchall()]
                 for doc_id in doc_ids:
                     document, chunks, claims = load_scope(cur, document_id=doc_id)
-                    rows.extend(claims)
+                    sections={c['id']:c.get('section_title') or '' for c in chunks}
+                    rows.extend({**c,'section_title':sections.get(c['chunk_id'],'')} for c in claims)
                     cur.execute("SELECT detail->>'claim_id' AS claim_id FROM review_items WHERE document_id=%s AND kind='claim_audit' AND detail->>'active'='true'",(doc_id,))
                     active_claim_ids = {int(r['claim_id']) for r in cur.fetchall() if str(r.get('claim_id','')).isdigit()}
                     plan = make_audit_plan(document, chunks, claims, active_claim_ids=active_claim_ids)

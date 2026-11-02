@@ -150,8 +150,8 @@ def prepare_claims(bundle, entries, chunk, version, *, resolve_catalog=True):
                 _validate_legacy_source(candidate.claims[0], chunk)
             normalize_registered_claim(candidate.claims[0], repairs)
             from app.claim_semantics import normalize_result, check_semantics
-            normalize_result(candidate.claims[0], repairs)
-            check_semantics(candidate.claims[0], repairs)
+            normalize_result(candidate.claims[0], repairs,section=chunk.get('section_title') or '')
+            check_semantics(candidate.claims[0], repairs,section=chunk.get('section_title') or '')
         except ValueError as exc:
             result._claim_rejections.append({'claim_index': index, 'claim': claim.model_dump(mode='json'),
                                              'error': str(exc), 'outcome': 'unresolved', 'repair_id': repair_id})
