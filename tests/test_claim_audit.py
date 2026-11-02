@@ -27,6 +27,9 @@ class ClaimAuditPlanTests(unittest.TestCase):
         doc,chunks,claims = self.scope()
         claims[0]['claim_json']['negated'] = True
         self.assertFalse(make_audit_plan(doc,chunks,claims)['reviews'])
+        recheck=make_audit_plan(doc,chunks,claims,active_claim_ids={11})
+        self.assertFalse(recheck['reviews'][0]['active'])
+        self.assertEqual(recheck['reviews'][0]['findings'],[])
         chunks[0]['status']='extracting'
         with self.assertRaisesRegex(ValueError,'active'):
             make_audit_plan(doc,chunks,claims)

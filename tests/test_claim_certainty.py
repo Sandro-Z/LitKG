@@ -5,7 +5,7 @@ from pathlib import Path
 from app.claim_guards import audit_certainty, certainty_evidence
 from app.claim_semantics import normalize_result, result_view
 from app.schemas import Claim
-from test_review_regressions import candidate, entity
+from test_review_regressions import candidate, entity, prepared
 
 
 class CertaintyGuardTests(unittest.TestCase):
@@ -63,6 +63,9 @@ class CertaintyGuardTests(unittest.TestCase):
             self.assertEqual(value.qualifiers['result_interpretation'],'not_significant')
             if '0.091' in source:self.assertEqual(value.qualifiers['p_value'],.091)
         self.assertNotIn('V2-SIGNIFICANCE',self.findings(candidate('FMT increased CD8 cells (P=0.01).', result_status='observed_change')))
+        resolved=prepared(candidate('FMT did not significantly affect CD8 cells.')).claims[0]
+        self.assertEqual(resolved.semantic_status,'accepted')
+        self.assertFalse(any('V2-' in r for r in resolved.review_reasons))
 
     def test_invalid_p_or_lost_exponent_is_not_a_large_probability(self):
         raw=candidate('FMT increased CD8 cells (P=7.48 -12).',result_status='observed_change')

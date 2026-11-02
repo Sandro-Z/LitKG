@@ -72,12 +72,8 @@ def normalize_result(claim, repairs):
     before = claim.model_dump(mode='json')
     status = result_view(before)
     quote = claim.evidence.sentence
-    from app.claim_guards import certainty_evidence, audit_certainty
+    from app.claim_guards import certainty_evidence
     certainty = certainty_evidence(before)
-    for finding in audit_certainty(before):
-        reason = f"semantic: {finding['rule_id']} field={finding['field']} cue={finding['cue']}"
-        if reason not in claim.review_reasons:
-            claim.review_reasons.append(reason)
     clause = outcome_clause(claim)
     outcome = claim.predicate in {'AFFECTS','DIFFERS_BETWEEN'}
     unavailable = certainty['unmeasured'] or (clause and (NOT_ASSESSED.search(clause) or NOT_DETECTED.search(clause)))
@@ -255,7 +251,7 @@ def result_sql(alias):
     return f"""CASE
       WHEN {alias}.predicate NOT IN ('AFFECTS','ACTIVATES','INHIBITS','DIFFERS_BETWEEN')
         OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative','speculative') THEN 'unknown'
-      WHEN {alias}.claim_json->>'speculative'='true' AND (
+      WHEN COALESCE(to_jsonb({alias})->>'speculative',{alias}.claim_json->>'speculative','false')='true' AND (
         COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')='observed_change'
         OR (COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')=''
             AND NOT {alias}.negated AND COALESCE({changed},false) AND NOT COALESCE({unchanged},false))) THEN 'unknown'

@@ -7,6 +7,7 @@ def audit_pending_sql(alias):
     """An audit conclusion is separate from the immutable extracted assertion."""
     return f"""EXISTS (SELECT 1 FROM review_items audit WHERE audit.document_id={alias}.document_id
         AND audit.kind='claim_audit' AND audit.detail->>'claim_id'={alias}.id::TEXT
+        AND audit.version=COALESCE({alias}.catalog_version,'legacy')
         AND audit.detail->>'active'='true')"""
 
 
