@@ -1,0 +1,16 @@
+{
+  "profile_version": "1.0.0",
+  "domain": null,
+  "ontology_id": null,
+  "ontology_version": null,
+  "source_documents": [],
+  "relation_dictionary": [],
+  "entity_dictionary": [],
+  "unit_rules": [],
+  "competency_questions": [],
+  "scope_examples": {
+    "included": [],
+    "excluded": []
+  },
+  "notes": "Empty template. Populate with user-confirmed sources; no domain facts are assumed."
+}

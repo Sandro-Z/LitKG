@@ -1,0 +1,241 @@
+[
+  {
+    "name": "inventory",
+    "description": "清点规范输入，返回输入哈希、可读性与声明/块数量。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "validate_structure",
+    "description": "全量检查引用、重复、证据锚点与显式类型规则；不判断语义支持。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_claims",
+    "description": "分页读取声明及关联实体。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "required": [
+        "request_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "search_sources",
+    "description": "按 Unicode 规范化文本词项检索来源块；不负责语义判定。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "doc_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "request_path",
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read_block",
+    "description": "读取完整来源块，返回物理页、章节、块文本与块哈希。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "doc_id": {
+          "type": "string"
+        },
+        "block_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path",
+        "doc_id",
+        "block_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "verify_evidence",
+    "description": "验证来源存在以及精确字符范围，不判断蕴含。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "doc_id": {
+              "type": "string"
+            },
+            "block_id": {
+              "type": "string"
+            },
+            "start": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "quote": {
+              "type": "string",
+              "minLength": 1
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "supports",
+                "contradicts",
+                "context"
+              ]
+            }
+          },
+          "required": [
+            "doc_id",
+            "block_id",
+            "start",
+            "end",
+            "quote",
+            "role"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "request_path",
+        "evidence"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plan_review",
+    "description": "all 全量或固定 seed 的无放回均匀 sample，返回选中和未审 ID。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "all",
+            "sample"
+          ]
+        },
+        "sample_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "compute_metrics",
+    "description": "从报告草稿计算指标和门禁；不代替语义评审。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "report_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path",
+        "report_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "validate_report",
+    "description": "验证报告字段、证据、ID、指标和门禁；不证明语义正确或真实工具调用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_path": {
+          "type": "string"
+        },
+        "report_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_path",
+        "report_path"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

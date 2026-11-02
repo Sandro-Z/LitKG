@@ -1,0 +1,641 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "run": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "prompt_version": {
+          "const": "kg-review/1.0.0"
+        },
+        "model": {
+          "type": "string"
+        },
+        "graph_hash": {
+          "type": "string"
+        },
+        "corpus_hash": {
+          "type": "string"
+        },
+        "policy_hash": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "all",
+            "sample"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "prompt_version",
+        "model",
+        "graph_hash",
+        "corpus_hash",
+        "policy_hash",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "string"
+    },
+    "assessments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/assessment"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "omission_candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "document_coverage": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverage"
+      }
+    },
+    "unreviewed_regions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proposal"
+      }
+    },
+    "metrics": {
+      "$ref": "#/$defs/metrics"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run",
+    "summary",
+    "assessments",
+    "findings",
+    "omission_candidates",
+    "document_coverage",
+    "unreviewed_regions",
+    "limitations",
+    "proposals",
+    "metrics"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        },
+        "block_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "supports",
+            "contradicts",
+            "context"
+          ]
+        }
+      },
+      "required": [
+        "doc_id",
+        "block_id",
+        "start",
+        "end",
+        "quote",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "qualifiers": {
+      "type": "object",
+      "properties": {
+        "negated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "modality": {
+          "type": "string",
+          "enum": [
+            "asserted",
+            "possible",
+            "hypothetical",
+            "unknown"
+          ]
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "negated",
+        "modality",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "value": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "entity",
+            "literal"
+          ]
+        },
+        "value": {
+          "type": "string"
+        },
+        "datatype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "value",
+        "datatype"
+      ],
+      "additionalProperties": false
+    },
+    "assessment": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "type": "string"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "SUPPORTED",
+            "PARTIALLY_SUPPORTED",
+            "CONTRADICTED",
+            "UNSUPPORTED",
+            "INSUFFICIENT_EVIDENCE",
+            "SOURCE_CONFLICT"
+          ]
+        },
+        "confidence": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "searched_blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "doc_id": {
+                "type": "string"
+              },
+              "block_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "doc_id",
+              "block_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "search_notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "verdict",
+        "confidence",
+        "rationale",
+        "evidence",
+        "searched_blocks",
+        "search_notes"
+      ],
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "target_type": {
+          "type": "string",
+          "enum": [
+            "node",
+            "claim",
+            "document",
+            "candidate",
+            "graph"
+          ]
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "blocker",
+            "high",
+            "medium",
+            "low",
+            "info"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "hypothesis"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "graph_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggested_fix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "target_type",
+        "target_id",
+        "rule_id",
+        "severity",
+        "status",
+        "summary",
+        "evidence",
+        "graph_path",
+        "suggested_fix"
+      ],
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "object": {
+          "$ref": "#/$defs/value"
+        },
+        "qualifiers": {
+          "$ref": "#/$defs/qualifiers"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "match_status": {
+          "type": "string",
+          "enum": [
+            "matched",
+            "misrepresented",
+            "missing",
+            "ambiguous",
+            "out_of_scope"
+          ]
+        },
+        "matched_claim_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rationale": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "predicate",
+        "object",
+        "qualifiers",
+        "evidence",
+        "match_status",
+        "matched_claim_ids",
+        "rationale"
+      ],
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        },
+        "block_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "fidelity",
+            "omission",
+            "both"
+          ]
+        }
+      },
+      "required": [
+        "doc_id",
+        "block_id",
+        "purpose"
+      ],
+      "additionalProperties": false
+    },
+    "proposal": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "add_node",
+            "add_claim",
+            "replace_claim",
+            "remove_claim",
+            "merge_nodes",
+            "split_node",
+            "repair_reference"
+          ]
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "before": {},
+        "after": {},
+        "finding_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "operation",
+        "target_id",
+        "before",
+        "after",
+        "finding_ids",
+        "evidence",
+        "preconditions"
+      ],
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "claims_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claims_reviewed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verdict_counts": {
+          "type": "object",
+          "properties": {
+            "SUPPORTED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "PARTIALLY_SUPPORTED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "CONTRADICTED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "UNSUPPORTED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "INSUFFICIENT_EVIDENCE": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "SOURCE_CONFLICT": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "SUPPORTED",
+            "PARTIALLY_SUPPORTED",
+            "CONTRADICTED",
+            "UNSUPPORTED",
+            "INSUFFICIENT_EVIDENCE",
+            "SOURCE_CONFLICT"
+          ],
+          "additionalProperties": false
+        },
+        "claim_coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "strict_support_rate_reviewed": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "unresolved_rate_reviewed": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "blocks_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocks_reviewed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "block_coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "omission_matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "omission_missing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "omission_ambiguous": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate_hit_rate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "overall": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "NEEDS_REVISION",
+            "FAIL",
+            "INCOMPLETE"
+          ]
+        },
+        "omission_blocks_reviewed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "omission_block_coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "omission_misrepresented": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "claims_total",
+        "claims_reviewed",
+        "verdict_counts",
+        "claim_coverage",
+        "strict_support_rate_reviewed",
+        "unresolved_rate_reviewed",
+        "blocks_total",
+        "blocks_reviewed",
+        "block_coverage",
+        "omission_matched",
+        "omission_missing",
+        "omission_ambiguous",
+        "candidate_hit_rate",
+        "overall",
+        "omission_blocks_reviewed",
+        "omission_block_coverage",
+        "omission_misrepresented"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
