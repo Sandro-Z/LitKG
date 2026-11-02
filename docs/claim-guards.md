@@ -1,4 +1,4 @@
-# 确定性 claim 校验（V1）
+# 确定性 claim 校验（V1、V2）
 
 校验复用现有 `semantic_status=pending` 和复核队列。新抽取在 `check_semantics` 中检查；
 旧记录批量检查只增加 `claim_audit` 复核结论，保留 claim ID、原始 claim_json 和 evidence。
@@ -62,6 +62,26 @@ PYTHONPATH=app:tests /tmp/litkg-claim-audit-venv/bin/python -c "import app,sys;s
 ```
 
 ## 已知未覆盖
+
+## V2：确定性一致性
+
+|规则|触发条件|动作与边界|
+|---|---|---|
+|V2-HEDGE-RESULT|speculative=true，或唯一终点分句中终点前有 may/might/could/suggest/proposed/thought/likely/potentially，且 observed_change|新候选降 unknown；旧记录入队。终点后的机制推测、明确观测后的解释性 likely due to 不借用|
+|V2-SIGNIFICANCE|明确非显著，或可靠解析的同臂 p>0.05 / p=0.091，缺显著性标注|新候选 outcome 标 not_significant，其余谓词用既有 result_interpretation；保留估计方向，仅记录明确 p_value。p不在[0,1]、丢指数或混合显著性不猜|
+|V2-UNMEASURED-NULL|无法测量/未评估，仍 observed_change/no_effect/unchanged|新候选 unknown、not_assessed，unchanged 改 unspecified；另一比较臂不借用|
+|V2-TREND-SIGNIFICANCE|trend 配 observed_change，缺 p_value 或显著性标注|只入队，不从 trend 编造 p 或非显著结论|
+|V2-RESOLVED-NULL|明确 no change/doesn't change 等，仍 unresolved_negative|新候选按既有 no_effect_reported 约定规范化；旧记录入队，证据保持原样|
+
+仅新增允许的 p_value qualifier 注册；既有 result_interpretation 增加 speculative、not_significant 值。
+Python 与 SQL 对 speculative=true 的 observed_change 均读为 unknown；正确阴性和未显著结果保持各自语义。
+旧记录批量应用始终只入队，`would_downgrade=0` 表示本命令不改写既有 JSON。
+V2 夹具包含 14967、17636–17638、23336、19626 六个真实 D2 场景，另有每项规则的反例。
+V1+V2 实测：D1 21/21；D2 六场景均命中；SUPPORTED 0/300；缺陷集119/1175，覆盖36篇文献；
+台账12/79（15.2%）。V2-HEDGE-RESULT 69、V2-SIGNIFICANCE 10、V2-UNMEASURED-NULL 1、
+V2-RESOLVED-NULL 1（规则可在同一 claim 重叠）。完整 unittest 359 项、83项跳过；Node 9/9。
+
+## 后续与范围
 
 无明确论元词形的施受事反转、跨句指代、表格列顺序、数值比较、核心发现遗漏、实体合并、方法区约束未实现。
 V1 不以放宽整句关键词匹配来提高台账召回率。V2 确定性和 V3 source_refs 单独变更。

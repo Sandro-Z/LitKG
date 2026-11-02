@@ -1,0 +1,193 @@
+[
+  {
+    "claim_id": "fact:14967",
+    "claim_json": {
+      "subject": {
+        "text": "Bacteroidales",
+        "type": "MicrobialTaxon",
+        "mention": "Bacteroidales",
+        "process": {
+          "kind": "abundance",
+          "direction": "unspecified"
+        }
+      },
+      "object": {
+        "text": "CD8+ T cell",
+        "type": "CellType",
+        "mention": "CD8+ T cell",
+        "process": {
+          "kind": "abundance",
+          "direction": "unspecified"
+        }
+      },
+      "predicate": "CORRELATED_WITH",
+      "qualifiers": {
+        "association_direction": "negative"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "Pairwise comparisons using Spearman rank correlations were then performed between specific bacterial taxa enriched in the gut microbiome of R and NR and immune markers in the tumor microenvironment, demonstrating a statistically significant positive correlation between the CD8+ T cell infiltrate in the tumor and abundance of the Faecalibacterium genus, the Ruminococcaceae family and the Clostridiales order in the gut and a nonsignificant but negative correlation with Bacteroidales (Fig. 4, B and C, and figs. S19 and S20)."
+      }
+    },
+    "expected_status": "unknown"
+  },
+  {
+    "claim_id": "fact:17636",
+    "claim_json": {
+      "subject": {
+        "text": "Pasteurized A.muciniphila",
+        "type": "Intervention",
+        "mention": "Pasteurized A.muciniphila",
+        "process": null
+      },
+      "object": {
+        "text": "body weight",
+        "type": "Phenotype",
+        "mention": "body weight",
+        "process": {
+          "kind": "abundance",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Pasteurized A.muciniphila supplementation slightly decreased body weight (-2.27±0.92kg, P=0.091) as compared to the Placebo group"
+      }
+    },
+    "expected_status": "not_significant"
+  },
+  {
+    "claim_id": "fact:17637",
+    "claim_json": {
+      "subject": {
+        "text": "Pasteurized A.muciniphila",
+        "type": "Intervention",
+        "mention": "Pasteurized A.muciniphila",
+        "process": null
+      },
+      "object": {
+        "text": "fat mass",
+        "type": "Phenotype",
+        "mention": "fat mass",
+        "process": {
+          "kind": "abundance",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Pasteurized A.muciniphila supplementation slightly decreased body weight (-2.27±0.92kg, P=0.091) as compared to the Placebo group, and fat mass (-1.37±0.82kg, P=0.092) and hip circumference (-2.63±1.14cm, P = 0.091) as compared to baseline."
+      }
+    },
+    "expected_status": "not_significant"
+  },
+  {
+    "claim_id": "fact:17638",
+    "claim_json": {
+      "subject": {
+        "text": "Pasteurized A.muciniphila",
+        "type": "Intervention",
+        "mention": "Pasteurized A.muciniphila",
+        "process": null
+      },
+      "object": {
+        "text": "hip circumference",
+        "type": "Phenotype",
+        "mention": "hip circumference",
+        "process": {
+          "kind": "abundance",
+          "direction": "decreased"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "observed_change",
+      "evidence": {
+        "sentence": "Pasteurized A.muciniphila supplementation slightly decreased body weight (-2.27±0.92kg, P=0.091) as compared to the Placebo group, and fat mass (-1.37±0.82kg, P=0.092) and hip circumference (-2.63±1.14cm, P = 0.091) as compared to baseline."
+      }
+    },
+    "expected_status": "not_significant"
+  },
+  {
+    "claim_id": "fact:19626",
+    "claim_json": {
+      "subject": {
+        "text": "probiotics",
+        "type": "Intervention",
+        "mention": "probiotics",
+        "process": null
+      },
+      "object": {
+        "text": "gut microbiome",
+        "type": "Microbiome",
+        "mention": "gut microbiome",
+        "process": {
+          "kind": "abundance",
+          "direction": "unchanged"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "author_statement",
+        "result_interpretation": "unresolved_negative"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "it has been proven that even if the composition of the gut microbiome doesn't change, the administration of probiotics does impact the GI metabolome, conferring a positive overall effect."
+      }
+    },
+    "expected_status": "no_effect_reported"
+  },
+  {
+    "claim_id": "fact:23336",
+    "claim_json": {
+      "subject": {
+        "text": "glycine-conjugated BAs",
+        "type": "Metabolite",
+        "mention": "glycine-conjugated BAs",
+        "process": null
+      },
+      "object": {
+        "text": "glycine-conjugated MCBAs",
+        "type": "Metabolite",
+        "mention": "glycine-conjugated MCBAs",
+        "process": {
+          "kind": "production",
+          "direction": "unchanged"
+        }
+      },
+      "predicate": "AFFECTS",
+      "qualifiers": {
+        "evidence_type": "experimental",
+        "result_interpretation": "unresolved_negative"
+      },
+      "negated": false,
+      "speculative": false,
+      "result_status": "unknown",
+      "evidence": {
+        "sentence": "While glycine-conjugated MCBAs are known to be prevalent, their production could not be measured in this study because glycine-conjugated BAs (GCA and GCDCA) were substrates in the media."
+      }
+    },
+    "expected_status": "unknown"
+  }
+]

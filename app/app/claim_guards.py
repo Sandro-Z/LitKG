@@ -82,7 +82,79 @@ def audit_polarity(claim):
 
 
 def audit_claim(claim):
-    return audit_polarity(claim)
+    return audit_polarity(claim) + audit_certainty(claim)
+
+
+HEDGE = re.compile(r"\b(?:may(?!(?:\s|,)+\d)|might|could(?! not)|suggest(?:s|ed|ing)?|propos(?:e|es|ed)|(?:is |was |are |were )?thought to|likely|potentially)\b")
+UNMEASURED = re.compile(r"\b(?:could not be (?:measured|assessed|evaluated)|(?:not|never) (?:assessed|measured|tested|evaluated)|insufficient\b[^.;]*\b(?:evaluate|assess|test))\b")
+NONSIGNIFICANT = re.compile(r'\b(?:non[- ]?significant|not (?:statistically )?significant|no significant (?:difference|change|effect|correlation|association)|did not significantly)\b')
+P_VALUE = re.compile(r'\bp\s*(>=|<=|[=><≥≤])\s*((?:0?\.\d+|\d+(?:\.\d+)?)(?:e[-+]?\d+)?)\b')
+
+
+def _endpoint_scope(claim, quote):
+    role = 'subject' if claim.get('predicate') == 'DIFFERS_BETWEEN' else 'object'
+    endpoint = _pattern(claim.get(role) or {})
+    parts = re.split(r';|\b(?:whereas|however|but(?! not))\b', quote)
+    matched = [part for part in parts if re.search(endpoint, part)]
+    return matched[0] if len(matched) == 1 else None
+
+
+def certainty_evidence(claim):
+    """Lexical annotations for the unique endpoint arm; no inferred p-values."""
+    quote = _text((claim.get('evidence') or {}).get('sentence'))
+    scope = _endpoint_scope(claim, quote)
+    endpoint = _pattern(claim.get('subject' if claim.get('predicate') == 'DIFFERS_BETWEEN' else 'object') or {})
+    hedge = None
+    if scope:
+        # A hedge about a later mechanism does not negate an earlier measurement.
+        hedge = next((m for m in HEDGE.finditer(scope) if re.search(endpoint, scope[m.end():])), None)
+        if hedge and re.match(r'\s+due to\b', scope[hedge.end():]) and re.search(rf'{endpoint}[^.;]{{0,100}}\bwhich was observed\b', scope):
+            hedge = None
+    unavailable = UNMEASURED.search(scope) if scope else None
+    # Correlation's two endpoints are symmetric. A non-significant second arm
+    # may mention only its taxon; never borrow the positive arm's marker name.
+    significance = None
+    for m in NONSIGNIFICANT.finditer(quote):
+        tail = re.split(r'[.;]|\b(?:whereas|however)\b', quote[m.end():], maxsplit=1)[0]
+        if any(re.search(_pattern(claim.get(r) or {}), tail) for r in ('subject','object')):
+            significance = m
+            break
+        if scope and m.group(0) in scope and scope.count('correlation') <= 1:
+            significance = m
+            break
+    ps = [m for m in P_VALUE.finditer(scope or '') if 0 <= float(m[2]) <= 1
+          and not re.match(r'\s*(?:[×x*]|[-+]\s*\d)', (scope or '')[m.end():])]
+    nonsig_ps = [m for m in ps if (m[1] in {'=','>','>=','≥'} and float(m[2]) > .05) or (m[1] == '>' and float(m[2]) == .05)]
+    p_cue = nonsig_ps[0] if ps and len(nonsig_ps) == len(ps) else None
+    return {'hedge': hedge.group(0) if hedge else None,
+            'unmeasured': unavailable.group(0) if unavailable else None,
+            'not_significant': significance.group(0) if significance else p_cue.group(0) if p_cue else None,
+            'p_value': float(ps[0][2]) if len(ps) == 1 and ps[0][1] == '=' else None,
+            'trend': bool(scope and re.search(r'\btrend\b', scope))}
+
+
+def audit_certainty(claim):
+    cues = certainty_evidence(claim)
+    q = claim.get('qualifiers') or {}
+    status = claim.get('result_status', q.get('result_status', 'unknown'))
+    findings = []
+    def flag(rule, cue, field, **extra):
+        findings.append({'rule_id': rule, 'cue': cue, 'field': field, 'action': 'needs_review', **extra})
+    if status == 'observed_change' and (claim.get('speculative') or cues['hedge']):
+        flag('V2-HEDGE-RESULT', 'speculative=true' if claim.get('speculative') else cues['hedge'], 'result_status', recommended_status='unknown')
+    endpoint = 'subject' if claim.get('predicate') == 'DIFFERS_BETWEEN' else 'object'
+    if cues['unmeasured'] and (status in {'observed_change','no_effect_reported'} or 'unchanged' in _direction(claim, endpoint)):
+        flag('V2-UNMEASURED-NULL', cues['unmeasured'], 'result_status', recommended_status='unknown')
+    if cues['not_significant'] and status != 'not_significant' and q.get('result_interpretation') != 'not_significant':
+        flag('V2-SIGNIFICANCE', cues['not_significant'], 'result_status', recommended_status='not_significant')
+    if cues['trend'] and not cues['not_significant'] and status not in {'not_significant','unknown'} and q.get('p_value') is None:
+        flag('V2-TREND-SIGNIFICANCE', 'trend', 'qualifiers.p_value')
+    scope = _endpoint_scope(claim, _text((claim.get('evidence') or {}).get('sentence')))
+    if q.get('result_interpretation') == 'unresolved_negative' and scope and not cues['unmeasured']:
+        measured_null = re.search(r"\b(?:doesn't change|didn't change|don't change|does not change|did not affect|unchanged|no change)\b", scope)
+        if measured_null:
+            flag('V2-RESOLVED-NULL', measured_null.group(0), 'qualifiers.result_interpretation', recommended_status='no_effect_reported')
+    return findings
 
 
 def add_guard_reasons(claim):

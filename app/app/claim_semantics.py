@@ -9,12 +9,12 @@ from app.catalog import source_contains
 
 
 NOT_SIGNIFICANT = re.compile(r'\b(?:not statistically significant|no significant (?:difference|change|effect)|did not significantly|not significantly (?:different|alter|affect|change))\b', re.I)
-NO_EFFECT = re.compile(r'\b(?:did not (?:affect|alter|change)|had no effect on|failed to (?:affect|influence)|unchanged|remained (?:stable|constant)|no (?:observed )?(?:difference|change|effect)|(?:was|were) not (?:affected|altered|changed))\b', re.I)
+NO_EFFECT = re.compile(r"\b(?:(?:did not|does not|do not|doesn't|didn't|don't) (?:affect|alter|change)|had no effect on|failed to (?:affect|influence)|unchanged|remained (?:stable|constant)|no (?:observed )?(?:difference|change|effect)|(?:was|were) not (?:affected|altered|changed))\b", re.I)
 CAUSAL = {'CAUSES', 'TREATS', 'PREVENTS', 'AFFECTS', 'ACTIVATES', 'INHIBITS'}
 OUTCOMES = {'AFFECTS', 'ACTIVATES', 'INHIBITS', 'DIFFERS_BETWEEN'}
 NOT_ASSESSED = re.compile(r'\b(?:not (?:tested|assessed|measured|examined|evaluated)|did not (?:test|assess|measure|examine|evaluate))\b', re.I)
 NOT_DETECTED = re.compile(r'\b(?:not detected|undetectable|below (?:the )?(?:limit of detection|detection limit))\b', re.I)
-NON_OUTCOMES = {'not_assessed', 'not_detected', 'absence_reported', 'unresolved_negative'}
+NON_OUTCOMES = {'not_assessed', 'not_detected', 'absence_reported', 'unresolved_negative', 'speculative'}
 PROCEDURAL = re.compile(r'\b(?:DNA extraction|RNA extraction|liquid handling|pipetting|centrifugation|genome assembly|gene annotation|functional annotation|read mapping|data plotting|statistical analysis)\b', re.I)
 
 
@@ -51,6 +51,8 @@ def result_view(value):
         return 'unknown'
     for status in (raw.get('result_status'), q.get('result_status')):
         if status in {'no_effect_reported', 'not_significant', 'observed_change'}:
+            if status == 'observed_change' and value.get('speculative', raw.get('speculative', False)):
+                return 'unknown'
             return status
     if value.get('negated', raw.get('negated', False)):
         return 'unknown'
@@ -60,7 +62,7 @@ def result_view(value):
     directions.append(q.get('direction' if role == 'subject' else 'object_direction'))
     changed = any(d in {'increased', 'decreased'} for d in directions)
     if changed and 'unchanged' not in directions:
-        return 'observed_change'
+        return 'unknown' if value.get('speculative', raw.get('speculative', False)) else 'observed_change'
     if 'unchanged' in directions and not changed:
         return 'no_effect_reported'
     return 'unknown'
@@ -70,19 +72,33 @@ def normalize_result(claim, repairs):
     before = claim.model_dump(mode='json')
     status = result_view(before)
     quote = claim.evidence.sentence
+    from app.claim_guards import certainty_evidence, audit_certainty
+    certainty = certainty_evidence(before)
+    for finding in audit_certainty(before):
+        reason = f"semantic: {finding['rule_id']} field={finding['field']} cue={finding['cue']}"
+        if reason not in claim.review_reasons:
+            claim.review_reasons.append(reason)
     clause = outcome_clause(claim)
     outcome = claim.predicate in {'AFFECTS','DIFFERS_BETWEEN'}
-    unavailable = clause and (NOT_ASSESSED.search(clause) or NOT_DETECTED.search(clause))
+    unavailable = certainty['unmeasured'] or (clause and (NOT_ASSESSED.search(clause) or NOT_DETECTED.search(clause)))
     if outcome and unavailable:
         status = 'unknown'
-        claim.qualifiers['result_interpretation'] = 'not_assessed' if NOT_ASSESSED.search(clause) else 'not_detected'
+        claim.qualifiers['result_interpretation'] = 'not_assessed' if certainty['unmeasured'] or NOT_ASSESSED.search(clause or '') else 'not_detected'
+        endpoint = claim.subject if claim.predicate == 'DIFFERS_BETWEEN' else claim.object
+        if endpoint.process and endpoint.process.direction == 'unchanged':
+            endpoint.process.direction = 'unspecified'
+        for key in ('direction','object_direction'):
+            if claim.qualifiers.get(key) == 'unchanged':
+                claim.qualifiers[key] = 'unspecified'
         reason = 'semantic: lack of measurement/detection must not be interpreted as a measured null effect'
         if reason not in claim.review_reasons:
             claim.review_reasons.append(reason)
-    elif outcome and clause and NOT_SIGNIFICANT.search(clause):
+    elif outcome and (certainty['not_significant'] or clause and NOT_SIGNIFICANT.search(clause)):
         status = 'not_significant'
     elif outcome and clause and NO_EFFECT.search(clause):
         status = 'no_effect_reported'
+        if claim.qualifiers.get('result_interpretation') == 'unresolved_negative':
+            del claim.qualifiers['result_interpretation']
     elif outcome and status == 'no_effect_reported':
         status = 'unknown'
         claim.qualifiers['result_interpretation'] = 'unresolved_negative'
@@ -91,6 +107,13 @@ def normalize_result(claim, repairs):
             claim.review_reasons.append(reason)
     if claim.predicate not in OUTCOMES and before['result_status'] != 'unknown':
         claim.review_reasons.append('semantic: result_status requires a measured outcome; relation negation remains separate')
+    if certainty['not_significant'] and not unavailable:
+        claim.qualifiers['result_interpretation'] = 'not_significant'
+        if certainty['p_value'] is not None:
+            claim.qualifiers.setdefault('p_value', certainty['p_value'])
+    if status == 'observed_change' and (claim.speculative or certainty['hedge']):
+        status = 'unknown'
+        claim.qualifiers['result_interpretation'] = 'speculative'
     claim.result_status = status
     if status == 'no_effect_reported' and claim.predicate in {'AFFECTS', 'DIFFERS_BETWEEN'}:
         claim.negated = False
@@ -231,7 +254,11 @@ def result_sql(alias):
     changed, unchanged = has(('increased','decreased')), has(('unchanged',))
     return f"""CASE
       WHEN {alias}.predicate NOT IN ('AFFECTS','ACTIVATES','INHIBITS','DIFFERS_BETWEEN')
-        OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative') THEN 'unknown'
+        OR {alias}.claim_json->'qualifiers'->>'result_interpretation' IN ('not_assessed','not_detected','absence_reported','unresolved_negative','speculative') THEN 'unknown'
+      WHEN {alias}.claim_json->>'speculative'='true' AND (
+        COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')='observed_change'
+        OR (COALESCE(NULLIF({alias}.claim_json->>'result_status','unknown'),NULLIF({alias}.claim_json->'qualifiers'->>'result_status','unknown'),'')=''
+            AND NOT {alias}.negated AND COALESCE({changed},false) AND NOT COALESCE({unchanged},false))) THEN 'unknown'
       WHEN {alias}.claim_json->>'result_status' IN ('not_significant','no_effect_reported','observed_change')
         THEN {alias}.claim_json->>'result_status'
       WHEN {alias}.claim_json->'qualifiers'->>'result_status' IN ('not_significant','no_effect_reported','observed_change')
