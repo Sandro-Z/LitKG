@@ -132,6 +132,11 @@ CLAIMS_MIN_SEGMENT_CHARS=500
 CLAIMS_MAX_OUTPUT_TOKENS=8192
 ```
 
+目录截断时先拆分输入；到达最小分段后，输出预算会按倍数提高至
+`CATALOG_OUTPUT_RETRY_MAX_TOKENS`（默认 `max(CATALOG_MAX_OUTPUT_TOKENS, 16384)`）。
+正常请求仍使用原预算，成功缓存继续复用。模型输出上限、Qwen thinking 配置与失败续接见
+[catalog 容量排错](docs/catalog-capacity.md)。
+
 启动：
 
 ```bash

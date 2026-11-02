@@ -10,7 +10,7 @@ from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, project_existing_claim, store_claim, upsert_entity
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
-    CATALOG_MAX_OUTPUT_TOKENS, CLAIMS_MAX_OUTPUT_TOKENS, CLAIMS_PROMPT_VERSION,
+    CATALOG_MAX_OUTPUT_TOKENS, CATALOG_OUTPUT_RETRY_MAX_TOKENS, CLAIMS_MAX_OUTPUT_TOKENS, CLAIMS_PROMPT_VERSION,
     ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
 from app.claims import ClaimValidationError, prepare_claims, combine_claims, retains_required_context
 from app.entity_types import TYPE_DEFINITIONS
@@ -333,6 +333,9 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
         min_chars = int(os.environ.get('CATALOG_MIN_SEGMENT_CHARS', '500'))
     if min_chars < 1:
         raise ValueError('CATALOG_MIN_SEGMENT_CHARS must be positive')
+    if CATALOG_MAX_OUTPUT_TOKENS < 1 or CATALOG_OUTPUT_RETRY_MAX_TOKENS < CATALOG_MAX_OUTPUT_TOKENS:
+        raise ValueError('Catalog output budgets must be positive and CATALOG_OUTPUT_RETRY_MAX_TOKENS '
+                         'must be >= CATALOG_MAX_OUTPUT_TOKENS')
     heading = f"Document title: {title or ''}\nSection: {segment['section_title'] or 'Unknown'}"
     sources = [title or '', segment['section_title'] or '', segment['text']]
     validation_segment = {**segment, 'text':'\n'.join(sources), 'sources':sources}
@@ -342,25 +345,42 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
         split = conn.execute("SELECT payload FROM processing_cache WHERE document_id=%s AND stage='catalog_split' AND cache_key=%s",
                              (document_id, split_key)).fetchone()
     if not split:
-        try:
-            bundle = cached_model(document_id, 'catalog', key,
-                lambda:extract_catalog(heading, segment['text']), CatalogBundle, segment['id'],
-                validate=lambda b:prepare_catalog(b, validation_segment, quarantine=True, allow_empty=True),
-                retry_call=lambda error, previous:extract_catalog(heading, segment['text'], feedback=str(error), previous_output=previous),
-                max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
-        except ModelOutputTruncatedError as exc:
-            children = split_catalog_segment(segment, min_chars)
-            if not children:
-                raise ModelOutputTruncatedError(
-                    f'Catalog output still truncated at {len(segment["text"])} input characters '
-                    f'(CATALOG_MIN_SEGMENT_CHARS={min_chars}, CATALOG_MAX_OUTPUT_TOKENS={CATALOG_MAX_OUTPUT_TOKENS}). '
-                    'Increase the catalog output budget within the model server limits; check its context/output limits and thinking configuration.', exc.raw) from exc
-            with get_conn() as conn:
-                conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog_split',%s,%s) ON CONFLICT DO NOTHING",
-                             (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
-        else:
-            yield segment, bundle
-            return
+        budget, attempted = CATALOG_MAX_OUTPUT_TOKENS, []
+        while True:
+            attempted.append(budget)
+            def invoke(**kwargs):
+                # Keep ordinary calls and successful cache keys compatible.
+                # Only an unsplittable truncated leaf needs a larger budget.
+                if budget != CATALOG_MAX_OUTPUT_TOKENS:
+                    kwargs['max_tokens'] = budget
+                return extract_catalog(heading, segment['text'], **kwargs)
+            try:
+                bundle = cached_model(document_id, 'catalog', key, invoke, CatalogBundle, segment['id'],
+                    validate=lambda b:prepare_catalog(b, validation_segment, quarantine=True, allow_empty=True),
+                    retry_call=lambda error, previous:invoke(feedback=str(error), previous_output=previous),
+                    max_attempts=int(os.environ.get('CATALOG_VALIDATION_ATTEMPTS', '3')))
+            except ModelOutputTruncatedError as exc:
+                children = split_catalog_segment(segment, min_chars)
+                if not children:
+                    if budget < CATALOG_OUTPUT_RETRY_MAX_TOKENS:
+                        budget = min(budget * 2, CATALOG_OUTPUT_RETRY_MAX_TOKENS)
+                        continue
+                    counts = ', '.join(f'{name}={value}' for name, value in exc.diagnostics.items())
+                    raise ModelOutputTruncatedError(
+                        f'Catalog output still truncated at {len(segment["text"])} input characters '
+                        f'(CATALOG_MIN_SEGMENT_CHARS={min_chars}, attempted max_tokens={attempted}, '
+                        f'CATALOG_OUTPUT_RETRY_MAX_TOKENS={CATALOG_OUTPUT_RETRY_MAX_TOKENS}). '
+                        'Catalog exhausted its bounded output retries; check model server limits '
+                        'and whether thinking is actually disabled. '
+                        + (f'Last response: {counts}.' if counts else ''), exc.raw,
+                        diagnostics=exc.diagnostics) from exc
+                with get_conn() as conn:
+                    conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog_split',%s,%s) ON CONFLICT DO NOTHING",
+                                 (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
+                break
+            else:
+                yield segment, bundle
+                return
     else:
         children = split_catalog_segment(segment, min_chars, legacy=split['payload'].get('strategy') != 'overlapping-halves-v2-boundaries')
     if not children:

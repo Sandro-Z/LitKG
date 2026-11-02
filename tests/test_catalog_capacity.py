@@ -46,6 +46,13 @@ class CatalogCapacityTests(unittest.TestCase):
             from app import llm,tasks
         cls.llm,cls.tasks=llm,tasks
 
+    def setUp(self):
+        for name, value in [('CATALOG_MAX_OUTPUT_TOKENS', 4096),
+                            ('CATALOG_OUTPUT_RETRY_MAX_TOKENS', 16384)]:
+            setting = patch.object(self.tasks, name, value)
+            setting.start()
+            self.addCleanup(setting.stop)
+
     def test_split_preserves_all_characters_absolute_offsets_and_overlap(self):
         for text in ['x'*2001, 'Alpha protein. '*180, '细胞类型及表型。'*300, 'ab']:
             segment={'id':1,'section_title':'Results','text':text,'start':321,'end':321+len(text)}
@@ -70,10 +77,26 @@ class CatalogCapacityTests(unittest.TestCase):
         self.assertIn('1234',str(caught.exception))
         request.assert_called_once()
 
+    def test_truncation_diagnostics_count_reasoning_without_exposing_it(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='', reasoning_content='private reasoning'),
+                                     finish_reason='length')],
+            usage=SimpleNamespace(completion_tokens=4096,
+                                  completion_tokens_details=SimpleNamespace(reasoning_tokens=4096)))
+        with patch.object(self.llm.client.chat.completions, 'create', return_value=response):
+            with self.assertRaises(self.llm.ModelOutputTruncatedError) as caught:
+                self.llm.chat_completion([], max_tokens=4096)
+        self.assertEqual(caught.exception.diagnostics,
+            {'content_chars':0, 'reasoning_chars':17, 'completion_tokens':4096, 'reasoning_tokens':4096})
+        self.assertNotIn('private reasoning', str(caught.exception))
+        self.assertIn('reasoning_tokens=4096', str(caught.exception))
+
     def test_catalog_output_budget_is_independent_of_claims(self):
         with patch.object(self.llm,'CATALOG_MAX_OUTPUT_TOKENS',1234), patch.object(self.llm,'chat_completion',return_value='{"entities":[]}') as chat:
             self.llm.extract_catalog('Results','Source text.')
             self.assertEqual(chat.call_args.kwargs['max_tokens'],1234)
+            self.llm.extract_catalog('Results','Source text.', max_tokens=8192)
+            self.assertEqual(chat.call_args.kwargs['max_tokens'],8192)
         with patch.object(self.llm,'chat_completion',return_value='{"claims":[]}',) as chat:
             self.llm.extract_claims('Results','Source text.')
             self.assertEqual(chat.call_args.kwargs,{'max_tokens':self.llm.CLAIMS_MAX_OUTPUT_TOKENS})
@@ -132,9 +155,77 @@ class CatalogCapacityTests(unittest.TestCase):
         with patch.object(self.tasks,'get_conn',side_effect=cache.connect),patch.object(self.tasks,'extract_catalog',side_effect=self.llm.ModelOutputTruncatedError('capacity exceeded','partial')) as model:
             with self.assertRaisesRegex(self.llm.ModelOutputTruncatedError,'model server limits'):
                 list(self.tasks.catalog_segment_bundles(1,'Study',segment,0,min_chars=500))
-        model.assert_called_once()
+        self.assertEqual([call.kwargs.get('max_tokens', 4096) for call in model.call_args_list],
+                         [4096, 8192, 16384])
         self.assertEqual(cache.rows,{})
-        self.assertEqual([a['status'] for a in cache.attempts],['failed'])
+        self.assertEqual([a['status'] for a in cache.attempts],['failed'] * 3)
+
+    def test_minimum_segment_grows_budget_and_reuses_validated_success(self):
+        cache = SegmentCache()
+        source = 'Alpha protein was measured.'
+        segment = {'id':7, 'section_title':'Results', 'text':source, 'start':0, 'end':len(source)}
+        calls = []
+        def model(heading, text, **kwargs):
+            calls.append(kwargs)
+            if not kwargs:
+                raise self.llm.ModelOutputTruncatedError('capacity exceeded', 'partial')
+            return CatalogBundle(entities=[CatalogEntity(text='Alpha protein', type='Protein',
+                mention='Alpha protein', aliases=['Invented alias'], evidence=source)])
+        with patch.object(self.tasks, 'get_conn', side_effect=cache.connect), \
+             patch.object(self.tasks, 'extract_catalog', side_effect=model):
+            leaves = list(self.tasks.catalog_segment_bundles(1, 'Study', segment, 0))
+            with patch.object(self.tasks, 'CATALOG_OUTPUT_RETRY_MAX_TOKENS', 4096):
+                repeated = list(self.tasks.catalog_segment_bundles(1, 'Study', segment, 0))
+        self.assertEqual(calls, [{}, {'max_tokens':8192}])
+        self.assertEqual(len(leaves), 1)
+        self.assertEqual(leaves[0][1].model_dump(), repeated[0][1].model_dump())
+        self.assertEqual(leaves[0][1].entities[0].aliases, [])  # Grounding still runs.
+        self.assertTrue(leaves[0][1]._catalog_repairs)
+        self.assertFalse(any(stage == 'catalog_split' for stage, _ in cache.rows))
+        self.assertEqual([a['status'] for a in cache.attempts], ['failed', 'done'])
+
+    def test_output_retry_ceiling_is_exact_and_can_disable_escalation(self):
+        segment = {'id':7, 'section_title':'Results', 'text':'Short.', 'start':0, 'end':6}
+        for ceiling, expected in [(12288, [4096,8192,12288]), (4096, [4096])]:
+            cache = SegmentCache()
+            with self.subTest(ceiling=ceiling), \
+                 patch.object(self.tasks, 'CATALOG_OUTPUT_RETRY_MAX_TOKENS', ceiling), \
+                 patch.object(self.tasks, 'get_conn', side_effect=cache.connect), \
+                 patch.object(self.tasks, 'extract_catalog', side_effect=
+                     self.llm.ModelOutputTruncatedError('capacity exceeded', 'partial',
+                         diagnostics={'content_chars':7})) as model:
+                with self.assertRaises(self.llm.ModelOutputTruncatedError) as caught:
+                    list(self.tasks.catalog_segment_bundles(1, 'Study', segment, 0))
+                self.assertEqual([call.kwargs.get('max_tokens',4096) for call in model.call_args_list], expected)
+                self.assertIn(f'attempted max_tokens={expected}', str(caught.exception))
+                self.assertIn('content_chars=7', str(caught.exception))
+                self.assertEqual(caught.exception.raw, 'partial')
+                self.assertEqual(cache.rows, {})
+
+    def test_capacity_escalation_does_not_retry_server_or_other_errors(self):
+        cache = SegmentCache()
+        segment = {'id':7, 'section_title':'Results', 'text':'Short.', 'start':0, 'end':6}
+        with patch.object(self.tasks, 'get_conn', side_effect=cache.connect), \
+             patch.object(self.tasks, 'extract_catalog', side_effect=[
+                 self.llm.ModelOutputTruncatedError('capacity exceeded', 'partial'),
+                 RuntimeError('server rejected output budget')]) as model:
+            with self.assertRaisesRegex(RuntimeError, 'server rejected output budget'):
+                list(self.tasks.catalog_segment_bundles(1, 'Study', segment, 0))
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(cache.rows, {})
+
+    def test_invalid_output_budgets_fail_before_model_or_database(self):
+        segment = {'id':7, 'section_title':'Results', 'text':'Short.', 'start':0, 'end':6}
+        for base, ceiling in [(0,16384), (4096,2000)]:
+            with self.subTest(base=base, ceiling=ceiling), \
+                 patch.object(self.tasks, 'CATALOG_MAX_OUTPUT_TOKENS', base), \
+                 patch.object(self.tasks, 'CATALOG_OUTPUT_RETRY_MAX_TOKENS', ceiling), \
+                 patch.object(self.tasks, 'get_conn') as db, \
+                 patch.object(self.tasks, 'extract_catalog') as model:
+                with self.assertRaisesRegex(ValueError, 'Catalog output budgets'):
+                    list(self.tasks.catalog_segment_bundles(1, 'Study', segment, 0))
+                db.assert_not_called()
+                model.assert_not_called()
 
 
 if __name__=='__main__':
