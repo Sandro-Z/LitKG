@@ -122,6 +122,57 @@ def evidence_location(row: dict[str, Any]) -> dict[str, Any]:
 
 def add_claim_location(row: dict[str, Any]) -> dict[str, Any]:
     result = {**row, **evidence_location(row)}
+    result['source_refs'] = claim_source_refs(row)
     result.pop("chunk_page_start", None)
     result.pop("chunk_page_end", None)
+    result.pop('_source_text', None)
+    result.pop('_page_spans', None)
     return result
+
+
+def claim_source_refs(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Export saved source anchors; offsets are derived only from server text.
+
+    Missing/ambiguous anchors stay missing. Additional evidence never borrows
+    the primary sentence's page or offset.
+    """
+    raw = row.get('claim_json') or {}
+    main = raw.get('evidence')
+    if isinstance(main, dict) and main.get('sentence'):
+        evidence = [main, *raw.get('additional_evidence', [])]
+    elif isinstance(row.get('evidence'), list):
+        evidence = row['evidence']
+    elif row.get('evidence_text'):
+        evidence = [{'sentence': row['evidence_text']}]
+    else:
+        return []
+    text = row.get('_source_text', row.get('source_text'))
+    chunk = {'text': text or '', 'page_spans': row.get('_page_spans') or [],
+             'page_start': row.get('chunk_page_start',row.get('_chunk_page_start')),
+             'page_end': row.get('chunk_page_end',row.get('_chunk_page_end'))}
+    refs = []
+    for index, item in enumerate(evidence):
+        if not isinstance(item, dict) or not item.get('sentence'):
+            continue
+        sentence = item['sentence']
+        page, end = _valid_page(item.get('page')), _valid_page(item.get('page_end'))
+        if page is None:
+            page, end = locate_evidence_pages(sentence, chunk)
+        elif end is None:
+            end = page
+        if page is not None and end is not None and end < page:
+            page, end = None, None
+        ref = {'document_id': row.get('document_id'), 'chunk_id': row.get('chunk_id'),
+               'page': page, 'page_end': end,
+               'section': item.get('section') or row.get('section_title'),
+               'sentence': sentence, 'kind': 'primary' if index == 0 else 'additional',
+               'title': row.get('title'), 'doi': row.get('doi')}
+        if item.get('table_or_figure') is not None:
+            ref['table_or_figure'] = item['table_or_figure']
+        if text:
+            matches = _evidence_matches(sentence, text)
+            if len(matches) == 1:
+                start, stop = matches[0]
+                ref['offset'] = {'start': start, 'end': stop, 'basis': 'chunk_text', 'unit': 'unicode_codepoint'}
+        refs.append(ref)
+    return refs

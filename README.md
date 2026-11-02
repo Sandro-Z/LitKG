@@ -10,6 +10,9 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 `FMT_use` 评审修复后的完整 CSV/JSON 导出、结果语义、图谱截断提示、
 输入质量定位与默认 dry-run 的定向修复/回滚，见 [使用与迁移说明](docs/FMT-review-fixes.md)。
 
+KB26 的极性/确定性校验、默认只读的批量审计，以及 JSON/CSV 导出的 `source_refs`，
+见 [确定性 claim 校验与导出](docs/claim-guards.md)。
+
 ## 项目特性
 
 - 一次上传最多 `MAX_BATCH_FILES` 篇 PDF，并跟踪整批和每篇文献的状态。

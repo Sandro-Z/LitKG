@@ -6,7 +6,8 @@ import json
 
 from app.claim_semantics import result_sql, result_view, display_negated
 from app.normalization import normalize_entity_type, normalize_predicate
-from app.provenance import add_claim_location
+from app.provenance import add_claim_location, claim_source_refs
+from app.claim_guards import audit_pending_sql
 
 
 def fetch_claim_page(cur, *, knowledge_base_id=None, document_id=None, limit=100,
@@ -37,8 +38,10 @@ def fetch_claim_page(cur, *, knowledge_base_id=None, document_id=None, limit=100
         where += ' AND claim.id>%s'
         params.append(after_id)
     cur.execute(f"""SELECT claim.*, document.filename, document.title, document.doi,
+        {audit_pending_sql('claim')} AS audit_pending,
         document.pipeline_generation AS document_pipeline_generation, chunk.extraction_version AS chunk_extraction_version,
         chunk.section_title, chunk.page_start AS chunk_page_start, chunk.page_end AS chunk_page_end,
+        chunk.text AS _source_text, chunk.page_spans AS _page_spans,
         (SELECT f.id FROM facts f WHERE f.claim_id=claim.id) AS fact_id,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id', r.id, 'kind', r.kind, 'status', r.status, 'note', r.note) ORDER BY r.id)
           FROM review_items r WHERE r.document_id=claim.document_id
@@ -53,7 +56,7 @@ def fetch_claim_page(cur, *, knowledge_base_id=None, document_id=None, limit=100
         item.update(qualifiers=raw.get('qualifiers', {}), participants=raw.get('participants', []),
                     process={role: (raw.get(role) or {}).get('process') for role in ('subject', 'object')},
                     additional_evidence=raw.get('additional_evidence', []), source_kind=raw.get('source_kind', 'unknown'),
-                    result_status=result_view(item), semantic_status=raw.get('semantic_status', 'unknown'))
+                    result_status=result_view(item), semantic_status='pending' if item.get('audit_pending') else raw.get('semantic_status', 'unknown'))
         item['review_status'] = 'pending' if item['semantic_status'] == 'pending' or any(r['status'] == 'pending' for r in item.get('reviews', [])) else 'unknown' if not item.get('reviews') else 'reviewed'
         item['display_negated'] = display_negated(item)
         rows.append(item)
@@ -100,9 +103,11 @@ def collect_facts(cur, *, knowledge_base_id, document_id=None, entity_id=None):
             if row['id'] <= last_id:
                 raise ValueError('Facts pagination is not strictly ID ordered')
             last_id = row['id']
+            if 'source_refs' not in row:
+                row['source_refs'] = claim_source_refs(row)
             row.pop('source_text',None)
             row.update(result_status=result_view(row), display_negated=display_negated(row),
-                       semantic_status=(row.get('claim_json') or {}).get('semantic_status','unknown'),
+                       semantic_status='pending' if row.get('audit_pending') else (row.get('claim_json') or {}).get('semantic_status','unknown'),
                        source_kind=(row.get('claim_json') or {}).get('source_kind','unknown'))
             row['review_status'] = 'pending' if row['semantic_status'] == 'pending' or any(r['status'] == 'pending' for r in row.get('reviews', [])) else 'unknown' if not row.get('reviews') else 'reviewed'
             facts.append(row)

@@ -11,6 +11,7 @@ from app.catalog import PROCESSING_VERSION, digest, add_review
 from app.graph_query import substring_pattern
 from app.claim_guards import audit_pending_sql
 from app.normalization import stable_json
+from app.provenance import claim_source_refs
 
 
 def embedding_config():
@@ -69,6 +70,7 @@ def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=
     cur.execute(f"""SELECT {audit_pending_sql('c')} AS audit_pending, f.*, c.document_id, c.chunk_id, c.confidence, c.claim_json,
         c.extraction_model, c.processing_version AS claim_processing_version, ch.extraction_version AS chunk_extraction_version,
         d.title, d.doi, d.filename, ch.text AS source_text, ch.section_title,
+        ch.page_start AS _chunk_page_start, ch.page_end AS _chunk_page_end, ch.page_spans AS _page_spans,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'kind',r.kind,'status',r.status,'note',r.note) ORDER BY r.id)
           FROM review_items r WHERE r.document_id=c.document_id AND (r.detail->>'claim_id'=c.id::TEXT OR r.detail->>'chunk_id'=c.chunk_id::TEXT)), '[]'::jsonb) AS reviews,
         (SELECT jsonb_agg(jsonb_build_object('entity_id',p.entity_id,'role',p.role,'mention',p.mention,
@@ -84,7 +86,12 @@ def fetch_facts(cur, kb, fact_ids=None, document_id=None, entity_id=None, limit=
           AND (%s::BIGINT IS NULL OR EXISTS (SELECT 1 FROM fact_participants p WHERE p.fact_id=f.id AND p.entity_id=%s))
           AND (%s::BIGINT IS NULL OR f.id>%s)
         ORDER BY f.id LIMIT %s OFFSET %s""", (kb, fact_ids, fact_ids, document_id, document_id, entity_id, entity_id, after_id, after_id, limit, offset))
-    return cur.fetchall()
+    rows = cur.fetchall()
+    for row in rows:
+        row['source_refs'] = claim_source_refs(row)
+        for key in ('_chunk_page_start','_chunk_page_end','_page_spans'):
+            row.pop(key,None)
+    return rows
 
 
 def fact_text(fact):

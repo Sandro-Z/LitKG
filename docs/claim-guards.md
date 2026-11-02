@@ -1,4 +1,4 @@
-# 确定性 claim 校验（V1、V2）
+# 确定性 claim 校验与导出（P0：V1–V3）
 
 校验复用现有 `semantic_status=pending` 和复核队列。新抽取在 `check_semantics` 中检查；
 旧记录批量检查只增加 `claim_audit` 复核结论，保留 claim ID、原始 claim_json 和 evidence。
@@ -61,8 +61,6 @@ CONTRADICTED 台账 10/79（12.7%），台账整体 90% 目标未达到，不作
 PYTHONPATH=app:tests /tmp/litkg-claim-audit-venv/bin/python -c "import app,sys;sys.path.append('frontend');import unittest;unittest.main(module=None,argv=['unittest','discover','-s','tests','-v'])"
 ```
 
-## 已知未覆盖
-
 ## V2：确定性一致性
 
 |规则|触发条件|动作与边界|
@@ -81,9 +79,36 @@ V1+V2 实测：D1 21/21；D2 六场景均命中；SUPPORTED 0/300；缺陷集119
 台账12/79（15.2%）。V2-HEDGE-RESULT 69、V2-SIGNIFICANCE 10、V2-UNMEASURED-NULL 1、
 V2-RESOLVED-NULL 1（规则可在同一 claim 重叠）。完整 unittest 359 项、83项跳过；Node 9/9。
 
+## V3：出处导出
+
+`app.provenance.claim_source_refs` 统一为 Claims 列表/完整导出与 Facts 列表/完整导出生成 `source_refs`。
+CSV 沿用嵌套字段的 JSON 字符串编码；旧客户端仍可读取原有字段。
+
+每个引用包含 document_id、chunk_id、page/page_end、section、sentence、kind、title、doi；
+kind 区分 primary/additional，已有 table_or_figure 也保留。每条补充证据独立定位，不借主证据的页码。
+有保存的 chunk 文本且能唯一匹配时，增加 offset.start/end（零起始、左闭右开、Unicode 码点，基准 chunk_text）。
+唯一性不足时不填偏移；缺页码保留 null。当前库未持久化原始 block ID，因此不编造 block。
+文本和 page_spans 仅用于服务器定位，导出不会包含新引入的内部全文字段，也不采用模型给出的 start/end。
+
+新增7项回归覆盖主/补充证据、未知来源、歧义偏移、解析页码范围、JSON/CSV兼容与 Facts 导出。
+
+## 最终 P0 验证
+
+独立 PostgreSQL 16 + pgvector 上完整 unittest：
+
+```text
+Ran 368 tests in 23.802s
+OK (skipped=5)
+```
+
+仅5项可选浏览器测试跳过，数据库集成已实际运行；Node图谱9/9，git diff --check通过。
+数据库实测后的修正与复核项见 [P0数据库集成复核](claim-guard-integration-checks.md)。
+临时实例只用本用户私有Unix socket，禁用TCP监听，测试结束后已停止。
+本轮只对KB26审计夹具运行预览，未访问正式KB26数据库，也未执行生产 apply、重抽、部署或推送。
+
 ## 后续与范围
 
 无明确论元词形的施受事反转、跨句指代、表格列顺序、数值比较、核心发现遗漏、实体合并、方法区约束未实现。
-V1 不以放宽整句关键词匹配来提高台账召回率。V2 确定性和 V3 source_refs 单独变更。
+V1 不以放宽整句关键词匹配来提高台账召回率。V1–V3 分别提交；本轮不扩展可选 P1。
 模型替换、提示词大改、本体大改、PDF 文章切分、全库 reextract 和前端变更均不在本次范围。
 IDENTITY_TO 尚需身份定义和迁移评估，不新增谓词；qualifier 注册不是 V1 所需改动。
