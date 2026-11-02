@@ -137,6 +137,10 @@ CLAIMS_MAX_OUTPUT_TOKENS=8192
 正常请求仍使用原预算，成功缓存继续复用。模型输出上限、Qwen thinking 配置与失败续接见
 [catalog 容量排错](docs/catalog-capacity.md)。
 
+批次进度页面支持“取消批次”，保留已完成结果及成功缓存，共享文献按其他批次的需求继续处理。
+排队任务跳过执行，在途解析/模型请求返回或超时后退出；API、恢复方式和部署见
+[批次取消说明](docs/batch-cancellation.md)。
+
 启动：
 
 ```bash

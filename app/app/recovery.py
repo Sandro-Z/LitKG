@@ -91,6 +91,12 @@ def reconcile_stalled(cur, *, batch_id=None, document_id=None):
                 break
         if not locked or not broker_is_idle():
             continue
+        # Match cancellation's document-before-chunks lock order. A candidate
+        # may have been cancelled since the initial scan; never relabel it.
+        cur.execute('SELECT status FROM documents WHERE id=%s FOR UPDATE', (doc_id,))
+        current = cur.fetchone()
+        if not current or current['status'] not in ACTIVE:
+            continue
         message = 'Pipeline stalled: no queued/unacknowledged broker work, live lease or processing lock; retry resumes saved stages'
         cur.execute("""UPDATE chunks SET status='failed',error=%s,updated_at=now()
             WHERE document_id=%s AND status IN ('queued','extracting')""", (message,doc_id))

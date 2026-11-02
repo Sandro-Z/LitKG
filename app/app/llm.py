@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from contextvars import ContextVar
 from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -20,6 +21,7 @@ LLM_MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "4096"))
 CATALOG_MAX_OUTPUT_TOKENS = int(os.environ.get("CATALOG_MAX_OUTPUT_TOKENS", str(LLM_MAX_OUTPUT_TOKENS)))
 CATALOG_OUTPUT_RETRY_MAX_TOKENS = int(os.environ.get(
     "CATALOG_OUTPUT_RETRY_MAX_TOKENS", str(max(CATALOG_MAX_OUTPUT_TOKENS, 16384))))
+model_request_check = ContextVar('litkg_model_request_check', default=None)
 CATALOG_PROMPT_VERSION = "catalog-prompt-v4-scoped"
 CLAIMS_MAX_OUTPUT_TOKENS = int(os.environ.get("CLAIMS_MAX_OUTPUT_TOKENS", "8192"))
 CLAIMS_PROMPT_VERSION = "claims-prompt-v7-event-roles"
@@ -239,6 +241,9 @@ PRODUCES/CONSUMES/TRANSFORMS/ENCODES/CATALYZES 可记录预测，但不能改写
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20),
        retry=retry_if_exception_type((APIConnectionError, APITimeoutError, RateLimitError, InternalServerError)), reraise=True)
 def chat_completion(messages, max_tokens=LLM_MAX_OUTPUT_TOKENS):
+    checker = model_request_check.get()
+    if checker is not None:
+        checker()
     kwargs = dict(
         model=LLM_MODEL,
         messages=messages,
@@ -256,6 +261,8 @@ def chat_completion(messages, max_tokens=LLM_MAX_OUTPUT_TOKENS):
     }
 
     resp = client.chat.completions.create(**kwargs)
+    if checker is not None:
+        checker()
     msg = resp.choices[0].message
 
     content = msg.content or ""

@@ -39,13 +39,21 @@ class RecoveryTests(unittest.TestCase):
     def test_idle_stale_document_finalizes_pending_chunks_and_old_maintenance(self):
         cur = MagicMock()
         cur.fetchall.side_effect = [[{'id':25}],[{'id':7}],[{'id':'old-job'}]]
-        cur.fetchone.side_effect = [{'active':False},*([{'acquired':True}]*3)]
+        cur.fetchone.side_effect = [{'active':False},*([{'acquired':True}]*3),{'status':'cataloging'}]
         with patch.object(recovery,'broker_is_idle',return_value=True):
             self.assertEqual(recovery.reconcile_stalled(cur,document_id=25),[25])
         sql = '\n'.join(call.args[0] for call in cur.execute.call_args_list)
         self.assertIn("UPDATE chunks SET status='failed'",sql)
         self.assertIn('UPDATE documents',sql)
         self.assertIn('UPDATE maintenance_jobs',sql)
+
+    def test_candidate_cancelled_after_scan_is_not_relabelled_or_its_chunks_failed(self):
+        cur = MagicMock()
+        cur.fetchall.side_effect = [[{'id':25}],[{'id':7}],[{'id':'old-job'}]]
+        cur.fetchone.side_effect = [{'active':False},*([{'acquired':True}]*3),{'status':'cancelled'}]
+        with patch.object(recovery,'broker_is_idle',return_value=True):
+            self.assertEqual(recovery.reconcile_stalled(cur,document_id=25), [])
+        self.assertFalse(any('UPDATE ' in call.args[0] for call in cur.execute.call_args_list))
 
 
 if __name__ == '__main__':

@@ -295,7 +295,7 @@ class GraphIntegrationTests(unittest.TestCase):
             ), patch.object(tasks, "update_document_status"), patch.object(tasks.build_document_catalog, "apply_async") as enqueue, patch.object(tasks.extract_chunk, 'apply_async') as relationships:
                 result = tasks.parse_document.run(document_id)
             self.assertEqual(result["chunk_count"], 1)
-            enqueue.assert_called_once_with(args=[document_id], queue='extract')
+            enqueue.assert_called_once_with(args=[document_id], kwargs={'generation':1}, queue='extract')
             relationships.assert_not_called()
             from app.schemas import CatalogBundle
             catalog = CatalogBundle.model_validate({'entities': [

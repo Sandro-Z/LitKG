@@ -1,6 +1,9 @@
 from psycopg.types.json import Jsonb
 from contextlib import contextmanager
 from dataclasses import replace
+from contextvars import ContextVar
+from functools import wraps
+from inspect import signature
 import os
 import logging
 
@@ -11,7 +14,7 @@ from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, project_existing_claim, store_claim, upsert_entity
 from app.llm import (LLM_MODEL, LLM_BASE_URL, LLM_REVISION, CATALOG_PROMPT_VERSION,
     CATALOG_MAX_OUTPUT_TOKENS, CATALOG_OUTPUT_RETRY_MAX_TOKENS, CLAIMS_MAX_OUTPUT_TOKENS, CLAIMS_PROMPT_VERSION,
-    ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog)
+    ModelOutputError, ModelOutputTruncatedError, extract_claims, extract_catalog, model_request_check)
 from app.claims import ClaimValidationError, prepare_claims, combine_claims, retains_required_context
 from app.entity_types import TYPE_DEFINITIONS
 from app.catalog import (PROCESSING_VERSION, CATALOG_VERSION, CATALOG_CACHE_VERSION, EXTRACTION_VERSION, digest, segments,
@@ -25,6 +28,73 @@ from app.recovery import heartbeat_lease
 
 MODEL_SIGNATURE = digest([LLM_BASE_URL, LLM_MODEL, LLM_REVISION])
 log = logging.getLogger(__name__)
+_processing_scope = ContextVar('litkg_processing_scope', default=None)
+
+
+class ProcessingInterrupted(Exception):
+    def __init__(self, status):
+        super().__init__(status)
+        self.status = status
+
+
+def check_processing(conn=None):
+    """Fence model retries and writes; never hold a row lock during inference."""
+    scope = _processing_scope.get()
+    if scope is None:
+        return
+    document_id, generation = scope
+    if conn is None:
+        with get_conn() as read:
+            row = read.execute('SELECT status,pipeline_generation FROM documents WHERE id=%s', (document_id,)).fetchone()
+    else:
+        row = conn.execute('SELECT status,pipeline_generation FROM documents WHERE id=%s FOR UPDATE', (document_id,)).fetchone()
+    if not row:
+        raise ProcessingInterrupted('superseded')
+    if row.get('status') == 'cancelled':
+        raise ProcessingInterrupted('cancelled')
+    if generation is not None and row.get('pipeline_generation') != generation:
+        raise ProcessingInterrupted('superseded')
+
+
+def document_task(*, chunk=False):
+    """Per-call scope also works for synchronous maintenance and nested tasks."""
+    def decorate(function):
+        arguments = signature(function)
+        @wraps(function)
+        def run(identifier, *args, **kwargs):
+            bound = arguments.bind(identifier, *args, **kwargs)
+            expected = bound.arguments.get('generation')
+            with get_conn() as conn:
+                if chunk:
+                    row = conn.execute('SELECT d.id AS document_id,d.status,d.pipeline_generation FROM documents d '
+                        'JOIN chunks c ON c.document_id=d.id WHERE c.id=%s', (identifier,)).fetchone()
+                else:
+                    row = conn.execute('SELECT id,status,pipeline_generation FROM documents WHERE id=%s', (identifier,)).fetchone()
+            result_id = {'chunk_id' if chunk else 'document_id':identifier}
+            if not row or row.get('status') == 'cancelled':
+                return {**result_id, 'status':'cancelled' if row else 'superseded'}
+            generation = row.get('pipeline_generation')
+            if expected is not None and expected != generation:
+                return {**result_id, 'status':'superseded'}
+            document_id = row['document_id'] if chunk else identifier
+            token = _processing_scope.set((document_id, generation))
+            request_token = model_request_check.set(check_processing)
+            try:
+                check_processing()
+                return function(identifier, *args, **kwargs)
+            except ProcessingInterrupted as exc:
+                return {**result_id, 'status':exc.status}
+            finally:
+                model_request_check.reset(request_token)
+                _processing_scope.reset(token)
+        return run
+    return decorate
+
+
+def advance_processing_generation(generation):
+    scope = _processing_scope.get()
+    if scope is not None:
+        _processing_scope.set((scope[0], generation))
 
 
 def _sync_document_batches(document_id):
@@ -56,6 +126,7 @@ def processing_lock(key):
 
 def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, validate=None,
                  retry_call=None, max_attempts=1, retry_pending=False, excluded_candidates=None):
+    check_processing()
     def checked(result):
         result = result.model_copy(deep=True)
         if validate:
@@ -67,6 +138,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     def record_failure(exc, parsed=None, raw_output=None):
         output = {'parsed': parsed, 'raw': getattr(exc, 'raw', raw_output)}
         with get_conn() as conn:
+            check_processing(conn)
             conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
                 VALUES (%s, %s, %s, %s, 'failed', %s, %s)""",
                 (document_id, chunk_id, stage, key, Jsonb(output), f"{type(exc).__name__}: {exc}"))
@@ -96,6 +168,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
         except (ValueError, TypeError) as exc:
             record_failure(exc, row['payload'])
             with get_conn() as conn:
+                check_processing(conn)
                 conn.execute('DELETE FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s',
                              (document_id, stage, key))
     last_error, original, raw_output = None, None, None
@@ -103,12 +176,16 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     for attempt in range(attempt_limit):
         parsed, raw_output = None, None
         try:
+            check_processing()
             result = resumed if resumed is not None else model_call() if last_error is None else retry_call(last_error, original)
+            check_processing()
             parsed = result.model_dump(mode='json')
             raw_output = getattr(result, '_raw_output', None)
             result = checked(result)
             break
         except Exception as exc:
+            if isinstance(exc, ProcessingInterrupted):
+                raise
             record_failure(exc, parsed, raw_output)
             if isinstance(exc, ModelOutputTruncatedError) or retry_call is None or not isinstance(exc, (CatalogValidationError, ModelOutputError)) or attempt + 1 >= attempt_limit:
                 raise
@@ -136,8 +213,10 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
             for correction_index in range(max(0, attempt_limit - 1)):
                 correction = None
                 try:
+                    check_processing()
                     feedback = (f'repair_id={repair_id}: ' if stage == 'claims' else '') + item['error']
                     correction = checked(retry_call(CatalogValidationError(feedback), previous))
+                    check_processing()
                     resolution = correction._resolution or {}
                     values = getattr(correction, field)
                     correction_errors = getattr(correction, rejections_name)
@@ -172,6 +251,8 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                         break
                     item['error'] = correction_errors[0]['error'] if correction_errors else 'Correction must repair one candidate or explicitly confirm exclusion'
                 except Exception as exc:
+                    if isinstance(exc, ProcessingInterrupted):
+                        raise
                     history.append({'error': f'{type(exc).__name__}: {exc}', 'raw': getattr(exc, 'raw', None)})
                     # Infrastructure/capacity failures stay visible in quality;
                     # good siblings are still usable. Never retry truncation.
@@ -199,6 +280,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
         payload['_processing_gap'] = True
     audit_status = 'failed' if gap else 'done'
     with get_conn() as conn:
+        check_processing(conn)
         conn.execute("INSERT INTO processing_cache (document_id, stage, cache_key, payload) VALUES (%s, %s, %s, %s) ON CONFLICT (document_id,stage,cache_key) DO UPDATE SET payload=EXCLUDED.payload",
                      (document_id, stage, key, Jsonb(payload)))
         conn.execute(f"""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
@@ -286,6 +368,7 @@ def claim_segment_bundles(document_id, segment, entries, version, retry_pending=
             yield segment, bundle
             return
         with get_conn() as conn:
+            check_processing(conn)
             conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                          (document_id,'claims_split',split_key,Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
     except ClaimValidationError as exc:
@@ -295,6 +378,8 @@ def claim_segment_bundles(document_id, segment, entries, version, retry_pending=
         yield segment, bundle
         return
     except Exception as exc:
+        if isinstance(exc, ProcessingInterrupted):
+            raise
         bundle = ClaimBundle(claims=[])
         bundle._claim_rejections = [{'error':f'{type(exc).__name__}: {exc}', 'kind':'segment_failure',
                                      'start':segment['start'], 'end':segment['end']}]
@@ -375,6 +460,7 @@ def catalog_segment_bundles(document_id, title, segment, extraction_epoch, min_c
                         + (f'Last response: {counts}.' if counts else ''), exc.raw,
                         diagnostics=exc.diagnostics) from exc
                 with get_conn() as conn:
+                    check_processing(conn)
                     conn.execute("INSERT INTO processing_cache (document_id,stage,cache_key,payload) VALUES (%s,'catalog_split',%s,%s) ON CONFLICT DO NOTHING",
                                  (document_id, split_key, Jsonb({'strategy':'overlapping-halves-v2-boundaries'})))
                 break
@@ -395,12 +481,13 @@ def update_document_status(
     error: str | None = None,
 ) -> None:
     with get_conn() as conn:
+        check_processing(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE documents
                 SET status = %s, error = %s, updated_at = now()
-                WHERE id = %s
+                WHERE id = %s AND status <> 'cancelled'
                 """,
                 (status, error, document_id),
             )
@@ -413,6 +500,7 @@ def update_chunk_status(
     error: str | None = None,
 ) -> None:
     with get_conn() as conn:
+        check_processing(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -426,6 +514,10 @@ def update_chunk_status(
 
 def refresh_document_status(document_id: int) -> str:
     with get_conn() as conn:
+        check_processing(conn)
+        current = conn.execute('SELECT status FROM documents WHERE id=%s FOR UPDATE', (document_id,)).fetchone()
+        if current and current.get('status') == 'cancelled':
+            return 'cancelled'
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -477,7 +569,8 @@ def refresh_document_status(document_id: int) -> str:
 
 
 @celery_app.task(name="parse_document", queue="parse")
-def parse_document(document_id: int, publish: bool = True):
+@document_task()
+def parse_document(document_id: int, publish: bool = True, generation: int | None = None):
     with processing_lock(f"litkg-document:{document_id}") as acquired:
         if not acquired:
             return {"document_id": document_id, "status": "busy"}
@@ -488,17 +581,20 @@ def parse_document(document_id: int, publish: bool = True):
             if not document:
                 return {"document_id": document_id, "status": "superseded"}
             metadata, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
+            check_processing()
             if not parsed_chunks or not any(c["text"].strip() for c in parsed_chunks):
                 raise ValueError("Parser produced no text; check PDF text layer or OCR")
             abbreviations = extract_abbreviations("\n".join(c["text"] for c in parsed_chunks))
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     lock_graph_projection(cur)
+                    check_processing(conn)
                     archive_claims(cur, document_id)
                     cur.execute("""UPDATE documents SET title = COALESCE(%s, title), doi = COALESCE(%s, doi),
                         abbreviation_map = %s, status = 'cataloging', catalog_status = 'pending', catalog_error = NULL,
                         pipeline_generation = pipeline_generation + 1, error = NULL, updated_at = now() WHERE id = %s""",
                         (metadata.get("title"), metadata.get("doi"), Jsonb(abbreviations), document_id))
+                    advance_processing_generation((document.get('pipeline_generation') or 0) + 1)
                     for index, chunk in enumerate(parsed_chunks):
                         # Keep unchanged claims until a successful replacement. Original
                         # source snapshots were archived before any text was changed.
@@ -515,9 +611,13 @@ def parse_document(document_id: int, publish: bool = True):
                                        {**issue, 'chunk_index': index, 'pipeline_generation': document['pipeline_generation'] + 1})
                     cur.execute("DELETE FROM chunks WHERE document_id = %s AND chunk_index >= %s", (document_id, len(parsed_chunks)))
             if publish:
-                build_document_catalog.apply_async(args=[document_id], queue="extract")
+                check_processing()
+                build_document_catalog.apply_async(args=[document_id], kwargs={'generation':_processing_scope.get()[1]}, queue="extract")
             return {"document_id": document_id, "chunk_count": len(parsed_chunks), "status": "cataloging"}
         except Exception as exc:
+            if isinstance(exc, ProcessingInterrupted):
+                raise
+            check_processing()
             with get_conn() as conn:
                 if not conn.execute("SELECT id FROM documents WHERE id=%s", (document_id,)).fetchone():
                     return {"document_id": document_id, "status": "superseded"}
@@ -526,13 +626,15 @@ def parse_document(document_id: int, publish: bool = True):
 
 
 @celery_app.task(name="build_document_catalog", queue="extract")
-def build_document_catalog(document_id: int, force: bool = False, publish: bool = True):
+@document_task()
+def build_document_catalog(document_id: int, force: bool = False, publish: bool = True, generation: int | None = None):
     with processing_lock(f"litkg-document:{document_id}") as acquired:
         if not acquired:
             return {"document_id": document_id, "status": "busy"}
         version = None
         try:
             with get_conn() as conn:
+                check_processing(conn)
                 document = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
                 if not document:
                     return {"document_id": document_id, "status": "superseded"}
@@ -540,6 +642,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                 if force:
                     document = conn.execute("""UPDATE documents SET pipeline_generation=pipeline_generation+1,
                         extraction_epoch=extraction_epoch+1 WHERE id=%s RETURNING *""", (document_id,)).fetchone()
+                    advance_processing_generation(document['pipeline_generation'])
             if not chunks:
                 raise ValueError("No saved chunks; PDF must be parsed first")
             abbreviations = extract_abbreviations('\n'.join([document['title'] or '', *[f"{c['section_title'] or ''}\n{c['text']}" for c in chunks]]))
@@ -547,6 +650,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             generation = document["pipeline_generation"]
             version = digest([content_hash, CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, document['extraction_epoch']])
             with get_conn() as conn:
+                check_processing(conn)
                 conn.execute("""UPDATE documents SET status = 'cataloging', catalog_status = 'processing',
                     catalog_version = %s, abbreviation_map = %s, catalog_error = NULL, error = NULL WHERE id = %s""",
                     (version, Jsonb(abbreviations), document_id))
@@ -565,6 +669,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
                     rejected_count += len(bundle._catalog_rejections)
                     if bundle._catalog_repairs or bundle._catalog_rejections:
                         with get_conn() as conn:
+                            check_processing(conn)
                             for repair in bundle._catalog_repairs:
                                 add_review(conn.cursor(), document_id, version, 'catalog_repair',
                                     {'chunk_id': segment['id'], 'start': segment['start'], **repair}, status='resolved')
@@ -585,6 +690,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     lock_graph_projection(cur, True)
+                    check_processing(conn)
                     for entry in entries:
                         identity = entity_identity(entry["text"], entry["type"], entry["normalized_id"], abbreviations, document_id, entry.get('pending_merge', False))
                         identity = replace(identity,aliases=tuple(entry['aliases']))
@@ -604,11 +710,15 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             # The committed complete catalog is visible before the FIRST relation task.
             if publish:
                 for chunk in chunks:
+                    check_processing()
                     extract_chunk.apply_async(args=[chunk["id"], version, generation], queue="extract")
             return {"document_id": document_id, "catalog_version": version, "entity_count": len(entries),
                     "chunk_count": len(chunks), "rejected_candidates": rejected_count}
         except Exception as exc:
+            if isinstance(exc, ProcessingInterrupted):
+                raise
             with get_conn() as conn:
+                check_processing(conn)
                 if not conn.execute("SELECT id FROM documents WHERE id=%s", (document_id,)).fetchone():
                     return {"document_id": document_id, "status": "superseded"}
                 conn.execute("UPDATE documents SET catalog_status = 'failed', catalog_error = %s WHERE id = %s", (f"{type(exc).__name__}: {exc}", document_id))
@@ -619,6 +729,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
 
 
 @celery_app.task(name="extract_chunk", queue="extract")
+@document_task(chunk=True)
 def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation: int | None = None, refresh: bool = True, retry_pending: bool = False):
     document_id = None
     with processing_lock(f"litkg-chunk:{chunk_id}") as acquired:
@@ -645,6 +756,7 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
             rejected, gaps = bundle._claim_rejections, bundle._processing_gaps
             if gaps and not bundle.claims:
                 with get_conn() as conn:
+                    check_processing(conn)
                     for kind, items in [('claim_rejection', rejected), ('processing_gap', gaps)]:
                         for item in items:
                             add_review(conn.cursor(), document_id, version, kind, {'chunk_id': chunk_id, **item},
@@ -658,6 +770,7 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     lock_graph_projection(cur, True)
+                    check_processing(conn)
                     cur.execute("SELECT catalog_version, catalog_status, pipeline_generation FROM documents WHERE id = %s FOR UPDATE", (document_id,))
                     current = cur.fetchone()
                     if current["catalog_version"] != version or current["catalog_status"] != "done" or current["pipeline_generation"] != chunk["pipeline_generation"]:
@@ -711,10 +824,14 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                                 (chunk_status, key, error, chunk_id))
             status = refresh_document_status(document_id)
             if refresh and status in {"done", "partial"}:
+                check_processing()
                 refresh_derived.apply_async(args=[document_id], queue="extract")
             return {"chunk_id": chunk_id, "document_id": document_id, "claim_count": len(bundle.claims),
                     'status':chunk_status, 'rejected_count':len(rejected), 'processing_gap_count':len(gaps)}
         except Exception as exc:
+            if isinstance(exc, ProcessingInterrupted):
+                raise
+            check_processing()
             if document_id is not None:
                 with get_conn() as conn:
                     current = conn.execute('SELECT catalog_version,pipeline_generation FROM documents WHERE id=%s', (document_id,)).fetchone()
@@ -911,6 +1028,20 @@ def maintain_knowledge_base(job_id: str):
                 if not current_job or current_job['status']=='cancelled':
                     return {'status':'cancelled','documents':results}
                 doc_id = document["id"]
+                if document['status'] == 'cancelled':
+                    if job['document_id'] == doc_id and job['mode'] in {'retry','reextract','reparse'}:
+                        # Only an explicit per-document request resumes cancelled
+                        # work. A whole-KB retry must not undo batch cancellation.
+                        with get_conn() as conn:
+                            current = conn.execute("""UPDATE documents SET status='queued',error=NULL,
+                                pipeline_generation=pipeline_generation+1,updated_at=now()
+                                WHERE id=%s AND status='cancelled' RETURNING *""", (doc_id,)).fetchone()
+                            if current:
+                                document = current
+                                conn.execute("UPDATE chunks SET status='queued',error=NULL WHERE document_id=%s AND status='cancelled'", (doc_id,))
+                    else:
+                        results.append({'document_id':doc_id,'status':'cancelled'})
+                        continue
                 if job['mode'] != 'retry' and document["status"] in {"parsing", "cataloging", "extracting", "queued"}:
                     results.append({"document_id":doc_id,"status":"skipped_active"})
                     continue
@@ -942,10 +1073,16 @@ def maintain_knowledge_base(job_id: str):
                             parsed = parse_document.run(doc_id, publish=False)
                             if parsed.get('status') == 'busy':
                                 raise ValueError('Document is busy')
+                            if parsed.get('status') in {'cancelled','superseded'}:
+                                results.append({'document_id':doc_id,'status':parsed['status']})
+                                continue
                         if not saved or force or document["catalog_status"] != "done":
                             result = build_document_catalog.run(doc_id, force=force, publish=False)
                             if result.get("status") == "busy":
                                 raise ValueError("Document is busy")
+                            if result.get('status') in {'cancelled','superseded'}:
+                                results.append({'document_id':doc_id,'status':result['status']})
+                                continue
                         with get_conn() as conn:
                             current = conn.execute("SELECT catalog_version,pipeline_generation FROM documents WHERE id=%s", (doc_id,)).fetchone()
                             chunks = conn.execute("""SELECT id FROM chunks WHERE document_id=%s AND (%s OR status <> 'done'
@@ -965,13 +1102,13 @@ def maintain_knowledge_base(job_id: str):
                                 # were published for this synchronous job.
                                 chunk_result = {'status':'failed', 'error':f'{type(exc).__name__}: {exc}'}
                             chunk_results.append({'chunk_id':chunk['id'], **chunk_result})
-                            if chunk_result.get('status') == 'superseded':
+                            if chunk_result.get('status') in {'superseded','cancelled'}:
                                 superseded = True
                                 break
                         if superseded:
                             # A new generation owns the document now. Do not
                             # finalize or relabel its chunks from this old job.
-                            document_status = 'superseded'
+                            document_status = chunk_result['status']
                         else:
                             final_status = refresh_document_status(doc_id)
                             refresh_derived.run(doc_id)

@@ -717,15 +717,27 @@ def main():
                 )
                 items = batch.get("items", [])
                 finished = sum(
-                    item["status"] in {"done", "partial", "failed", "rejected"}
+                    item["status"] in {"done", "partial", "failed", "rejected", "cancelled"}
                     for item in items
                 )
                 progress = finished / len(items) if items else 0.0
                 col1, col2, col3 = st.columns(3)
                 col1.metric("批次状态", batch["status"])
                 col2.metric("已接收", batch["accepted_count"])
-                col3.metric("完成比例", f"{progress * 100:.1f}%")
+                col3.metric("已结束比例", f"{progress * 100:.1f}%")
                 st.progress(progress)
+                if batch['status'] == 'cancelled':
+                    st.info('本批次已取消，已完成结果和缓存保留。其他批次或独立维护任务仍需要的共享文献会继续处理。')
+                elif batch['status'] in {'queued','processing'}:
+                    st.caption('取消后停止排队及后续分段；当前解析或模型调用返回或超时后退出。已完成结果保留，共享文献按其他任务需要继续处理。')
+                    if st.button('取消批次', key=f'cancel_batch_{selected_batch_id}'):
+                        result = api_post_json(f'/ingestion-batches/{selected_batch_id}/cancel', {})
+                        st.session_state[f'batch_cancel_result_{selected_batch_id}'] = result
+                        st.rerun()
+                cancellation = st.session_state.get(f'batch_cancel_result_{selected_batch_id}')
+                if cancellation:
+                    st.caption(f"已请求停止 {len(cancellation['stopped_document_ids'])} 篇文献；"
+                               f"{len(cancellation['continued_document_ids'])} 篇共享文献因其他任务继续处理。")
                 quality = batch.get('processing_quality', {})
                 if quality.get('rejected_candidates') or quality.get('pending_reviews'):
                     st.warning(f"结果质量：隔离候选 {quality.get('rejected_candidates', 0)} 个，"

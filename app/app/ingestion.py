@@ -128,14 +128,15 @@ def register_document(
     # force_reprocess applies to a completed document; active work is reused.
     should_queue = (
         inserted
-        or row["status"] in {"uploaded", "failed", "partial"}
+        or row["status"] in {"uploaded", "failed", "partial", "cancelled"}
         or (force_reprocess and row["status"] == "done")
     )
     if should_queue:
         cur.execute(
             """
             UPDATE documents
-            SET status = 'queued', error = NULL, updated_at = now()
+            SET status = 'queued', error = NULL, updated_at = now(),
+                pipeline_generation = pipeline_generation + 1
             WHERE id = %s
             RETURNING status
             """,

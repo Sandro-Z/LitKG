@@ -38,7 +38,10 @@ def sync_batch_status(cur, batch_id: int) -> None:
 def _sync_batch_status(cur, batch_id: int) -> None:
     # Serialize all item/snapshot writers for a batch before touching items.
     # Worker transactions visit batches in ascending order below.
-    cur.execute('SELECT id FROM ingestion_batches WHERE id=%s FOR NO KEY UPDATE', (batch_id,))
+    cur.execute('SELECT id,status FROM ingestion_batches WHERE id=%s FOR NO KEY UPDATE', (batch_id,))
+    batch = cur.fetchone()
+    if batch and batch['status'] == 'cancelled':
+        return
     reconcile_stalled(cur, batch_id=batch_id)
     cur.execute(
         """
@@ -50,9 +53,10 @@ def _sync_batch_status(cur, batch_id: int) -> None:
         FROM documents document
         WHERE item.document_id = document.id
           AND item.batch_id = %s
+          AND (document.status <> 'cancelled' OR item.status = ANY(%s::TEXT[]))
           AND (item.status, item.error) IS DISTINCT FROM (document.status, document.error)
         """,
-        (batch_id,),
+        (batch_id, list(ACTIVE_STATUSES)),
     )
 
     cur.execute(

@@ -18,6 +18,7 @@ from fastapi.encoders import jsonable_encoder
 import json
 
 from app.batch_status import sync_batch_status, quality_columns
+from app.batch_cancel import cancel_batch, BatchNotFound, BatchAlreadyFinished
 from app.db import get_conn
 from app.graph_diagnostics import fetch_graph_diagnostics
 from app.graph_store import lock_graph_projection, prune_orphan_projection
@@ -168,6 +169,13 @@ def _batch_payload(
     return batch
 
 
+def _require_open_batch(cur, batch_id):
+    cur.execute('SELECT status FROM ingestion_batches WHERE id=%s FOR NO KEY UPDATE', (batch_id,))
+    batch = cur.fetchone()
+    if not batch or batch['status'] == 'cancelled':
+        raise HTTPException(status_code=409, detail='Batch was cancelled; upload stopped')
+
+
 def _ingest_files(
     *,
     knowledge_base_id: int,
@@ -220,6 +228,7 @@ def _ingest_files(
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     _lock_ingestion_knowledge_base(cur, knowledge_base_id)
+                    _require_open_batch(cur, batch_id)
                     registered = register_document(
                         cur,
                         stored=stored,
@@ -275,6 +284,7 @@ def _ingest_files(
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     _lock_ingestion_knowledge_base(cur, knowledge_base_id)
+                    _require_open_batch(cur, batch_id)
                     cur.execute(
                         """
                         INSERT INTO ingestion_batch_items (
@@ -298,6 +308,7 @@ def _ingest_files(
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     _lock_ingestion_knowledge_base(cur, knowledge_base_id)
+                    _require_open_batch(cur, batch_id)
                     cur.execute(
                         """
                         INSERT INTO ingestion_batch_items (
@@ -318,7 +329,11 @@ def _ingest_files(
 
     for document_id in document_ids_to_queue:
         try:
-            parse_document.apply_async(args=[document_id], queue="parse")
+            with get_conn() as conn:
+                current = conn.execute('SELECT status,pipeline_generation FROM documents WHERE id=%s', (document_id,)).fetchone()
+            if not current or current['status'] == 'cancelled':
+                continue
+            parse_document.apply_async(args=[document_id], kwargs={'generation':current['pipeline_generation']}, queue="parse")
         except Exception as exc:
             update_document_status(
                 document_id,
@@ -327,7 +342,7 @@ def _ingest_files(
             )
 
     batch = _batch_payload(batch_id, item_metadata=item_metadata)
-    for item in batch['items']:
+    for item in batch['items'] if batch['status'] != 'cancelled' else []:
         if item.get('document_id') and item['status'] == 'done':
             try:
                 refresh_derived.apply_async(args=[item['document_id']], queue='extract')
@@ -615,6 +630,18 @@ def list_ingestion_batches(
 @app.get("/ingestion-batches/{batch_id}")
 def get_ingestion_batch(batch_id: int):
     return _batch_payload(batch_id)
+
+
+@app.post('/ingestion-batches/{batch_id}/cancel')
+def cancel_ingestion_batch(batch_id: int):
+    try:
+        with get_conn() as conn:
+            result = cancel_batch(conn.cursor(), batch_id)
+    except BatchNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except BatchAlreadyFinished as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return result
 
 
 @app.get("/knowledge-bases/{knowledge_base_id}/claims")
