@@ -23,6 +23,7 @@ from app.normalization import entity_identity
 from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
 from app.normalization import extract_abbreviations
 from app.parser import parse_pdf_to_chunks
+from app import vlm
 from app.web_research import cache_signature as web_research_cache_signature
 from app.provenance import locate_evidence_pages
 from app.recovery import heartbeat_lease
@@ -402,7 +403,34 @@ def claim_segment_bundles(document_id, segment, entries, version, retry_pending=
         yield from claim_segment_bundles(document_id, child, entries, version, retry_pending, excluded_candidates)
 
 
+def extract_visual_chunk_claims(document_id, chunk, entries, version):
+    if not vlm.enabled():
+        raise vlm.VLMError('VLM branch disabled; enable VLM_ENABLED to process saved image chunks')
+    config = vlm.Settings.from_env()
+    source = vlm.image_source(chunk)
+    locator = vlm.source_signature(source)
+    key = digest([config.signature(), locator, version])
+    check_processing()
+    with get_conn() as conn:
+        row = conn.execute('SELECT payload FROM processing_cache WHERE document_id=%s AND stage=%s AND cache_key=%s',
+                           (document_id, 'vlm', key)).fetchone()
+    if row and vlm.file_digest(chunk['source_path']) != source.get('pdf_sha256'):
+        raise vlm.VLMError('PDF content changed since image discovery; reparse this document')
+    payload = row['payload'] if row else vlm.extract_image(
+        chunk['source_path'], source, entries, settings=config, check=check_processing)
+    check_processing()
+    result = vlm.prepare_image_result(payload, chunk, entries, version)
+    if not row and not result._processing_gaps:
+        with get_conn() as conn:
+            check_processing(conn)
+            conn.execute("""INSERT INTO processing_cache (document_id,stage,cache_key,payload)
+                VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""", (document_id, 'vlm', key, Jsonb(payload)))
+    return result
+
+
 def extract_chunk_claims(document_id, chunk, entries, version, retry_pending=False):
+    if vlm.image_source(chunk):
+        return extract_visual_chunk_claims(document_id, chunk, entries, version)
     bundles = []
     excluded_candidates = set()
     if retry_pending:
@@ -590,7 +618,7 @@ def parse_document(document_id: int, publish: bool = True, generation: int | Non
                 document = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
             if not document:
                 return {"document_id": document_id, "status": "superseded"}
-            metadata, parsed_chunks = parse_pdf_to_chunks(document["source_path"])
+            metadata, parsed_chunks = vlm.parse_sources(document["source_path"], parse_pdf_to_chunks)
             check_processing()
             if not parsed_chunks or not any(c["text"].strip() for c in parsed_chunks):
                 raise ValueError("Parser produced no text; check PDF text layer or OCR")
@@ -656,7 +684,7 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             if not chunks:
                 raise ValueError("No saved chunks; PDF must be parsed first")
             abbreviations = extract_abbreviations('\n'.join([document['title'] or '', *[f"{c['section_title'] or ''}\n{c['text']}" for c in chunks]]))
-            content_hash = digest([document['title'], [(c["chunk_index"], c['section_title'], c["text"], c["page_spans"]) for c in chunks]])
+            content_hash = digest([document['title'], [vlm.chunk_signature(c) for c in chunks]])
             generation = document["pipeline_generation"]
             version = digest([content_hash, CATALOG_VERSION, CATALOG_PROMPT_VERSION, TYPE_DEFINITIONS, MODEL_SIGNATURE, document['extraction_epoch']])
             with get_conn() as conn:
@@ -674,7 +702,9 @@ def build_document_catalog(document_id: int, force: bool = False, publish: bool 
             maximum = int(os.environ.get('CATALOG_SEGMENT_CHARS', '12000'))
             minimum = int(os.environ.get('CATALOG_MIN_SEGMENT_CHARS', '500'))
             keys = lambda s:_catalog_segment_keys(document['title'],s,document['extraction_epoch'],minimum)
-            for initial_segment in _cached_segments(document_id, chunks, maximum, 'catalog', keys):
+            # Visual descriptions must never be cataloged as original PDF prose.
+            catalog_chunks = [chunk for chunk in chunks if not vlm.image_source(chunk)]
+            for initial_segment in _cached_segments(document_id, catalog_chunks, maximum, 'catalog', keys):
                 for segment, bundle in catalog_segment_bundles(document_id, document['title'], initial_segment, document['extraction_epoch']):
                     rejected_count += len(bundle._catalog_rejections)
                     if bundle._catalog_repairs or bundle._catalog_rejections:
@@ -748,7 +778,7 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""SELECT ch.*, d.abbreviation_map, d.catalog_version, d.catalog_status, d.pipeline_generation
+                    cur.execute("""SELECT ch.*, d.abbreviation_map, d.catalog_version, d.catalog_status, d.pipeline_generation, d.source_path
                         FROM chunks ch JOIN documents d ON d.id = ch.document_id WHERE ch.id = %s""", (chunk_id,))
                     chunk = cur.fetchone()
                     if not chunk:
@@ -761,7 +791,12 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                         raise ValueError("A complete document catalog is required before relation extraction")
                     entries = load_catalog(cur, document_id, version)
             update_chunk_status(chunk_id, "extracting")
-            key = digest([EXTRACTION_VERSION, MODEL_SIGNATURE, version, chunk['section_title'], chunk["text"]])
+            visual = vlm.image_source(chunk)
+            if visual:
+                locator = vlm.source_signature(visual)
+                key = digest([vlm.Settings.from_env().signature(), version, locator])
+            else:
+                key = digest([EXTRACTION_VERSION, MODEL_SIGNATURE, version, chunk['section_title'], chunk["text"]])
             bundle = extract_chunk_claims(document_id, chunk, entries, version, retry_pending=retry_pending)
             rejected, gaps = bundle._claim_rejections, bundle._processing_gaps
             if gaps and not bundle.claims:
@@ -777,6 +812,10 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                 for claim in bundle.claims
                 for role, entity in [('subject', claim.subject), ('object', claim.object), *[(p.role, p.entity) for p in claim.participants]]
                 if entity.pending_merge]
+            if visual:
+                for _, location in omissions:
+                    location.update(source_kind='pdf_image', page=chunk['page_start'], page_end=chunk['page_end'],
+                                    image_source=vlm.image_source(chunk))
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     lock_graph_projection(cur, True)
@@ -786,6 +825,9 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                     if current["catalog_version"] != version or current["catalog_status"] != "done" or current["pipeline_generation"] != chunk["pipeline_generation"]:
                         return {"chunk_id": chunk_id, "status": "superseded"}
                     archive_claims(cur, document_id, chunk_id)
+                    if visual:
+                        cur.execute('UPDATE chunks SET text=%s,page_spans=%s,token_estimate=%s WHERE id=%s',
+                                    (chunk['text'], Jsonb(chunk['page_spans']), chunk['token_estimate'], chunk_id))
                     if not gaps:
                         cur.execute("""UPDATE review_items SET status='resolved',updated_at=now()
                             WHERE document_id=%s AND version=%s AND status='pending' AND detail->>'chunk_id'=%s
@@ -811,7 +853,7 @@ def extract_chunk(chunk_id: int, catalog_version: str | None = None, generation:
                         raw_claim['evidence'] = claim.evidence.model_dump(mode='json')
                         raw_claim['additional_evidence'] = [e.model_dump(mode='json') for e in claim.additional_evidence]
                         claim_id, _ = store_claim(cur, document_id=document_id, chunk_id=chunk_id, claim=claim,
-                                                 extraction_model=LLM_MODEL, abbreviations=chunk["abbreviation_map"], original_claim_json=raw_claim)
+                                                 extraction_model=chunk.get("_vlm_model", LLM_MODEL), abbreviations=chunk["abbreviation_map"], original_claim_json=raw_claim)
                         kept.append(claim_id)
                     if not gaps:
                         cur.execute("DELETE FROM claims WHERE chunk_id = %s AND NOT (id = ANY(%s::BIGINT[]))", (chunk_id, kept))

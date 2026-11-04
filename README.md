@@ -619,3 +619,7 @@ celery -A app.celery_app worker -Q parse,extract --concurrency=2 --loglevel=INFO
 API_BASE_URL=http://127.0.0.1:18080 streamlit run frontend/app.py \
   --server.address 127.0.0.1 --server.port 18501
 ```
+
+## PDF 图像知识抽取（可选）
+
+保留原有文本抽取，新增独立视觉模型分支；配置、来源字段与验证方式见 [docs/pdf-vision.md](docs/pdf-vision.md)。

@@ -9,5 +9,6 @@ pydantic
 requests
 lxml
 pypdf
+PyMuPDF==1.26.7
 tenacity
 mcp==1.30.0

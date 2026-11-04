@@ -15,6 +15,7 @@ from app.page_mapping import PdfPageIndex
 from app.parser import fallback_pdf_text
 from app.provenance import locate_evidence_pages, page_bounds
 from app.catalog import archive_claims
+from app.vlm import image_source
 
 
 def repair_document_pages(document_id: int, *, dry_run=False):
@@ -47,6 +48,10 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                 mapped_chunks = {}
                 changed_chunks = 0
                 for chunk in chunks:
+                    if image_source(chunk):
+                        # Image locations come from rendering, not text alignment.
+                        mapped_chunks[chunk['id']] = chunk
+                        continue
                     spans = index.page_spans(chunk["text"], chunk["page_spans"])
                     first, last = page_bounds(spans)
                     mapped_chunks[chunk["id"]] = {
@@ -71,6 +76,8 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                     evidence = original.get("evidence") or {}
                     sentence = evidence.get("sentence") or claim["evidence_text"]
                     mapped_chunk = mapped_chunks[claim["chunk_id"]]
+                    if evidence.get('modality') == 'pdf_image' or image_source(mapped_chunk):
+                        continue
                     bounds = page_bounds([mapped_chunk])
                     first, last = index.locate(sentence, within=bounds if bounds[0] else None)
                     if first is None:

@@ -19,6 +19,7 @@ from app.input_quality import inspect_document, correct_chunk
 from app.normalization import stable_json
 from app.schemas import Claim, ClaimBundle
 from app.provenance import locate_evidence_pages
+from app.vlm import image_source
 
 
 ACTIVE = {'queued', 'parsing', 'chunked', 'cataloging', 'extracting'}
@@ -43,6 +44,8 @@ def make_plan(document, chunks, claims, entries, *, mode='repair', corrections=(
     if any(e.get('chunk_id') not in chunk_map for e in corrections):
         raise ValueError('Source correction is outside selected document/chunks')
     edits_by_chunk = {cid: [e for e in corrections if e['chunk_id'] == cid] for cid in chunk_map}
+    if any(edits_by_chunk[cid] and image_source(chunk) for cid, chunk in chunk_map.items()):
+        raise ValueError('Visual descriptions are not PDF text corrections; retry the VLM image task')
     corrected = {cid: correct_chunk(c, edits_by_chunk[cid]) for cid,c in chunk_map.items()}
     plan = {'schema_version': 1, 'run_id': str(uuid.uuid4()), 'mode': mode, 'dry_run': True,
         'document_id': document['id'], 'claim_scope': claim_scope,
@@ -75,6 +78,9 @@ def make_plan(document, chunks, claims, entries, *, mode='repair', corrections=(
             units = [(chunk_map[c['chunk_id']], [c]) for c in claims]
         for original_chunk, selected in units:
             chunk = corrected[original_chunk['id']]
+            if image_source(chunk):
+                review(chunk['id'], 'Use the VLM image task to reextract visual evidence; text extractor skipped')
+                continue
             if not chunk['text'].strip():
                 values, basis = [], 'Explicitly excluded article region, with recorded correction basis'
             else:

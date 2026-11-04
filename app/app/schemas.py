@@ -40,12 +40,28 @@ class Participant(BaseModel):
         return value
 
 
+class ImageSource(BaseModel):
+    kind: Literal["pdf_page"] = "pdf_page"
+    page: int = Field(ge=1)
+    pdf_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    render_version: str
+    dpi: int = Field(ge=72, le=300)
+    max_edge: int = Field(ge=512, le=4096)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    observation_basis: Literal["vlm_visual_description"] = "vlm_visual_description"
+
+
 class Evidence(BaseModel):
     section: Optional[str] = None
     sentence: str
     page: Optional[int] = Field(default=None, ge=1)
     page_end: Optional[int] = Field(default=None, ge=1)
     table_or_figure: Optional[str] = None
+    modality: Literal["text", "pdf_image"] = "text"
+    image_source: Optional[ImageSource] = None
 
 
 class Claim(BaseModel):
@@ -75,6 +91,15 @@ class ClaimBundle(BaseModel):
     _processing_gaps: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _resolution: Optional[dict[str, Any]] = PrivateAttr(default=None)
     _candidate_indices: list[int] = PrivateAttr(default_factory=list)
+
+
+def claim_output_schema():
+    """Keep server-owned image provenance out of both model output contracts."""
+    schema = ClaimBundle.model_json_schema()
+    schema['$defs'].pop('ImageSource', None)
+    for name in ('modality', 'image_source'):
+        schema['$defs']['Evidence']['properties'].pop(name, None)
+    return schema
 
 
 class CatalogEntity(Entity):
@@ -131,6 +156,10 @@ def parse_model_bundle(data, schema):
                 item['additional_evidence'] = []
             for evidence in [item.get('evidence'), *item.get('additional_evidence', [])]:
                 if isinstance(evidence, dict):
+                    # Provenance is assigned by the server, never by either model.
+                    for name in ('modality', 'image_source'):
+                        if name in evidence:
+                            repairs.append({f'{label}_index': index, 'field': name, 'original': evidence.pop(name), 'replacement': None})
                     for name in ('page', 'page_end', 'section', 'table_or_figure'):
                         if evidence.get(name) is not None and (name in {'page', 'page_end'} or not isinstance(evidence[name], str)):
                             repairs.append({f'{label}_index': index, 'field': name, 'original': evidence.pop(name), 'replacement': None})

@@ -167,12 +167,16 @@ def claim_source_refs(row: dict[str, Any]) -> list[dict[str, Any]]:
                'section': item.get('section') or row.get('section_title'),
                'sentence': sentence, 'kind': 'primary' if index == 0 else 'additional',
                'title': row.get('title'), 'doi': row.get('doi')}
+        if item.get('modality') == 'pdf_image':
+            ref['modality'] = 'pdf_image'
+            ref['image_source'] = item.get('image_source')
         if item.get('table_or_figure') is not None:
             ref['table_or_figure'] = item['table_or_figure']
         if text:
             matches = _evidence_matches(sentence, text)
             if len(matches) == 1:
                 start, stop = matches[0]
-                ref['offset'] = {'start': start, 'end': stop, 'basis': 'chunk_text', 'unit': 'unicode_codepoint'}
+                basis = 'vlm_visual_description' if item.get('modality') == 'pdf_image' else 'chunk_text'
+                ref['offset'] = {'start': start, 'end': stop, 'basis': basis, 'unit': 'unicode_codepoint'}
         refs.append(ref)
     return refs

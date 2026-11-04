@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from app.schemas import Claim, ClaimBundle, CatalogBundle, parse_model_bundle
+from app.schemas import Claim, ClaimBundle, CatalogBundle, parse_model_bundle, claim_output_schema
 from pydantic import ValidationError
 from app.web_research import capture_research, complete_with_research
 from app.entity_types import TYPE_DEFINITIONS
@@ -34,7 +34,7 @@ client = OpenAI(
 )
 
 
-CLAIM_SCHEMA_TEXT = json.dumps(ClaimBundle.model_json_schema(), ensure_ascii=False, indent=2)
+CLAIM_SCHEMA_TEXT = json.dumps(claim_output_schema(), ensure_ascii=False, indent=2)
 QUOTE_EXAMPLE = json.dumps({'evidence': {'sentence': 'Cells formed "homeostatic" consortia.'}}, ensure_ascii=False)
 COMPARISON_EXAMPLE = json.dumps({
     'subject': {'text':'Bacteroides', 'type':'MicrobialTaxon', 'mention':'Bacteroides',
