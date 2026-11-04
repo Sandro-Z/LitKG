@@ -1,0 +1,37 @@
+# Opt-in overlay: no new host ports. Existing production workers are changed only when explicitly recreated.
+services:
+  searxng:
+    image: ${SEARXNG_IMAGE:?Run scripts/prepare_web_research.py to resolve an immutable official image}
+    restart: unless-stopped
+    env_file:
+      - .web-research.env
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+
+  research_mcp:
+    build:
+      context: ./app
+    restart: unless-stopped
+    environment:
+      RESEARCH_MCP_HOST: 0.0.0.0
+      SEARXNG_URL: http://searxng:8080
+    depends_on:
+      - searxng
+    command: python -m app.research_mcp
+
+  api:
+    environment: &web-research-environment
+      WEB_RESEARCH_ENABLED: "true"
+      WEB_RESEARCH_MCP_URL: http://research_mcp:8000/mcp
+      WEB_RESEARCH_REVISION: ${WEB_RESEARCH_REVISION:-1}
+      WEB_RESEARCH_MAX_ROUNDS: "3"
+      WEB_RESEARCH_MAX_CALLS: "6"
+
+  worker_extract:
+    environment: *web-research-environment
+    depends_on:
+      - research_mcp
+
+volumes:
+  searxng-cache:

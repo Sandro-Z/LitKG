@@ -660,3 +660,8 @@ python -m unittest discover -s tests -v
 结束后删除该 schema。未设置此变量时跳过数据库集成测试。
 完整部署后还可用 Swagger 依次执行“创建知识库
 → 上传两篇文献 → 等待批次完成 → 查询统一图谱”进行端到端验证。
+
+
+## 2026-11-03：可选抽取时 Web Research / MCP
+
+新增按需搜索、原网页读取、独立标准 ID 候选及来源审计；PDF 断言仍须原文支持。默认关闭，配套自建 SearXNG overlay 不开放宿主端口，无 SQL 迁移。详见 docs/web-research.md。

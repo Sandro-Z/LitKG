@@ -6,3 +6,5 @@ __pycache__/
 tmp/
 outputs/
 audit/
+# Local search configuration (contains a generated runtime secret)
+.web-research.env

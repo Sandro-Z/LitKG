@@ -181,6 +181,7 @@ def combine_claims(bundles):
     result = ClaimBundle(claims=[])
     seen = set()
     for bundle in bundles:
+        result._research_trace.extend(bundle._research_trace)
         for claim in bundle.claims:
             key = digest(claim.model_dump(mode='json'))
             if key not in seen:

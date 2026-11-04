@@ -67,6 +67,7 @@ class Claim(BaseModel):
 
 class ClaimBundle(BaseModel):
     claims: list[Claim]
+    _research_trace: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _raw_output: Optional[str] = PrivateAttr(default=None)
     _claim_repairs: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _claim_rejections: list[dict[str, Any]] = PrivateAttr(default_factory=list)
@@ -84,6 +85,7 @@ class CatalogEntity(Entity):
 
 class CatalogBundle(BaseModel):
     entities: list[CatalogEntity]
+    _research_trace: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _raw_output: Optional[str] = PrivateAttr(default=None)
     _catalog_repairs: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _catalog_rejections: list[dict[str, Any]] = PrivateAttr(default_factory=list)

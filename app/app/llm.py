@@ -7,6 +7,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from app.schemas import Claim, ClaimBundle, CatalogBundle, parse_model_bundle
 from pydantic import ValidationError
+from app.web_research import capture_research, complete_with_research
 from app.entity_types import TYPE_DEFINITIONS
 from app.processes import PROCESS_DEFINITIONS
 from app.predicate_registry import predicate_prompt, EVIDENCE_CATEGORIES
@@ -260,7 +261,7 @@ def chat_completion(messages, max_tokens=LLM_MAX_OUTPUT_TOKENS):
         }
     }
 
-    resp = client.chat.completions.create(**kwargs)
+    resp = complete_with_research(client.chat.completions.create, kwargs, checker)
     if checker is not None:
         checker()
     msg = resp.choices[0].message
@@ -345,6 +346,7 @@ def repair_evidence_quotes(text, source, schema):
                        replacement=sentence) for start,end,_,sentence,span in patches]
 
 
+@capture_research
 def structured_completion(messages, schema, *, max_tokens=None, source_text=None):
     raw = chat_completion(messages) if max_tokens is None else chat_completion(messages, max_tokens=max_tokens)
     try:

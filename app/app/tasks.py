@@ -23,10 +23,13 @@ from app.normalization import entity_identity
 from app.schemas import ClaimBundle, CatalogBundle, CatalogEntity
 from app.normalization import extract_abbreviations
 from app.parser import parse_pdf_to_chunks
+from app.web_research import cache_signature as web_research_cache_signature
 from app.provenance import locate_evidence_pages
 from app.recovery import heartbeat_lease
 
-MODEL_SIGNATURE = digest([LLM_BASE_URL, LLM_MODEL, LLM_REVISION])
+_web_research_signature = web_research_cache_signature()
+MODEL_SIGNATURE = digest([LLM_BASE_URL, LLM_MODEL, LLM_REVISION] +
+                         ([_web_research_signature] if _web_research_signature is not None else []))
 log = logging.getLogger(__name__)
 _processing_scope = ContextVar('litkg_processing_scope', default=None)
 
@@ -136,7 +139,8 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
         return result
 
     def record_failure(exc, parsed=None, raw_output=None):
-        output = {'parsed': parsed, 'raw': getattr(exc, 'raw', raw_output)}
+        output = {'parsed': parsed, 'raw': getattr(exc, 'raw', raw_output),
+                  'web_research': getattr(exc, 'research_trace', [])}
         with get_conn() as conn:
             check_processing(conn)
             conn.execute("""INSERT INTO processing_attempts (document_id, chunk_id, stage, version, status, output, error)
@@ -153,6 +157,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     if row:
         try:
             saved = schema.model_validate(row['payload'])
+            saved._research_trace = row['payload'].get('_web_research', [])
             for name in (repairs_name, rejections_name):
                 setattr(saved, name, row['payload'].get(name, []))
             if stage == 'claims':
@@ -216,6 +221,7 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                     check_processing()
                     feedback = (f'repair_id={repair_id}: ' if stage == 'claims' else '') + item['error']
                     correction = checked(retry_call(CatalogValidationError(feedback), previous))
+                    result._research_trace.extend(correction._research_trace)
                     check_processing()
                     resolution = correction._resolution or {}
                     values = getattr(correction, field)
@@ -253,7 +259,9 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
                 except Exception as exc:
                     if isinstance(exc, ProcessingInterrupted):
                         raise
-                    history.append({'error': f'{type(exc).__name__}: {exc}', 'raw': getattr(exc, 'raw', None)})
+                    result._research_trace.extend(getattr(exc, 'research_trace', []))
+                    history.append({'error': f'{type(exc).__name__}: {exc}', 'raw': getattr(exc, 'raw', None),
+                                    'web_research': getattr(exc, 'research_trace', [])})
                     # Infrastructure/capacity failures stay visible in quality;
                     # good siblings are still usable. Never retry truncation.
                     if not isinstance(exc, (CatalogValidationError, ModelOutputError)) or isinstance(exc, ModelOutputTruncatedError):
@@ -271,6 +279,8 @@ def cached_model(document_id, stage, key, model_call, schema, chunk_id=None, val
     setattr(result, rejections_name, rejections)
     gap = not getattr(result, field) and any(r.get('outcome') != 'excluded' for r in rejections)
     payload = result.model_dump(mode='json')
+    if result._research_trace:
+        payload['_web_research'] = result._research_trace
     if stage == 'claims':
         payload['_repair_ids'] = result._repair_ids
     for name in (repairs_name, rejections_name):

@@ -15,6 +15,8 @@ KB26 的极性/确定性校验、默认只读的批量审计，以及 JSON/CSV �
 
 后续P1比较/数值、实体文本与安全格式合并、自环及方法区约束，见 [P1校验说明](docs/claim-guards-p1.md)。
 
+可选的抽取时 Web Search、标准 ID 候选及配套 MCP/SearXNG 部署见 [Web Research](docs/web-research.md)。
+
 ## 项目特性
 
 - 一次上传最多 `MAX_BATCH_FILES` 篇 PDF，并跟踪整批和每篇文献的状态。

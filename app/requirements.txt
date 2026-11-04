@@ -10,3 +10,4 @@ requests
 lxml
 pypdf
 tenacity
+mcp==1.30.0

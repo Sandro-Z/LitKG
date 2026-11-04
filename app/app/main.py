@@ -351,6 +351,11 @@ def _ingest_files(
     return batch
 
 
+from app.web_research_api import web_research_status, document_web_research
+app.get("/web-research", tags=["web-research"])(web_research_status)
+app.get("/documents/{document_id}/web-research", tags=["web-research"])(document_web_research)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "api_version": "3.0.0"}

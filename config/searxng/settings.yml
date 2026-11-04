@@ -1,0 +1,10 @@
+use_default_settings: true
+search:
+  formats:
+    - html
+    - json
+server:
+  limiter: false
+  image_proxy: false
+  # The runtime value comes from SEARXNG_SECRET in the restricted env file.
+  secret_key: "overridden-by-SEARXNG_SECRET"
