@@ -100,6 +100,25 @@ def fact_text(fact):
             f'conditions={stable_json(fact["qualifiers"])}\n' + "\n".join(e["sentence"] for e in fact["evidence"] or []))
 
 
+def review_metadata(fact):
+    """Keep review state visible when pending knowledge is included."""
+    raw = fact.get('claim_json') or {}
+    pending = bool(fact.get('audit_pending')) or raw.get('semantic_status') == 'pending'
+    review_pending = pending or any(r.get('status') == 'pending' for r in fact.get('reviews') or [])
+    return {'semantic_status': 'pending' if pending else raw.get('semantic_status', 'unknown'),
+            'review_status': 'pending' if review_pending else 'unknown',
+            'audit_pending': bool(fact.get('audit_pending')),
+            'review_reasons': raw.get('review_reasons') or [],
+            'source_kind': raw.get('source_kind', 'unknown')}
+
+
+def pending_clause(alias, include_pending):
+    if include_pending:
+        return ''
+    return (f" AND COALESCE({alias}.claim_json->>'semantic_status', '') <> 'pending'"
+            f" AND NOT ({audit_pending_sql(alias)})")
+
+
 def citation(fact, evidence, ordinal):
     sentence = evidence["sentence"]
     source_text = fact["source_text"]
@@ -110,7 +129,7 @@ def citation(fact, evidence, ordinal):
             "title": fact["title"], "doi": fact["doi"], "page": evidence.get("page"), "page_end": evidence.get("page_end"),
             "section": evidence.get("section") or fact["section_title"], "table_or_figure": evidence.get("table_or_figure"),
             "sentence": sentence, "context": context, "negated": fact["negated"], "speculative": fact["speculative"],
-            "qualifiers": fact["qualifiers"]}
+            "qualifiers": fact["qualifiers"], **review_metadata(fact)}
 
 
 def rebuild_derived(cur, kb, document_ids=None):
@@ -208,7 +227,7 @@ def rebuild_derived(cur, kb, document_ids=None):
     return {"changed_count": changed, "document_count": len(selected), "warnings": warnings}
 
 
-def retrieve(cur, kb, question, limit=12, hops=1):
+def retrieve(cur, kb, question, limit=12, hops=1, *, include_pending=True):
     warnings = []
     scores = {"entity": {}, "fact": {}}
     # Independent entity and complete-fact lexical routes. FTS finds predicates,
@@ -247,18 +266,17 @@ def retrieve(cur, kb, question, limit=12, hops=1):
             JOIN documents d ON d.id=c.document_id JOIN knowledge_base_documents m ON m.document_id=c.document_id
             JOIN fact_participants p ON p.fact_id=f.id WHERE m.knowledge_base_id=%s
             AND f.catalog_version IS NOT DISTINCT FROM d.catalog_version AND d.catalog_status IN ('done','legacy')
-            AND COALESCE(c.claim_json->>'semantic_status','unknown') <> 'pending'
-            AND NOT ({audit_pending_sql('c')})
+            {pending_clause('c', include_pending)}
             AND (p.entity_id=ANY(%s::BIGINT[]) OR p.entity_id IN (
                 SELECT p2.entity_id FROM fact_participants p2 JOIN facts f2 ON f2.id=p2.fact_id
                 JOIN claims c2 ON c2.id=f2.claim_id JOIN knowledge_base_documents m2 ON m2.document_id=c2.document_id
                 WHERE m2.knowledge_base_id=%s AND f2.id=ANY(%s::BIGINT[])
-                AND COALESCE(c2.claim_json->>'semantic_status','unknown') <> 'pending'
-                AND NOT ({audit_pending_sql('c2')})))
+                {pending_clause('c2', include_pending)}))
             ORDER BY f.id LIMIT %s""", (kb, entities, kb, ids, limit*3))
         ids = list(dict.fromkeys(ids + [r["id"] for r in cur.fetchall()]))[:limit*3]
     rows = fetch_facts(cur, kb, fact_ids=ids, limit=limit*3) if ids else []
-    rows = [row for row in rows if (row.get('claim_json') or {}).get('semantic_status') != 'pending' and not row.get('audit_pending')]
+    if not include_pending:
+        rows = [row for row in rows if (row.get('claim_json') or {}).get('semantic_status') != 'pending' and not row.get('audit_pending')]
     rows.sort(key=lambda r: (-scores["fact"].get(r["id"], 0), r["id"]))
     citations, facts, budget = [], [], 36000
     for row in rows:
@@ -269,7 +287,9 @@ def retrieve(cur, kb, question, limit=12, hops=1):
             continue
         budget -= cost
         citations.extend(refs)
-        facts.append({k: row[k] for k in ["id", "predicate", "participants", "qualifiers", "negated", "speculative"]})
+        facts.append({**{k: row[k] for k in ["id", "predicate", "participants", "qualifiers", "negated", "speculative"]}, **review_metadata(row)})
+    if include_pending and any(f.get("review_status") == "pending" for f in facts):
+        warnings.append("结果包含待审核知识，审核状态已保留。")
     return {"knowledge_base_id": kb, "facts": facts, "citations": citations, "warnings": warnings,
             "retrieval": "text+semantic" if config and not warnings else "text", "context_budget_remaining": budget}
 

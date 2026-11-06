@@ -719,7 +719,7 @@ def search_knowledge_base_entities(
     knowledge_base_id: int,
     query: str | None = Query(None, max_length=200),
     entity_type: str | None = Query(None),
-    include_pending: bool = Query(False),
+    include_pending: bool = Query(True),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -856,7 +856,7 @@ def search_knowledge_base_relations(
     min_document_count: int = Query(1, ge=1),
     include_negated: bool = Query(True),
     include_speculative: bool = Query(True),
-    include_pending: bool = Query(False),
+    include_pending: bool = Query(True),
     evidence_limit: int = Query(3, ge=1, le=20),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -906,7 +906,7 @@ def get_knowledge_base_graph(
     relation_layer: Literal['all', 'biological', 'method_sample'] = Query('all'),
     document_id: int | None = Query(None, ge=1),
     result_status: Literal['observed_change', 'no_effect_reported', 'not_significant', 'unknown'] | None = Query(None),
-    include_pending: bool = Query(False),
+    include_pending: bool = Query(True),
     direction: Literal["both", "outgoing", "incoming"] = Query("both"),
 ):
     if direction != "both" and entity_id is None:
@@ -1148,6 +1148,7 @@ def get_document_graph(
     document_id: int,
     limit: int = Query(300, ge=1, le=2000),
     evidence_limit: int = Query(3, ge=1, le=20),
+    include_pending: bool = Query(True),
 ):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -1161,7 +1162,7 @@ def get_document_graph(
                 cur,
                 document_id=document_id,
                 limit=limit, include_total=True,
-                evidence_limit=evidence_limit,
+                evidence_limit=evidence_limit, include_pending=include_pending,
             )
     graph["document_id"] = document_id
     return graph
@@ -1265,7 +1266,7 @@ def ask(knowledge_base_id: int, request: QuestionRequest):
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_knowledge_base(cur, knowledge_base_id)
-            result = retrieve(cur, knowledge_base_id, request.question, request.limit, request.hops)
+            result = retrieve(cur, knowledge_base_id, request.question, request.limit, request.hops, include_pending=request.include_pending)
     return answer_question(result, request.question, request.generate)
 
 

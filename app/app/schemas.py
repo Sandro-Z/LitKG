@@ -206,6 +206,7 @@ class QuestionRequest(BaseModel):
     limit: int = Field(default=12, ge=1, le=30)
     hops: int = Field(default=1, ge=0, le=2)
     generate: bool = True
+    include_pending: bool = True
 
 
 class MaintenanceRequest(BaseModel):

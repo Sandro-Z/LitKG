@@ -89,7 +89,7 @@ def fetch_graph(
     include_total: bool = False,
     relation_layer: Literal['all', 'biological', 'method_sample'] = 'all',
     result_status: str | None = None,
-    include_pending: bool = False,
+    include_pending: bool = True,
     source_document_id: int | None = None,
 ) -> dict[str, Any]:
     scope_sql, scope_params = _scope_clause(

@@ -297,6 +297,15 @@ def api_upload_batch(
 
 
 def graph_edge_labels(edges):
+    edges = list(edges)
+    labels = _graph_edge_labels(edges)
+    for edge in edges:
+        if edge.get('review_status') == 'pending':
+            labels[edge['id']] += '（待审核）'
+    return labels
+
+
+def _graph_edge_labels(edges):
     """Keep context-specific assertions visible as distinct parallel edges."""
     groups = defaultdict(list)
     for edge in edges:
@@ -885,7 +894,7 @@ def main():
         graph_document_id = st.number_input('图谱限定文献 ID（0 表示当前知识库）',min_value=0,value=0,step=1)
         st.caption('边型：实线为实验，长虚线为观察/共现，点线为计算预测，点划线为作者断言，稀点线为未知；未显著差异和待审核另有文字标记。')
         graph_result = st.selectbox('图谱结果语义', ['', 'no_effect_reported', 'not_significant', 'unknown'])
-        include_pending = st.checkbox('包含待审核候选（紫色虚线）', value=False)
+        include_pending = st.checkbox('包含待审核候选（紫色虚线）', value=True)
         include_speculative = st.checkbox("包含推测关系", value=True)
         include_negated = st.checkbox("包含否定关系", value=True)
 
