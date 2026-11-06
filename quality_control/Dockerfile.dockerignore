@@ -1,0 +1,7 @@
+*
+!quality_control/
+!quality_control/**
+quality_control/secrets
+quality_control/**/__pycache__
+quality_control/*.sqlite3*
+quality_control/.env*

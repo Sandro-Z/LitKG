@@ -1,0 +1,10 @@
+{
+  "name": "系统 A · 示例图谱（人工构造）",
+  "claims": [
+    {"id": "a1", "subject": {"id": "drug", "text": "Drug A", "type": "Drug"}, "predicate": "TREATS", "object": {"id": "disease", "text": "Disease B", "type": "Disease"}, "qualifiers": {"negated": false, "context": {"population": "adult mice"}}, "document_id": "paper", "source_refs": [{"doc_id": "paper", "block_id": "results", "quote": "Drug A reduced Disease B severity in adult mice."}]},
+    {"id": "a2", "subject": {"id": "drug", "text": "Drug A", "type": "Drug"}, "predicate": "CHANGES", "object": {"id": "weight", "text": "body weight", "type": "Phenotype"}, "qualifiers": {"negated": true, "context": {"population": "adult mice"}}, "document_id": "paper", "source_refs": [{"doc_id": "paper", "block_id": "results", "quote": "Drug A did not change body weight."}]}
+  ],
+  "documents": [{"id": "paper", "title": "Synthetic treatment study", "parsing_status": "complete", "blocks": [{"id": "results", "page": 2, "section": "Results", "text": "Drug A reduced Disease B severity in adult mice. Drug A did not change body weight."}]}],
+  "policy": {"scope": "Treatment outcomes and explicitly negative outcomes in adult mice", "ontology": {"node_types": {"Drug": {}, "Disease": {}, "Phenotype": {}}, "predicates": {"TREATS": {"domain": ["Drug"], "range": ["Disease"], "required": ["qualifiers.context.population"]}, "CHANGES": {"domain": ["Drug"], "range": ["Phenotype"], "required": ["qualifiers.negated"]}}}},
+  "metadata": {"note": "Synthetic fixture, not a real scientific finding or gold standard"}
+}

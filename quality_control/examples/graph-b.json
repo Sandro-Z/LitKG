@@ -1,0 +1,10 @@
+{
+  "name": "系统 B · 含语义偏差的示例（人工构造）",
+  "triples": [
+    {"id": "b1", "head": {"id": "drug", "text": "Drug A", "type": "Drug"}, "relation": "TREATS", "tail": {"id": "disease", "text": "Disease B", "type": "Disease"}, "document_id": "paper", "source_refs": [{"doc_id": "paper", "block_id": "results", "quote": "Drug A reduced Disease B severity in adult mice."}]},
+    {"id": "b2", "head": {"id": "drug", "text": "Drug A", "type": "Drug"}, "relation": "CHANGES", "tail": {"id": "weight", "text": "body weight", "type": "Phenotype"}, "qualifiers": {"negated": false}, "document_id": "paper", "source_refs": [{"doc_id": "paper", "block_id": "results", "quote": "Drug A did not change body weight."}]}
+  ],
+  "documents": [{"id": "paper", "title": "Synthetic treatment study", "parsing_status": "complete", "blocks": [{"id": "results", "page": 2, "section": "Results", "text": "Drug A reduced Disease B severity in adult mice. Drug A did not change body weight."}]}],
+  "policy": {"scope": "Treatment outcomes and explicitly negative outcomes in adult mice", "ontology": {"node_types": {"Drug": {}, "Disease": {}, "Phenotype": {}}, "predicates": {"TREATS": {"domain": ["Drug"], "range": ["Disease"], "required": ["qualifiers.context.population"]}, "CHANGES": {"domain": ["Drug"], "range": ["Phenotype"], "required": ["qualifiers.negated"]}}}},
+  "metadata": {"note": "Synthetic fixture with omitted population and reversed negation, not a gold standard"}
+}

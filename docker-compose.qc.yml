@@ -1,0 +1,30 @@
+name: litkg-qc
+services:
+  quality:
+    build:
+      context: .
+      dockerfile: quality_control/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QC_PORT:-8090}:8090"
+    environment:
+      QC_LITKG_URL: ${QC_LITKG_URL:-http://host.docker.internal:8080}
+      QC_LLM_BASE_URL: ${QC_LLM_BASE_URL:-}
+      QC_LLM_MODEL: ${QC_LLM_MODEL:-}
+      QC_LLM_API_KEY_FILE: ${QC_LLM_API_KEY_FILE:-}
+      QC_CONTEXT_CHARS: ${QC_CONTEXT_CHARS:-48000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - qc_data:/data
+      - ./quality_control/secrets:/run/secrets:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    stop_grace_period: 10s
+volumes:
+  qc_data:

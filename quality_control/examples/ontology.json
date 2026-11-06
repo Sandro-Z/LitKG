@@ -1,0 +1,11 @@
+{
+  "node_types": {"Drug": {"properties": {"registry_id": {"datatype": "string", "required": true}}}, "Disease": {}, "Phenotype": {}, "Protein": {}},
+  "type_parents": {"Drug": "Compound"},
+  "disjoint": [["Drug", "Disease"]],
+  "unique_fields": ["registry_id"],
+  "node_properties": {"aliases": {"datatype": "string", "unique": true}},
+  "predicates": {
+    "TREATS": {"domain": ["Drug"], "range": ["Disease"], "required": ["qualifiers.context.population"], "max_count": 5},
+    "HAS_DOSE": {"domain": ["Drug"], "range": ["Literal"], "literal": {"datatype": "number", "minimum": 0, "maximum": 1000, "units": ["mg", "g"], "unit_field": "unit"}}
+  }
+}
