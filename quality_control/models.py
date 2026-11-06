@@ -4,7 +4,7 @@ import json
 import math
 from copy import deepcopy
 
-VERSION = 'litkg-qc/1.0.0'
+VERSION = 'litkg-qc/2.0.0'
 DIMENSIONS = ['specialization', 'granularity', 'completeness', 'correctness', 'ontology', 'coverage']
 SCENARIOS = {
     'specific_information': ('提取特定研究信息', [3, 3, 1, 2]),

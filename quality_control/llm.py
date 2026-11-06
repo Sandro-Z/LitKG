@@ -1,6 +1,7 @@
 """Minimal OpenAI-compatible JSON transport; never expose provider error bodies."""
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -55,7 +56,16 @@ class Client:
             for key, value in result.get('usage', {}).items():
                 if isinstance(value, int):
                     self.usage[key] = self.usage.get(key, 0) + value
-            value = json.loads(result['choices'][0]['message']['content'])
+            choice = result['choices'][0]
+            if choice.get('finish_reason') == 'length':
+                raise LLMError('LLM_TRUNCATED_RESPONSE')
+            content = choice['message']['content']
+            if isinstance(content, list) and all(isinstance(c, dict) and c.get('type') == 'text' for c in content):
+                content = ''.join(c['text'] for c in content)
+            if not isinstance(content, str):
+                raise ValueError()
+            match = re.fullmatch(r'\s*```(?:json)?\s*\n?(.*?)\n?```\s*', content, re.S | re.I)
+            value = json.loads(match.group(1) if match else content)
             if not isinstance(value, dict):
                 raise ValueError()
             return value

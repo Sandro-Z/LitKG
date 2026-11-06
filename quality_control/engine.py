@@ -6,7 +6,9 @@ from .models import VERSION, anchor, blocks, digest, finite, public_claim
 from .sources import review_blocks
 from .ontology import validate
 from .scoring import scenario_scores
-from .prompts import PROMPT_VERSION, EXTRACT, FIDELITY, MATCH
+from .prompts import PROMPT_VERSION, EXTRACT, FIDELITY, MATCH, RUBRIC
+from .rubrics import measure
+from .scoring import SCORING_VERSION
 from .llm import LLMError
 
 VERDICTS = {'SUPPORTED', 'PARTIALLY_SUPPORTED', 'CONTRADICTED', 'UNSUPPORTED', 'INSUFFICIENT_EVIDENCE', 'SOURCE_CONFLICT'}
@@ -21,7 +23,7 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                   corpus_hash=digest(graph['documents']), policy_hash=digest(graph['policy']),
                   model=getattr(client, 'model', None), assessments=[], candidates=[], matches=[],
                   noun_phrases=[], predicate_mentions=[], negations=[], identity_issues=[],
-                  document_coverage=[], errors=[], ontology=formal, stages={},
+                  document_coverage=[], errors=[], ontology=formal, stages={}, dimension_assessments=[],
                   limitations=['无人工金标准；候选命中率不是全图召回率或 F1', '只审核已导入文本；图像、表格视觉和未提供附件未核验'])
     if any(d.get("original_source_status") in {"missing", "unreadable", "too_large", "hash_mismatch"} for d in graph["documents"]):
         report["limitations"].append('部分 LitKG 原文件无法读取，相关评估使用已有分块并保留证据缺口。')
@@ -47,12 +49,38 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
             report['errors'].append(dict(stage=stage, code=code))
             return None
 
-    def evidence(items, allowed=None):
+    def evidence(items, allowed=None, default_role='supports'):
         valid = []
+        if isinstance(items, (dict, str)):
+            items = [items]
         if not isinstance(items, list):
             return valid
         for item in items:
+            if isinstance(item, str):
+                item = dict(quote=item)
+            if not isinstance(item, dict):
+                continue
+            item = dict(item)
+            item.setdefault('quote', item.get('sentence', item.get('text')))
+            item.setdefault('role', default_role)
+            item['role'] = {'support': 'supports', 'contradict': 'contradicts', '支持': 'supports', '反证': 'contradicts'}.get(item['role'], item['role'])
             a = anchor(item, corpus)
+            if not a and isinstance(item.get('quote'), str) and item['quote'].strip():
+                hits = []
+                pattern = re.compile(r'\s+'.join(re.escape(w) for w in item['quote'].split()))
+                for key, block in corpus.items():
+                    if allowed is not None and key not in allowed:
+                        continue
+                    for found in pattern.finditer(block['text']):
+                        hits.append(dict(item, doc_id=key[0], block_id=key[1], start=found.start(), end=found.end(), quote=found.group()))
+                        if len(hits) > 1:
+                            break
+                    if len(hits) > 1:
+                        break
+                if len(hits) == 1:
+                    a = anchor(hits[0], corpus)
+                    if a:
+                        a['recovered'] = True
             if a and (allowed is None or (a['doc_id'], a['block_id']) in allowed):
                 if a['role'] in {'supports', 'contradicts', 'context'}:
                     valid.append(a)
@@ -84,11 +112,14 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
         for key, block in units:
             data = dict(scope=scope, blocks=[block])
             response = ask('extraction', data, EXTRACT)
-            ok = response is not None and all(isinstance(response.get(k), list) for k in
-                                             ('candidates', 'noun_phrases', 'predicate_mentions', 'negations'))
-            if ok:
+            ok = response is not None and isinstance(response.get('candidates'), list)
+            if response is not None:
                 for field in ('candidates', 'noun_phrases', 'predicate_mentions', 'negations'):
-                    for item in response[field]:
+                    values = response.get(field, [])
+                    if not isinstance(values, list):
+                        ok = False
+                        continue
+                    for item in values:
                         if not isinstance(item, dict):
                             ok = False
                             continue
@@ -128,6 +159,14 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 merged[key]['ranges'].extend(item['ranges'])
         report['document_coverage'] = list(merged.values())
     report['stages']['extraction'] = 'complete' if llm and corpus and all(x['reviewed'] for x in report['document_coverage']) else 'incomplete'
+    if not report['noun_phrases']:
+        seen = set()
+        for candidate in report['candidates']:
+            for field in ('subject', 'object'):
+                text = candidate[field]
+                if text.casefold() not in seen:
+                    report['noun_phrases'].append(dict(text=text, evidence=candidate['evidence'], method='anchored_candidate_endpoint'))
+                    seen.add(text.casefold())
     report['candidate_hash'] = digest(report['candidates'])
     # Freeze before exposing the graph to any matching request.
     checkpoint(report)
@@ -183,11 +222,26 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
             response = ask('fidelity', dict(scope=scope, source_complete=source_complete,
                                            claims=[public], blocks=list(relevant.values())), FIDELITY)
             values = response.get('assessments') if response else None
-            valid = isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict) and values[0].get('claim_id') == claim['id']
+            if values is None and response and 'verdict' in response:
+                values = [response]
+            valid = isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict) and str(values[0].get('claim_id', claim['id'])) == claim['id']
             a = values[0] if valid else unknown(claim, '模型响应无效或上下文超过预算')
-            refs = [r for r in evidence(a.get('evidence'), set(relevant))
+            verdict = str(a.get('verdict', '')).strip().upper()
+            refs = [r for r in evidence(a.get('evidence'), set(relevant), 'contradicts' if verdict == 'CONTRADICTED' else 'supports')
                     if r['quote'] in relevant[(r['doc_id'], r['block_id'])]['text']]
-            verdict = a.get('verdict')
+            dimension_values = {}
+            for field in ('specialization', 'granularity'):
+                value = (a.get('rubric') or {}).get(field, a.get(field)) if isinstance(a.get('rubric', {}), dict) else a.get(field)
+                dimension_values[field] = measure(value, field, refs) or measure(a.get(field), field, refs)
+            if any(v is None for v in dimension_values.values()) and relevant:
+                rubric = ask('rubric', dict(scope=scope, claim=public, blocks=list(relevant.values())), RUBRIC)
+                if rubric and str(rubric.get('claim_id', claim['id'])) == claim['id']:
+                    rubric_refs = [r for r in evidence(rubric.get('evidence'), set(relevant))
+                                   if r['quote'] in relevant[(r['doc_id'], r['block_id'])]['text']]
+                    for field in dimension_values:
+                        if dimension_values[field] is None:
+                            dimension_values[field] = measure(rubric.get(field), field, rubric_refs)
+            report['dimension_assessments'].append(dict(claim_id=claim['id'], **dimension_values))
             roles = {r['role'] for r in refs}
             valid = valid and verdict in VERDICTS and isinstance(a.get('rationale'), str) and bool(a['rationale'].strip())
             if verdict in {'SUPPORTED', 'PARTIALLY_SUPPORTED'}:
@@ -200,8 +254,8 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 valid = valid and source_complete
             if valid:
                 assessment = dict(claim_id=claim['id'], verdict=verdict, rationale=a['rationale'][:6000], evidence=refs,
-                                  specialization=a.get('specialization') if refs and finite(a.get('specialization')) else None,
-                                  granularity=a.get('granularity') if refs and finite(a.get('granularity')) else None,
+                                  specialization=dimension_values['specialization']['score'] if dimension_values['specialization'] else None,
+                                  granularity=dimension_values['granularity']['score'] if dimension_values['granularity'] else None,
                                   searched_blocks=[dict(doc_id=k[0], block_id=k[1]) for k in relevant],
                                   search_notes='已向评审模型提供全部关联文献块' if source_complete else '来源/范围不完整')
             else:
@@ -291,6 +345,8 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                         report['identity_issues'].append(value)
             checkpoint(report)
     report['stages']['fidelity'] = 'complete' if llm and len(report['assessments']) == len(graph['claims']) else 'incomplete'
+    report['stages']['rubric'] = 'complete' if len(report['dimension_assessments']) == len(graph['claims']) and graph['claims'] and all(
+        r.get(field) and r[field]['coverage'] == 1 for r in report['dimension_assessments'] for field in ('specialization', 'granularity')) else 'incomplete'
     report['stages']['matching'] = 'complete' if llm and len(report['matches']) == len(report['candidates']) and not any(m['status'] == 'ambiguous' for m in report['matches']) else 'incomplete'
     finalize(graph, report, docs_complete, bool(scope))
     report['llm_calls'] = getattr(client, 'calls', 0)
@@ -307,7 +363,11 @@ def finalize(graph, report, docs_complete, scope_known):
     dims = dict(specialization=None, granularity=None, correctness=None, completeness=None,
                 ontology=report['ontology']['score'], coverage=None)
     for field in ('specialization', 'granularity'):
-        values = [a[field] for a in assessments if a[field] is not None]
+        records = {a['claim_id']: a[field] for a in assessments if a.get(field) is not None}
+        for row in report.get('dimension_assessments', []):
+            if row.get(field):
+                records[row['claim_id']] = row[field]['score']
+        values = list(records.values())
         if values:
             dims[field] = round(sum(values) / len(values), 2)
     if determined:
@@ -315,7 +375,7 @@ def finalize(graph, report, docs_complete, scope_known):
         dims['correctness'] = round(100 * labels['SUPPORTED'] / len(assessments), 2)
     match_counts = Counter(m['status'] for m in report['matches'])
     denominator = sum(match_counts[k] for k in ('matched', 'misrepresented', 'missing'))
-    if denominator and scope_known:
+    if denominator:
         dims['completeness'] = round(100 * match_counts['matched'] / denominator, 2)
     names = [str(v).casefold() for n in graph['nodes'] for v in [n['label'], *n.get('aliases', [])]]
     def represented(text):
@@ -360,3 +420,32 @@ def finalize(graph, report, docs_complete, scope_known):
     report['uncertainty'] = max(1 - len(assessments) / count if count else 1,
                                 unresolved / len(assessments) if assessments else 1,
                                 .5 if incomplete else 0)
+    details = {}
+    for field in ('specialization', 'granularity'):
+        scored = {a['claim_id'] for a in assessments if a.get(field) is not None}
+        scored.update(r['claim_id'] for r in report.get('dimension_assessments', []) if r.get(field))
+        details[field] = dict(method='evidence_rubric_mean', evaluated=len(scored), total=count,
+                              coverage=len(scored) / count if count else None,
+                              reason='原文支持的逐claim量表均值' if scored else '没有通过证据校验的量表评分；查看rubric/fidelity阶段错误与原文锚点')
+    details['correctness'] = dict(method='strict_supported_fraction', numerator=labels['SUPPORTED'], denominator=len(assessments),
+                                  evaluated=determined, total=count, coverage=determined / count if count else None,
+                                  reason='严格支持数 / 全部已审，部分支持和未定单列' if determined else '尚无可判定的原文核查结果；缺原文、模型响应或引用未通过校验')
+    details['completeness'] = dict(method='source_candidate_hit_rate', numerator=match_counts['matched'], denominator=denominator,
+                                   evaluated=denominator, total=len(report['candidates']),
+                                   coverage=denominator / len(report['candidates']) if report['candidates'] else None,
+                                   basis='declared_extraction_scope' if scope_known else 'provided_source_text_only',
+                                   reason=('范围内候选命中率' if scope_known else '未声明抽取范围：仅报告已提供原文的候选覆盖暂定分，不视为全图召回率')
+                                   if denominator else '没有已锚定并完成匹配的原文候选；检查独立重抽取与匹配阶段')
+    details['coverage'] = dict(method='available_proxy_mean', evaluated=len(measures), total=4, coverage=len(measures) / 4,
+                               components=dict(noun_phrases=noun_score, predicate_preservation=relation_score,
+                                               negation_preservation=neg_score, relation_density=density),
+                               reason='可用代理指标的均值；不适用或未完成的子指标不补零' if measures else '未取得有效的名词短语或原文候选，无法计算覆盖代理')
+    details['ontology'] = dict(method='explicit_constraint_pass_rate', evaluated=report['ontology']['checks'],
+                               reason='显式约束检测' if dims['ontology'] is not None else '未提供可执行的本体约束')
+    for field, detail in details.items():
+        detail['score'] = dims[field]
+        detail['status'] = 'unavailable' if dims[field] is None else ('complete' if not incomplete else 'partial')
+    report['dimension_details'] = details
+    report['scoring_version'] = SCORING_VERSION
+    report['failure_summary'] = dict(Counter(e['code'] for e in report['errors']))
+    report['evaluation_status'] = 'complete' if not incomplete else 'completed_with_gaps'

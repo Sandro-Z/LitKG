@@ -18,7 +18,7 @@ from quality_control.ontology import validate
 from quality_control.store import Store
 from quality_control.server import Service, handler
 from quality_control.scoring import scenario_scores
-from quality_control.prompts import EXTRACT, FIDELITY, MATCH
+from quality_control.prompts import EXTRACT, FIDELITY, MATCH, RUBRIC
 from quality_control.llm import LLMError, Client
 
 
@@ -62,6 +62,10 @@ class FakeLLM:
             return {'matches': [{'candidate_id': data['candidates'][0]['id'], 'status': self.match,
                                   'claim_ids': [data['claims'][0]['id']] if self.match in {'matched', 'misrepresented'} else [],
                                   'rationale': 'Equivalent source-grounded claim'}], 'identity_issues': []}
+        if instruction == RUBRIC:
+            if self.bad_anchor:
+                ref['quote'] = 'Fabricated evidence.'
+            return {'claim_id': data['claim']['id'], 'specialization': 90, 'granularity': 95, 'evidence': [ref]}
         raise AssertionError('Unexpected prompt')
 
 
@@ -197,10 +201,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual('INSUFFICIENT_EVIDENCE', r['assessments'][0]['verdict'])
         self.assertIsNone(r['scenarios']['field_review']['overall'])
 
-    def test_missing_scope_keeps_completeness_unknown(self):
+    def test_missing_scope_keeps_completeness_provisional(self):
         p = fixture();p['policy']['scope'] = None
         r = evaluate(normalize(p), FakeLLM())
-        self.assertIsNone(r['dimensions']['completeness'])
+        self.assertEqual(100, r['dimensions']['completeness'])
+        self.assertEqual('provided_source_text_only', r['dimension_details']['completeness']['basis'])
+        self.assertIsNone(r['scenarios']['field_review']['overall'])
         self.assertEqual('待验证', r['scenarios']['field_review']['suitability'])
 
     def test_context_budget_explicit_not_silent_truncation(self):
@@ -329,9 +335,10 @@ class PersistenceTests(unittest.TestCase):
         cid = sample[0]
         self.store.review(self.gid, cid, 'r1', 'supported', 'source')
         state = self.store.review(self.gid, cid, 'r2', 'incorrect', 'correction')
-        self.assertEqual(1, len(state['reviews']))
+        self.assertEqual(2, len(state['reviews']))
         self.assertEqual(2, len(state['history']))
-        self.assertEqual('incorrect', state['reviews'][0]['verdict'])
+        self.assertEqual(50, state['consensus'][0]['score'])
+        self.assertTrue(state['consensus'][0]['disagreement'])
         with self.assertRaises(ValueError): self.store.review(self.gid, 'not-sampled', 'r1', 'supported', '')
 
     def test_restart_retains_partial_and_marks_interrupted(self):

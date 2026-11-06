@@ -190,12 +190,18 @@ def handler(service):
                 elif method == 'POST' and action == 'runs':
                     self.reply(service.submit(gid, self.body().get('mode', 'automatic')), 202)
                 elif method == 'POST' and action == 'sample':
-                    self.reply(service.store.sample(gid, self.body().get('adaptive', True)))
+                    body = self.body()
+                    self.reply(service.store.sample(gid, body.get('adaptive', True), body.get('new_round', False), body.get('name', '')))
                 elif method == 'GET' and action == 'sample':
+                    self.reply(service.store.sample_state(gid, urllib.parse.parse_qs(parts.query).get('round_id', [None])[0]))
+                elif method == 'GET' and action == 'rounds':
                     self.reply(service.store.sample_state(gid))
+                elif method == 'POST' and action == 'rounds':
+                    body = self.body()
+                    self.reply(service.store.sample(gid, body.get('adaptive', True), True, body.get('name', '')), 201)
                 elif method == 'POST' and action == 'reviews':
                     body = self.body()
-                    self.reply(service.store.review(gid, body.get('claim_id'), body.get('reviewer'), body.get('verdict'), body.get('note', '')))
+                    self.reply(service.store.review(gid, body.get('claim_id'), body.get('reviewer'), body.get('verdict'), body.get('note', ''), body.get('round_id')))
                 elif method == 'GET' and action == 'claims' and len(pieces) == 5:
                     cid = urllib.parse.unquote(pieces[4])
                     claim = next((c for c in graph['claims'] if c['id'] == cid), None)
