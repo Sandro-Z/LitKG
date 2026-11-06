@@ -6,9 +6,10 @@ services:
       dockerfile: quality_control/Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${QC_PORT:-8090}:8090"
+      - "0.0.0.0:${QC_PORT:-8090}:8090"
     environment:
       QC_LITKG_URL: ${QC_LITKG_URL:-http://host.docker.internal:8080}
+      QC_LITKG_SOURCE_DIR: /litkg-sources
       QC_LLM_BASE_URL: ${QC_LLM_BASE_URL:-}
       QC_LLM_MODEL: ${QC_LLM_MODEL:-}
       QC_LLM_API_KEY_FILE: ${QC_LLM_API_KEY_FILE:-}
@@ -16,6 +17,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      - "${QC_LITKG_UPLOAD_DIR:-./data/uploads}:/litkg-sources:ro"
       - qc_data:/data
       - ./quality_control/secrets:/run/secrets:ro
     security_opt:

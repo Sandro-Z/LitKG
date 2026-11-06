@@ -395,7 +395,7 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.service.local_get('/documents/1')
         with patch.object(self.service, 'local_get', return_value=fixture()) as get:
             self.request('/api/import/litkg', {'knowledge_base_id': 2})
-            get.assert_called_once_with('/knowledge-bases/2/quality-export')
+            get.assert_called_once_with('/knowledge-bases/2/quality-export', max_bytes=128 * 1024 * 1024)
 
 
 class ExportTests(unittest.TestCase):

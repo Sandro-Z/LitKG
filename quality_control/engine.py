@@ -3,6 +3,7 @@ import json
 import re
 from collections import Counter
 from .models import VERSION, anchor, blocks, digest, finite, public_claim
+from .sources import review_blocks
 from .ontology import validate
 from .scoring import scenario_scores
 from .prompts import PROMPT_VERSION, EXTRACT, FIDELITY, MATCH
@@ -13,7 +14,7 @@ MATCHES = {'matched', 'misrepresented', 'missing', 'ambiguous', 'out_of_scope'}
 
 
 def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000):
-    corpus = blocks(graph)
+    corpus = review_blocks(blocks(graph))
     nodes = {n['id']: n for n in graph['nodes']}
     formal = validate(graph)
     report = dict(version=VERSION, prompt_version=PROMPT_VERSION, snapshot_hash=graph['snapshot_hash'],
@@ -22,6 +23,8 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                   noun_phrases=[], predicate_mentions=[], negations=[], identity_issues=[],
                   document_coverage=[], errors=[], ontology=formal, stages={},
                   limitations=['无人工金标准；候选命中率不是全图召回率或 F1', '只审核已导入文本；图像、表格视觉和未提供附件未核验'])
+    if any(d.get("original_source_status") in {"missing", "unreadable", "too_large", "hash_mismatch"} for d in graph["documents"]):
+        report["limitations"].append('部分 LitKG 原文件无法读取，相关评估使用已有分块并保留证据缺口。')
     llm = client is not None and client.enabled
     scope = graph['policy'].get('scope')
     docs_complete = bool(graph['documents']) and all(d.get('parsing_status') == 'complete' and d.get('blocks') for d in graph['documents'])

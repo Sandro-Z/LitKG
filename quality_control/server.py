@@ -3,6 +3,8 @@ import json
 import os
 import re
 import threading
+import http.client
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -11,10 +13,12 @@ from pathlib import Path
 from .engine import evaluate
 from .llm import Client, NoRedirect
 from .models import normalize, blocks, anchor, digest, public_claim, SCENARIOS, VERSION
+from .sources import attach_litkg_sources, attach_uploaded_sources
 from .store import Store
 
 STATIC = Path(__file__).parent / 'static'
 MAX_BODY = 64 * 1024 * 1024
+MAX_LITKG_EXPORT = 128 * 1024 * 1024
 
 
 class Service:
@@ -24,19 +28,31 @@ class Service:
         self.litkg_base = os.environ.get('QC_LITKG_URL', 'http://host.docker.internal:8080').rstrip('/')
         self.store.recover()
 
-    def local_get(self, path):
-        # User cannot choose arbitrary hosts, protocols, routes or redirects.
+    def local_get(self, path, *, max_bytes=MAX_BODY):
         if not re.fullmatch(r'/knowledge-bases(?:\?limit=500|/[1-9][0-9]*/quality-export)', path):
             raise ValueError('无效 LitKG 导入路径')
-        request = urllib.request.Request(self.litkg_base + path, headers={'Accept': 'application/json'})
+        request = urllib.request.Request(self.litkg_base + path, headers={"Accept": "application/json"})
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=120) as response:
-                raw = response.read(MAX_BODY + 1)
-                if len(raw) > MAX_BODY:
-                    raise ValueError('快照超过64MiB')
-                return json.loads(raw)
-        except Exception:
-            raise ValueError('LITKG_IMPORT_FAILED：请检查本机地址、API版本和快照大小') from None
+                length = response.headers.get("Content-Length", "")
+                if length.isdecimal() and int(length) > max_bytes:
+                    raise ValueError("LITKG_EXPORT_TOO_LARGE")
+                raw = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            raise ValueError(f"LITKG_UPSTREAM_HTTP_{exc.code}") from None
+        except urllib.error.URLError as exc:
+            code = "LITKG_UPSTREAM_TIMEOUT" if isinstance(exc.reason, TimeoutError) else "LITKG_UPSTREAM_UNREACHABLE"
+            raise ValueError(code) from None
+        except TimeoutError:
+            raise ValueError("LITKG_UPSTREAM_TIMEOUT") from None
+        except (OSError, http.client.HTTPException):
+            raise ValueError("LITKG_UPSTREAM_UNREACHABLE") from None
+        if len(raw) > max_bytes:
+            raise ValueError("LITKG_EXPORT_TOO_LARGE")
+        try:
+            return json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise ValueError("LITKG_UPSTREAM_INVALID_JSON") from None
 
     def submit(self, gid, mode):
         if mode not in {'automatic', 'llm'}:
@@ -135,11 +151,13 @@ def handler(service):
                 kid = body.get('knowledge_base_id')
                 if not isinstance(kid, int) or isinstance(kid, bool) or kid < 1:
                     raise ValueError('knowledge_base_id须为正整数')
-                raw = service.local_get(f'/knowledge-bases/{kid}/quality-export')
+                raw = service.local_get(f'/knowledge-bases/{kid}/quality-export', max_bytes=MAX_LITKG_EXPORT)
                 if body.get('scope'):
                     raw.setdefault('policy', {})['scope'] = body['scope']
                 graph = normalize(raw, body.get('name', ''))
-                self.reply({'id': service.store.add_graph(graph, raw)}, 201)
+                source_dir = os.environ.get("QC_LITKG_SOURCE_DIR", str(Path(__file__).resolve().parents[1] / "data" / "uploads"))
+                sources = attach_litkg_sources(graph, source_dir)
+                self.reply({"id": service.store.add_graph(graph, raw), "original_sources": sources}, 201)
             elif method == 'POST' and path == '/api/graphs':
                 body = self.body()
                 payload = body.get('payload')
@@ -154,7 +172,8 @@ def handler(service):
                         else:
                             payload.setdefault('policy', {})[field] = body[field]
                 graph = normalize(payload, body.get('name', ''), body.get('mapping'))
-                self.reply({'id': service.store.add_graph(graph, payload)}, 201)
+                sources = attach_uploaded_sources(graph, body.get("source_files", []), body.get("source_complete"))
+                self.reply({"id": service.store.add_graph(graph, payload), "original_sources": sources}, 201)
             elif method == 'GET' and path == '/api/graphs':
                 self.reply({'graphs': service.store.list_graphs()})
             elif method == 'GET' and path.startswith('/api/runs/'):
