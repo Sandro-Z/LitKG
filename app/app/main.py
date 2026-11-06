@@ -65,6 +65,17 @@ app = FastAPI(
 )
 
 
+@app.get('/knowledge-bases/{knowledge_base_id}/quality-export', tags=['quality-control'])
+def export_quality_snapshot(knowledge_base_id: int):
+    """Export claims, saved source blocks and ontology from one read-only snapshot."""
+    from app.quality_export import collect_quality_snapshot
+    with get_conn() as conn:
+        conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        with conn.cursor() as cur:
+            _get_knowledge_base(cur, knowledge_base_id)
+            return collect_quality_snapshot(cur, knowledge_base_id)
+
+
 def _get_knowledge_base(cur, knowledge_base_id: int) -> dict[str, Any]:
     cur.execute(
         """

@@ -7,6 +7,9 @@ LitKG 是一个面向生物医学文献的批量知识抽取系统。它可以�
 
 版本改动与历史修复记录见 [更新日志](changelog.md)。
 
+独立的图谱质控前端、场景评分、多图谱比较和人工溯源评审见
+[质控子系统](quality_control/README.md)，使用 `docker-compose.qc.yml` 单独部署与启停。
+
 `FMT_use` 评审修复后的完整 CSV/JSON 导出、结果语义、图谱截断提示、
 输入质量定位与默认 dry-run 的定向修复/回滚，见 [使用与迁移说明](docs/FMT-review-fixes.md)。
 

@@ -31,6 +31,28 @@ class ApiTests(unittest.TestCase):
         cursor.fetchall.return_value = rows or []
         return context, cursor
 
+    def test_quality_export_is_one_read_only_snapshot(self):
+        connection, cursor = self.connection(row={"id": 3})
+        snapshot = {"claims": [], "documents": [], "policy": {"scope": None}}
+        with patch.object(self.main, 'get_conn', return_value=connection), patch(
+            'app.quality_export.collect_quality_snapshot', return_value=snapshot
+        ) as collect:
+            response = self.client.get('/knowledge-bases/3/quality-export')
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(snapshot, response.json())
+        connection.__enter__.return_value.execute.assert_called_once_with(
+            'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        collect.assert_called_once_with(cursor, 3)
+
+    def test_quality_export_rejects_unknown_knowledge_base(self):
+        connection, _ = self.connection(row=None)
+        with patch.object(self.main, 'get_conn', return_value=connection), patch(
+            'app.quality_export.collect_quality_snapshot'
+        ) as collect:
+            response = self.client.get('/knowledge-bases/999/quality-export')
+        self.assertEqual(404, response.status_code)
+        collect.assert_not_called()
+
     def test_shared_microbiome_vocabularies_are_available_without_database_access(self):
         with patch.object(self.main, 'get_conn', side_effect=AssertionError('Vocabulary is local')):
             types = self.client.get('/entity-types')
