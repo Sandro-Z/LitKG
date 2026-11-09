@@ -1,5 +1,8 @@
 """Dependency-free single-user HTTP service and static review frontend."""
 import json
+import logging
+import sqlite3
+import time
 import os
 import re
 import threading
@@ -14,7 +17,7 @@ from .engine import evaluate
 from .llm import Client, NoRedirect
 from .models import normalize, blocks, anchor, digest, public_claim, SCENARIOS, VERSION
 from .sources import attach_litkg_sources, attach_uploaded_sources
-from .store import Store
+from .store import ActiveGraphRunError, Store
 
 STATIC = Path(__file__).parent / 'static'
 MAX_BODY = 64 * 1024 * 1024
@@ -62,12 +65,32 @@ class Service:
         rid = self.store.start_run(gid, mode)
         def work():
             try:
+                if self.store.run_cancel_requested(rid):
+                    self.store.update_run(rid, 'cancelled', error='RUN_CANCELLED')
+                    return
                 self.store.update_run(rid, 'running')
                 graph = self.store.graph(gid)
-                result = evaluate(graph, self.client_factory() if mode == 'llm' else None,
-                                  lambda report: self.store.update_run(rid, 'running', report),
-                                  max_chars=int(os.environ.get('QC_CONTEXT_CHARS', '48000')))
-                self.store.update_run(rid, 'completed', result)
+                client = self.client_factory() if mode == 'llm' else None
+                last_checkpoint = time.monotonic() - 5
+
+                def stop_reason():
+                    if self.store.run_cancel_requested(rid):
+                        return 'RUN_CANCELLED'
+                    return None
+
+                if client is not None:
+                    client.cancel_check = stop_reason
+
+                def checkpoint(report):
+                    nonlocal last_checkpoint
+                    now = time.monotonic()
+                    if now - last_checkpoint >= 5:
+                        self.store.update_run(rid, 'running', report)
+                        last_checkpoint = now
+
+                result = evaluate(graph, client, checkpoint, max_chars=int(os.environ.get('QC_CONTEXT_CHARS', '48000')), stop_reason=stop_reason)
+                failure = result.get('failure_code')
+                self.store.update_run(rid, 'failed' if failure else 'completed', result, error=failure)
             except Exception:
                 # Provider errors, imported data and local configuration never go into logs.
                 self.store.update_run(rid, 'failed', error='REVIEW_FAILED')
@@ -175,17 +198,57 @@ def handler(service):
                 sources = attach_uploaded_sources(graph, body.get("source_files", []), body.get("source_complete"))
                 self.reply({"id": service.store.add_graph(graph, payload), "original_sources": sources}, 201)
             elif method == 'GET' and path == '/api/graphs':
+                if urllib.parse.parse_qs(parts.query).get('view') == ['overview']:
+                    self.reply({'graphs': service.store.list_graph_overviews()})
+                    return
                 self.reply({'graphs': service.store.list_graphs()})
+            elif method == 'POST' and re.fullmatch(r'/api/runs/[^/]+/cancel', path):
+                self.body()
+                run_id = path.split('/')[3]
+                if service.store.request_run_cancel(run_id):
+                    self.reply({'cancel_requested': True}, 202)
+                else:
+                    self.reply({'error': 'RUN_NOT_ACTIVE'}, 409)
             elif method == 'GET' and path.startswith('/api/runs/'):
                 self.reply(service.store.run(path.split('/')[-1]))
             elif path.startswith('/api/graphs/'):
                 pieces = path.strip('/').split('/')
                 gid = pieces[2]
-                graph = service.store.graph(gid)
                 action = pieces[3] if len(pieces) > 3 else ''
+                if method == 'POST' and action == 'delete' and len(pieces) == 4:
+                    if self.body().get('confirm_graph_id') != gid:
+                        raise ValueError('GRAPH_DELETE_CONFIRMATION_REQUIRED')
+                    try:
+                        service.store.delete_graph(gid)
+                    except ActiveGraphRunError:
+                        self.reply({'error': 'GRAPH_REVIEW_ACTIVE'}, 409)
+                    except sqlite3.Error as exc:
+                        code = getattr(exc, 'sqlite_errorcode', 0) & 255
+                        logging.getLogger(__name__).warning('graph delete failed (sqlite code %d)', code)
+                        if code == sqlite3.SQLITE_FULL:
+                            self.reply({'error': 'GRAPH_DELETE_DISK_FULL'}, 507)
+                        elif code in (sqlite3.SQLITE_READONLY, sqlite3.SQLITE_PERM, sqlite3.SQLITE_AUTH):
+                            self.reply({'error': 'GRAPH_DELETE_DATABASE_READ_ONLY'}, 500)
+                        elif code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                            self.reply({'error': 'GRAPH_DELETE_BUSY'}, 503)
+                        elif code == sqlite3.SQLITE_CONSTRAINT:
+                            self.reply({'error': 'GRAPH_DELETE_CONFLICT'}, 409)
+                        else:
+                            self.reply({'error': 'GRAPH_DELETE_STORAGE_ERROR'}, 500)
+                    else:
+                        self.reply({'deleted': gid})
+                    return
+                if method == 'GET' and action == 'report':
+                    offset = urllib.parse.parse_qs(parts.query).get('offset', ['0'])[0]
+                    if not re.fullmatch(r'[0-9]{1,8}', offset):
+                        raise ValueError('INVALID_REPORT_OFFSET')
+                    self.reply({'run': service.store.latest_run_page(gid, int(offset))})
+                    return
                 if method == 'GET' and not action:
+                    graph = service.store.graph(gid)
                     self.reply(dict(id=gid, graph=graph, latest_run=service.store.latest_run(gid)))
                 elif method == 'GET' and action == 'export':
+                    graph = service.store.graph(gid)
                     self.reply(dict(graph=graph, run=service.store.latest_run(gid), human=service.store.sample_state(gid)))
                 elif method == 'POST' and action == 'runs':
                     self.reply(service.submit(gid, self.body().get('mode', 'automatic')), 202)
@@ -204,13 +267,9 @@ def handler(service):
                     self.reply(service.store.review(gid, body.get('claim_id'), body.get('reviewer'), body.get('verdict'), body.get('note', ''), body.get('round_id')))
                 elif method == 'GET' and action == 'claims' and len(pieces) == 5:
                     cid = urllib.parse.unquote(pieces[4])
-                    claim = next((c for c in graph['claims'] if c['id'] == cid), None)
-                    if claim is None:
-                        raise KeyError()
+                    claim, graph, extra = service.store.claim_context(gid, cid)
                     corpus = blocks(graph)
                     evidence = []
-                    latest = service.store.latest_run(gid)
-                    extra = [r for a in (latest or {}).get('report', {}).get('assessments', []) if a['claim_id'] == cid for r in a.get('evidence', [])] if (latest or {}).get('report') else []
                     for ref in claim['source_refs'] + extra:
                         a = anchor(ref, corpus)
                         doc = str(ref.get('doc_id', ref.get('document_id')))
@@ -234,9 +293,24 @@ def handler(service):
     return Handler
 
 
+def configure_sqlite_temp(db_path):
+    """Keep SQLite spill files off the container's small temporary filesystem."""
+    configured = os.environ.get('SQLITE_TMPDIR')
+    if configured:
+        temp_dir = Path(configured)
+    else:
+        temp_dir = Path(db_path).resolve().parent / '.sqlite-tmp'
+        temp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if temp_dir.is_symlink() or not temp_dir.is_dir() or not os.access(temp_dir, os.W_OK | os.X_OK):
+        raise RuntimeError('SQLITE_TEMP_DIRECTORY_UNWRITABLE')
+    os.environ['SQLITE_TMPDIR'] = str(temp_dir)
+
+
 def main():
     os.umask(0o077)
-    store = Store(os.environ.get('QC_DB_PATH', '/data/quality.sqlite3'))
+    db_path = os.environ.get('QC_DB_PATH', '/data/quality.sqlite3')
+    configure_sqlite_temp(db_path)
+    store = Store(db_path)
     service = Service(store)
     server = ThreadingHTTPServer((os.environ.get('QC_BIND', '127.0.0.1'), int(os.environ.get('QC_PORT', '8090'))), handler(service))
     server.serve_forever()

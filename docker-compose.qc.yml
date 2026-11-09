@@ -8,6 +8,9 @@ services:
     ports:
       - "0.0.0.0:${QC_PORT:-8090}:8090"
     environment:
+      REVIEW_LLM_TIMEOUT_SECONDS: ${REVIEW_LLM_TIMEOUT_SECONDS:-300}
+      REVIEW_LLM_MAX_OUTPUT_TOKENS: ${REVIEW_LLM_MAX_OUTPUT_TOKENS:-16384}
+      SQLITE_TMPDIR: /tmp
       QC_LITKG_URL: ${QC_LITKG_URL:-http://host.docker.internal:8080}
       QC_LITKG_SOURCE_DIR: /litkg-sources
       QC_LLM_BASE_URL: ${QC_LLM_BASE_URL:-}
@@ -17,6 +20,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      - review_tmp:/tmp
       - "${QC_LITKG_UPLOAD_DIR:-./data/uploads}:/litkg-sources:ro"
       - qc_data:/data
       - ./quality_control/secrets:/run/secrets:ro
@@ -25,8 +29,7 @@ services:
     cap_drop:
       - ALL
     read_only: true
-    tmpfs:
-      - /tmp:size=32m,mode=1777
     stop_grace_period: 10s
 volumes:
+  review_tmp:
   qc_data:

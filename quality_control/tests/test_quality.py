@@ -1,3 +1,4 @@
+import io
 import copy
 import importlib.util
 import json
@@ -223,6 +224,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(r['scenarios']['field_review']['overall'])
         self.assertIn('LLM_HTTP_503', [e['code'] for e in r['errors']])
 
+    def test_consecutive_bad_requests_stop_review(self):
+        source = fixture()
+        block = source['documents'][0]['blocks'][0]
+        source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(6)]
+        client = FakeLLM()
+        calls = []
+
+        def reject(prompt, data):
+            calls.append(data)
+            raise LLMError('LLM_HTTP_400')
+
+        client.ask = reject
+        report = evaluate(normalize(source), client)
+        self.assertEqual(3, len(calls))
+        self.assertEqual('LLM_REPEATED_HTTP_400', report['failure_code'])
+        self.assertEqual([], report['assessments'])
+        self.assertEqual(3, len(report['document_coverage']))
+        self.assertFalse(report['complete'])
+
+    def test_claim_request_failure_skips_rubric_and_verdict(self):
+        client = FakeLLM()
+        original = client.ask
+        calls = []
+
+        def reject_claim(prompt, data):
+            calls.append(data)
+            if 'claims' in data and 'candidates' not in data:
+                raise LLMError('LLM_HTTP_400')
+            return original(prompt, data)
+
+        client.ask = reject_claim
+        report = evaluate(normalize(fixture()), client)
+        self.assertEqual([], report['assessments'])
+        self.assertFalse(any('claim' in data for data in calls))
+        failures = [error for error in report['errors'] if error['code'] == 'LLM_HTTP_400']
+        self.assertEqual(1, len(failures))
+        self.assertTrue(failures[0]['claim_id'])
+        self.assertNotIn('failure_code', report)
+
     def test_misrepresentation_is_not_duplicate_omission(self):
         r = evaluate(normalize(fixture()), FakeLLM(match='misrepresented'))
         self.assertEqual({'misrepresented': 1}, r['metrics']['candidate_counts'])
@@ -304,6 +344,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(r['field_review']['overall'])
         self.assertLess(r['field_review']['measured_weight'], 1)
 
+    def test_three_timeouts_stop_extraction_before_remaining_blocks(self):
+        source = fixture()
+        block = source['documents'][0]['blocks'][0]
+        source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(7)]
+        client = FakeLLM()
+        calls = []
+
+        def timeout(prompt, data):
+            calls.append(data)
+            raise LLMError('LLM_TIMEOUT')
+
+        client.ask = timeout
+        report = evaluate(normalize(source), client)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(3, report['progress']['requests'])
+        self.assertEqual('LLM_REPEATED_TIMEOUT', report['failure_code'])
+        self.assertEqual([], report['assessments'])
+        self.assertFalse(report['complete'])
+
+    def test_run_limit_preserves_progress_and_prevents_further_calls(self):
+        source = fixture()
+        block = source['documents'][0]['blocks'][0]
+        source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(7)]
+        client = FakeLLM()
+        original = client.ask
+        calls = []
+
+        def record(prompt, data):
+            calls.append(data)
+            return original(prompt, data)
+
+        client.ask = record
+        report = evaluate(normalize(source), client,
+                        stop_reason=lambda: 'RUN_TIME_LIMIT' if calls else None)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, report['progress']['requests'])
+        self.assertEqual('RUN_TIME_LIMIT', report['failure_code'])
+        self.assertFalse(report['complete'])
+
+
 
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -352,6 +432,54 @@ class PersistenceTests(unittest.TestCase):
     def test_no_duplicate_running_job(self):
         self.store.start_run(self.gid, 'llm')
         with self.assertRaises(ValueError): self.store.start_run(self.gid, 'llm')
+
+    def test_delete_graph_removes_all_results_and_preserves_other_graphs(self):
+        import sqlite3
+
+        target = self.gid
+        other = self.store.add_graph(self.graph, fixture())
+
+        def add_results(graph_id):
+            run_ids = []
+            for status in ('completed', 'failed'):
+                run_id = self.store.start_run(graph_id, 'llm')
+                self.store.update_run(run_id, status, {'assessments': []})
+                run_ids.append(run_id)
+            for index in range(2):
+                state = self.store.sample(graph_id, True, bool(index), 'fixture round')
+                sample = state['sample']
+                self.store.review(graph_id, sample['claim_ids'][0], 'fixture reviewer',
+                                  'supported', 'fixture rationale', sample['id'])
+            return run_ids
+
+        removed_runs = add_results(target)
+        retained_runs = add_results(other)
+
+        def result_counts(graph_id):
+            with self.store.connect() as db:
+                return [db.execute(f'SELECT COUNT(*) FROM {table} WHERE graph_id=?', (graph_id,)).fetchone()[0]
+                        for table in ('runs', 'samples', 'review_rounds', 'reviews')]
+
+        self.assertEqual([2, 1, 2, 2], result_counts(target))
+        with self.store.connect() as db:
+            db.execute("""CREATE TRIGGER reject_delete BEFORE DELETE ON graphs
+                        BEGIN SELECT RAISE(ABORT, 'test rollback'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.delete_graph(target)
+        self.assertEqual([2, 1, 2, 2], result_counts(target))
+        with self.store.connect() as db:
+            db.execute('DROP TRIGGER reject_delete')
+
+        self.store.delete_graph(target)
+        self.assertEqual([0, 0, 0, 0], result_counts(target))
+        with self.assertRaises(KeyError):
+            self.store.graph(target)
+        for run_id in removed_runs:
+            with self.assertRaises(KeyError):
+                self.store.run(run_id)
+        self.assertEqual([2, 1, 2, 2], result_counts(other))
+        self.assertEqual(other, self.store.run(retained_runs[0])['graph_id'])
+
 
 
 class HTTPTests(unittest.TestCase):
@@ -403,6 +531,188 @@ class HTTPTests(unittest.TestCase):
         with patch.object(self.service, 'local_get', return_value=fixture()) as get:
             self.request('/api/import/litkg', {'knowledge_base_id': 2})
             get.assert_called_once_with('/knowledge-bases/2/quality-export', max_bytes=128 * 1024 * 1024)
+
+    def test_graph_delete_requires_confirmation_and_rejects_active_runs(self):
+        graph_id = self.request('/api/graphs', {'payload': fixture()})['id']
+        path = f'/api/graphs/{graph_id}/delete'
+        body = {'confirm_graph_id': graph_id}
+        with self.assertRaises(urllib.error.HTTPError) as wrong:
+            self.request(path, {'confirm_graph_id': 'different'})
+        with wrong.exception as response:
+            self.assertEqual(400, response.code)
+            self.assertEqual('GRAPH_DELETE_CONFIRMATION_REQUIRED', json.load(response)['error'])
+        with self.assertRaises(urllib.error.HTTPError) as origin:
+            self.request(path, body, {'Content-Type': 'application/json', 'Origin': 'https://example.invalid'})
+        with origin.exception as response:
+            self.assertEqual(403, response.code)
+
+        run_id = self.service.store.start_run(graph_id, 'llm')
+        for status in ('queued', 'running'):
+            self.service.store.update_run(run_id, status)
+            with self.assertRaises(urllib.error.HTTPError) as busy:
+                self.request(path, body)
+            with busy.exception as response:
+                self.assertEqual(409, response.code)
+                self.assertEqual('GRAPH_REVIEW_ACTIVE', json.load(response)['error'])
+            self.assertEqual(status, self.service.store.run(run_id)['status'])
+
+        self.service.store.update_run(run_id, 'failed', {'errors': []})
+        self.assertEqual({'deleted': graph_id}, self.request(path, body))
+        self.assertEqual([], self.request('/api/graphs')['graphs'])
+        for missing_path in (f'/api/graphs/{graph_id}/export', f'/api/runs/{run_id}'):
+            with self.assertRaises(urllib.error.HTTPError) as missing:
+                self.request(missing_path)
+            with missing.exception as response:
+                self.assertEqual(404, response.code)
+        with self.assertRaises(urllib.error.HTTPError) as repeat:
+            self.request(path, body)
+        with repeat.exception as response:
+            self.assertEqual(404, response.code)
+
+    def test_cancel_review_preserves_report_and_is_scoped_to_one_run(self):
+        first = self.request('/api/graphs', {'payload': fixture()})['id']
+        second = self.request('/api/graphs', {'payload': fixture()})['id']
+        store = self.service.store
+        first_run = store.start_run(first, 'llm')
+        second_run = store.start_run(second, 'llm')
+        store.update_run(first_run, 'running', {'progress': {'requests': 2}})
+        self.assertEqual({'cancel_requested': True}, self.request(f'/api/runs/{first_run}/cancel', {}))
+        self.assertTrue(store.run_cancel_requested(first_run))
+        self.assertFalse(store.run_cancel_requested(second_run))
+        store.update_run(first_run, 'running', {'progress': {'requests': 3}})
+        self.assertTrue(store.run_cancel_requested(first_run))
+        store.update_run(first_run, 'completed', {'progress': {'requests': 3}, 'complete': True})
+        result = self.request(f'/api/runs/{first_run}')
+        self.assertEqual('cancelled', result['status'])
+        self.assertEqual('RUN_CANCELLED', result['error'])
+        self.assertEqual(3, result['report']['progress']['requests'])
+        self.assertFalse(result['report']['complete'])
+        self.assertEqual('queued', self.request(f'/api/runs/{second_run}')['status'])
+        with self.assertRaises(urllib.error.HTTPError) as conflict:
+            self.request(f'/api/runs/{first_run}/cancel', {})
+        with conflict.exception as response:
+            self.assertEqual(409, response.code)
+
+    def test_cancel_stops_worker_after_current_model_request(self):
+        source = fixture()
+        block = source['documents'][0]['blocks'][0]
+        source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(4)]
+        graph_id = self.request('/api/graphs', {'payload': source})['id']
+        client = FakeLLM()
+        original = client.ask
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def block_first_request(prompt, data):
+            calls.append(data)
+            started.set()
+            if not release.wait(5):
+                raise AssertionError('fixture request was not released')
+            return original(prompt, data)
+
+        client.ask = block_first_request
+        self.service.client_factory = lambda: client
+        run_id = self.service.submit(graph_id, 'llm')['id']
+        try:
+            self.assertTrue(started.wait(3))
+            self.assertEqual({'cancel_requested': True},
+                             self.request(f'/api/runs/{run_id}/cancel', {}))
+        finally:
+            release.set()
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            run = self.request(f'/api/runs/{run_id}')
+            if run['status'] not in ('queued', 'running'):
+                break
+            time.sleep(0.01)
+        self.assertEqual('cancelled', run['status'])
+        self.assertEqual('RUN_CANCELLED', run['error'])
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, run['report']['progress']['requests'])
+        self.assertFalse(run['report']['complete'])
+
+    def test_graph_overview_and_report_pages_keep_bulk_data_off_polling(self):
+        source = fixture()
+        claim = source['claims'][0]
+        source['claims'] = [dict(claim, id=str(i)) for i in range(110)]
+        graph_id = self.request('/api/graphs', {'payload': source})['id']
+        store = self.service.store
+        run_id = store.start_run(graph_id, 'llm')
+        assessments = [{'claim_id': str(i), 'verdict': 'SUPPORTED'} for i in range(110)]
+        store.update_run(run_id, 'completed', {'assessments': assessments, 'dimensions': {'ontology': 80},
+                                               'errors': [{'code': 'TEST'}] * 110})
+        with patch.object(store, 'graph', side_effect=AssertionError('overview must not deserialize the graph')):
+            graph = self.request('/api/graphs?view=overview')['graphs'][0]
+            self.assertEqual(110, graph['claim_count'])
+            self.assertEqual(run_id, graph['latest_run']['id'])
+            self.assertEqual({'ontology': 80}, graph['latest_run']['report']['dimensions'])
+            self.assertNotIn('assessments', graph['latest_run']['report'])
+            page = self.request(f'/api/graphs/{graph_id}/report?offset=50')['run']['report']
+            self.assertEqual(110, page['preview']['assessments'])
+            self.assertEqual(50, len(page['assessments']))
+            self.assertEqual('50', page['assessments'][0]['claim_id'])
+            self.assertEqual(80, len(page['errors']))
+            self.assertEqual(110, page['preview']['errors'])
+            self.assertIn('history', self.request(f'/api/graphs/{graph_id}/sample'))
+            detail = self.request(f'/api/graphs/{graph_id}/claims/0')
+            self.assertIn('claim', detail)
+            self.assertIn('evidence', detail)
+        self.assertEqual(110, len(self.request(f'/api/runs/{run_id}')['report']['assessments']))
+        self.request(f'/api/graphs/{graph_id}/delete', {'confirm_graph_id': graph_id})
+        self.assertEqual([], self.request('/api/graphs?view=overview')['graphs'])
+
+    def test_delete_storage_errors_have_specific_responses(self):
+        import sqlite3
+        graph_id = self.request('/api/graphs', {'payload': fixture()})['id']
+        failure = sqlite3.OperationalError('fixture database busy')
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        with patch.object(self.service.store, 'delete_graph', side_effect=failure):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(f'/api/graphs/{graph_id}/delete', {'confirm_graph_id': graph_id})
+            with error.exception as response:
+                self.assertEqual(503, response.code)
+                self.assertEqual('GRAPH_DELETE_BUSY', json.load(response)['error'])
+        self.assertEqual(graph_id, self.request('/api/graphs?view=overview')['graphs'][0]['id'])
+
+    def test_delete_reports_storage_exhaustion_separately(self):
+        import sqlite3
+
+        graph_id = self.request('/api/graphs', {'payload': fixture()})['id']
+        failure = sqlite3.OperationalError('fixture storage exhausted')
+        failure.sqlite_errorcode = sqlite3.SQLITE_FULL
+        with patch.object(self.service.store, 'delete_graph', side_effect=failure):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(f'/api/graphs/{graph_id}/delete', {'confirm_graph_id': graph_id})
+            with error.exception as response:
+                self.assertEqual(507, response.code)
+                self.assertEqual('GRAPH_DELETE_DISK_FULL', json.load(response)['error'])
+        self.assertEqual(graph_id, self.request('/api/graphs?view=overview')['graphs'][0]['id'])
+
+    def test_sqlite_temp_is_private_and_next_to_database(self):
+        from importlib import import_module
+        from stat import S_IMODE
+
+        configure = import_module('quality_control.server').configure_sqlite_temp
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ):
+            os.environ.pop('SQLITE_TMPDIR', None)
+            database = Path(directory) / 'data' / 'review.sqlite3'
+            configure(database)
+            expected = database.parent / '.sqlite-tmp'
+            self.assertEqual(expected, Path(os.environ['SQLITE_TMPDIR']))
+            self.assertEqual(0o700, S_IMODE(expected.stat().st_mode))
+            os.environ['SQLITE_TMPDIR'] = directory
+            configure(database)
+            self.assertEqual(directory, os.environ['SQLITE_TMPDIR'])
+            os.environ['SQLITE_TMPDIR'] = str(Path(directory) / 'missing')
+            with self.assertRaisesRegex(RuntimeError, 'SQLITE_TEMP_DIRECTORY_UNWRITABLE'):
+                configure(database)
+
+
+
+
+
 
 
 class ExportTests(unittest.TestCase):
@@ -461,12 +771,104 @@ class TransportTests(unittest.TestCase):
         finally:
             server.shutdown();server.server_close()
 
+    def test_unsupported_response_format_uses_prompt_json(self):
+        payloads = []
+
+        class Response(io.BytesIO):
+            pass
+
+        class Opener:
+            def open(self, request, timeout):
+                payload = json.loads(request.data)
+                payloads.append(payload)
+                if 'response_format' in payload:
+                    body = io.BytesIO(b'{"error":{"param":"response_format","message":"unsupported"}}')
+                    raise urllib.error.HTTPError(request.full_url, 400, 'Bad Request', {}, body)
+                return Response(b'{"choices":[{"message":{"content":"{\\"ok\\":true}"}}]}')
+
+        with patch.dict(os.environ, {'QC_LLM_BASE_URL': 'http://example.invalid/v1', 'QC_LLM_MODEL': 'fixture', 'QC_LLM_API_KEY_FILE': '', 'QC_LLM_API_KEY': ''}):
+            client = Client()
+            with patch.object(urllib.request, 'build_opener', return_value=Opener()):
+                self.assertEqual({'ok': True}, client.ask('Return JSON.', {}))
+                self.assertEqual({'ok': True}, client.ask('Return JSON.', {}))
+
+        self.assertEqual([True, False, False], ['response_format' in p for p in payloads])
+        self.assertTrue(all(p['temperature'] == 0 for p in payloads))
+
     def test_unreadable_key_does_not_disable_local_checks(self):
         with patch.dict(os.environ, {'QC_LLM_BASE_URL': 'http://localhost:1/v1', 'QC_LLM_MODEL': 'fixture',
                                      'QC_LLM_API_KEY_FILE': '/nonexistent-qc-fixture'}):
             client = Client()
         self.assertFalse(client.enabled)
         self.assertEqual('LLM_KEY_FILE_UNREADABLE', client.configuration_error)
+
+    def test_model_timeout_is_distinct_from_malformed_response(self):
+        client = Client()
+        client.enabled = True
+        self.assertEqual(300, client.request_timeout)
+        with patch.object(client, '_request_json', side_effect=urllib.error.URLError(TimeoutError())):
+            with self.assertRaisesRegex(LLMError, '^LLM_TIMEOUT$'):
+                client.ask('Return JSON.', {})
+        with patch.object(client, '_request_json', side_effect=ValueError()):
+            with self.assertRaises(LLMError) as invalid:
+                client.ask('Return JSON.', {})
+        self.assertNotEqual('LLM_TIMEOUT', str(invalid.exception))
+
+    def test_streaming_json_preserves_usage_and_rejects_incomplete_stream(self):
+        import importlib
+        import io
+        module = importlib.import_module(Client.__module__)
+        events = [
+            {"choices": [{"index": 0, "delta": {"content": "{\"ok\":"}, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"content": "true}"}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"completion_tokens": 6}},
+        ]
+        newline = chr(10)
+        body = "".join("data: " + json.dumps(event) + newline * 2 for event in events)
+        body += "data: [DONE]" + newline * 2
+        result = module._read_review_stream(io.BytesIO(body.encode()))
+        self.assertEqual({"ok": True}, json.loads(result["choices"][0]["message"]["content"]))
+        self.assertEqual(6, result["usage"]["completion_tokens"])
+        with self.assertRaisesRegex(LLMError, "LLM_INCOMPLETE_STREAM"):
+            module._read_review_stream(io.BytesIO(("data: {}" + newline * 2).encode()))
+        with self.assertRaisesRegex(LLMError, "LLM_CANCELLED"):
+            module._read_review_stream(io.BytesIO(body.encode()), lambda: "cancelled")
+
+    def test_evidence_ids_resolve_to_exact_source_and_reject_unknown_ids(self):
+        import importlib
+        module = importlib.import_module(Client.__module__)
+        text = "First fact." + chr(10) + "Second fact. " + "x" * 1200
+        data = {'blocks': [{"doc_id": "636", "id": "fixture", "text": text, 'window_start': 100}]}
+        prepared, evidence = module._prepare_review_evidence(data)
+        self.assertEqual(text, data['blocks'][0]["text"])
+        self.assertEqual(text, "".join(item["quote"] for item in evidence.values()))
+        for item in evidence.values():
+            self.assertEqual(item["quote"], text[item["start"] - 100:item["end"] - 100])
+        identifier = next(iter(evidence))
+        value = module._resolve_review_evidence({"citations": [{"evidence_id": identifier, "kind": "support"}]}, evidence)
+        self.assertEqual(evidence[identifier]["quote"], value["citations"][0]["quote"])
+        self.assertEqual("support", value["citations"][0]["kind"])
+        with self.assertRaisesRegex(LLMError, "LLM_INVALID_EVIDENCE_ID"):
+            module._resolve_review_evidence({"evidence_id": "UNKNOWN"}, evidence)
+        self.assertIn(identifier, prepared['blocks'][0]["text"])
+
+    def test_qwen3_requests_explicit_output_budget_and_disable_thinking(self):
+        from unittest.mock import patch
+        client = Client()
+        client.enabled = True
+        client.model = "Qwen3-fixture"
+        captured = []
+        def response(payload, headers):
+            captured.append(payload)
+            return {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+        with patch.dict(os.environ, {'REVIEW_LLM_MAX_OUTPUT_TOKENS': "4096"}):
+            with patch.object(client, '_request_json', side_effect=response):
+                client.ask("Return a JSON object.", {})
+        self.assertEqual(4096, captured[0]["max_tokens"])
+        self.assertTrue(captured[0]["stream"])
+        self.assertEqual({"include_usage": True}, captured[0]["stream_options"])
+        self.assertEqual({"enable_thinking": False}, captured[0]["chat_template_kwargs"])
+
 
 
 if __name__ == '__main__': unittest.main()

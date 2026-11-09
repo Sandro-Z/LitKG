@@ -15,7 +15,7 @@ VERDICTS = {'SUPPORTED', 'PARTIALLY_SUPPORTED', 'CONTRADICTED', 'UNSUPPORTED', '
 MATCHES = {'matched', 'misrepresented', 'missing', 'ambiguous', 'out_of_scope'}
 
 
-def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000):
+def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000, *, stop_reason=None):
     corpus = review_blocks(blocks(graph))
     nodes = {n['id']: n for n in graph['nodes']}
     formal = validate(graph)
@@ -32,21 +32,54 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
     docs_complete = bool(graph['documents']) and all(d.get('parsing_status') == 'complete' and d.get('blocks') for d in graph['documents'])
     parsed_claims = [public_claim(c, nodes) for c in graph['claims']]
 
-    def ask(stage, data, prompt):
-        if len(json.dumps(data, ensure_ascii=False)) > max_chars:
-            report['errors'].append(dict(stage=stage, code='CONTEXT_LIMIT', note='未截断原文；该批次保留未审'))
+    last_rejection, rejection_streak = None, 0
+
+    def stopped():
+        if stop_reason is not None and not report.get('failure_code'):
+            reason = stop_reason()
+            if reason:
+                report['failure_code'] = reason
+        return bool(report.get('failure_code'))
+
+    def ask(stage, data, prompt, *, _recover_truncation=False, **target):
+        nonlocal last_rejection, rejection_streak
+        if stopped():
             return None
+        if len(json.dumps(data, ensure_ascii=False)) > max_chars:
+            report['errors'].append(dict(stage=stage, code='CONTEXT_LIMIT', note='未截断原文；该批次保留未审', **target))
+            return None
+        progress = report.setdefault('progress', {'requests': 0})
+        progress['requests'] += 1
+        progress['stage'] = stage
         try:
             value = client.ask(prompt, data)
             if not isinstance(value, dict):
                 raise LLMError('LLM_INVALID_JSON_OBJECT')
+            last_rejection, rejection_streak = None, 0
             return value
         except LLMError as exc:
             # Only the transport's fixed, non-sensitive codes may leave it.
+            if _recover_truncation and str(exc) == "LLM_TRUNCATED_RESPONSE":
+                raise
             code = str(exc)
             if not re.fullmatch(r'LLM_[A-Z_0-9]+', code):
                 code = 'LLM_FAILURE'
-            report['errors'].append(dict(stage=stage, code=code))
+            error = dict(stage=stage, code=code, **target)
+            if exc.http_400_reason is not None:
+                error['reason'] = exc.http_400_reason
+            report['errors'].append(error)
+            failure_codes = {
+                'LLM_HTTP_400': 'LLM_REPEATED_HTTP_400',
+                'LLM_TIMEOUT': 'LLM_REPEATED_TIMEOUT',
+                'LLM_TRANSPORT_ERROR': 'LLM_REPEATED_TRANSPORT_ERROR',
+            }
+            if code in failure_codes:
+                rejection_streak = rejection_streak + 1 if last_rejection == code else 1
+                last_rejection = code
+                if rejection_streak >= 3:
+                    report['failure_code'] = failure_codes[code]
+            else:
+                last_rejection, rejection_streak = None, 0
             return None
 
     def evidence(items, allowed=None, default_role='supports'):
@@ -109,9 +142,27 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 start = max(start + 1, end - 200)
             if not text:
                 units.append((key, dict(original, window_start=0, window_end=0)))
-        for key, block in units:
+        while units:
+            key, block = units.pop(0)
+            if stopped():
+                break
             data = dict(scope=scope, blocks=[block])
-            response = ask('extraction', data, EXTRACT)
+            try:
+                response = ask('extraction', data, EXTRACT, doc_id=key[0], block_id=key[1], _recover_truncation=len(block['text']) > 1600)
+            except LLMError:
+                _split_text = block["text"]
+                _middle = len(_split_text) // 2
+                _boundary = _split_text.rfind("\n", len(_split_text) // 3, len(_split_text) * 2 // 3)
+                if _boundary >= 0:
+                    _middle = _boundary + 1
+                _left_end = min(len(_split_text), _middle + 200)
+                _right_start = max(0, _middle - 200)
+                _offset = block.get('window_start', 0)
+                _left = dict(block, text=_split_text[:_left_end], window_start=_offset, window_end=_offset + _left_end)
+                _right = dict(block, text=_split_text[_right_start:], window_start=_offset + _right_start, window_end=_offset + len(_split_text))
+                units[0:0] = [(key, _left), (key, _right)]
+                report["llm_truncation_retries"] = report.get("llm_truncation_retries", 0) + 1
+                continue
             ok = response is not None and isinstance(response.get('candidates'), list)
             if response is not None:
                 for field in ('candidates', 'noun_phrases', 'predicate_mentions', 'negations'):
@@ -171,8 +222,10 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
     # Freeze before exposing the graph to any matching request.
     checkpoint(report)
 
-    if llm:
+    if llm and not stopped():
         for claim, public in zip(graph['claims'], parsed_claims):
+            if stopped():
+                break
             refs = claim.get('source_refs', [])
             doc_ids = {str(r.get('doc_id', r.get('document_id'))) for r in refs if isinstance(r, dict)
                        and r.get('doc_id', r.get('document_id')) is not None}
@@ -220,7 +273,10 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 source_complete = False
                 report['limitations'].append('声明 ' + claim['id'] + ' 使用锚点/词项与邻块检索；未穷尽关联全文，禁止判 UNSUPPORTED')
             response = ask('fidelity', dict(scope=scope, source_complete=source_complete,
-                                           claims=[public], blocks=list(relevant.values())), FIDELITY)
+                                           claims=[public], blocks=list(relevant.values())), FIDELITY, claim_id=claim['id'])
+            if response is None:
+                checkpoint(report)
+                continue
             values = response.get('assessments') if response else None
             if values is None and response and 'verdict' in response:
                 values = [response]
@@ -234,7 +290,7 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 value = (a.get('rubric') or {}).get(field, a.get(field)) if isinstance(a.get('rubric', {}), dict) else a.get(field)
                 dimension_values[field] = measure(value, field, refs) or measure(a.get(field), field, refs)
             if any(v is None for v in dimension_values.values()) and relevant:
-                rubric = ask('rubric', dict(scope=scope, claim=public, blocks=list(relevant.values())), RUBRIC)
+                rubric = ask('rubric', dict(scope=scope, claim=public, blocks=list(relevant.values())), RUBRIC, claim_id=claim['id'])
                 if rubric and str(rubric.get('claim_id', claim['id'])) == claim['id']:
                     rubric_refs = [r for r in evidence(rubric.get('evidence'), set(relevant))
                                    if r['quote'] in relevant[(r['doc_id'], r['block_id'])]['text']]
@@ -265,8 +321,10 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
             checkpoint(report)
 
     # Matching is a separate model invocation after source candidates are frozen.
-    if llm:
+    if llm and not stopped():
         for candidate in report['candidates']:
+            if stopped():
+                break
             refs = candidate['evidence'][:3]
             source_views = {}
             for ref in refs:
@@ -286,7 +344,9 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
             batches.append(batch)
             batch_matches, all_issues = [], []
             for batch in batches:
-                response = ask('matching', dict(base, claims=batch, graph_complete=len(batches) == 1), MATCH)
+                response = ask('matching', dict(base, claims=batch, graph_complete=len(batches) == 1), MATCH, candidate_id=candidate['id'])
+                if stopped():
+                    break
                 values = response.get('matches') if response else None
                 value = values[0] if isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict) else {}
                 batch_ids = {c['id'] for c in batch}
@@ -304,6 +364,8 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                 issues = response.get('identity_issues', []) if response else []
                 if isinstance(issues, list):
                     all_issues.extend(issues)
+            if stopped():
+                break
             # Missing can only be established after ALL graph batches have
             # explicitly excluded a representation. Ambiguity stays unresolved.
             aligned = [m for m in batch_matches if m['status'] in {'matched', 'misrepresented'}]
@@ -348,6 +410,7 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
     report['stages']['rubric'] = 'complete' if len(report['dimension_assessments']) == len(graph['claims']) and graph['claims'] and all(
         r.get(field) and r[field]['coverage'] == 1 for r in report['dimension_assessments'] for field in ('specialization', 'granularity')) else 'incomplete'
     report['stages']['matching'] = 'complete' if llm and len(report['matches']) == len(report['candidates']) and not any(m['status'] == 'ambiguous' for m in report['matches']) else 'incomplete'
+    stopped()
     finalize(graph, report, docs_complete, bool(scope))
     report['llm_calls'] = getattr(client, 'calls', 0)
     report['usage'] = getattr(client, 'usage', {})
@@ -396,7 +459,7 @@ def finalize(graph, report, docs_complete, scope_known):
     measures = [v for v in (noun_score, relation_score, neg_score, density) if v is not None]
     if measures:
         dims['coverage'] = round(sum(measures) / len(measures), 2)
-    incomplete = (not count or len(assessments) != count or unresolved > 0 or not scope_known or not docs_complete
+    incomplete = (bool(report.get('failure_code')) or not count or len(assessments) != count or unresolved > 0 or not scope_known or not docs_complete
                   or any(v != 'complete' for v in report['stages'].values()) or bool(report['errors'])
                   or bool(report['identity_issues']) or any(dims[k] is None for k in dims))
     blocker = any(f['severity'] == 'blocker' for f in report['ontology']['findings'])

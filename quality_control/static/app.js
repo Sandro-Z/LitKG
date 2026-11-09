@@ -5,7 +5,25 @@ const labels={specialization:'领域专门化',granularity:'粒度',completeness
 const colors=['#178581','#d49637','#6871b4','#c36d71','#409cc0','#7d9a4e'];
 const verdicts={SUPPORTED:'支持',PARTIALLY_SUPPORTED:'部分支持',CONTRADICTED:'原文反证',UNSUPPORTED:'原文不支持',INSUFFICIENT_EVIDENCE:'证据不足',SOURCE_CONFLICT:'来源冲突'};
 let graphs=[],selected=new Set(),config={},activeClaim=null,activeTab='compare',poll=null,roundByGraph={},humanState=null;
+const deletingGraphs = new Set();
+let refreshVersion = 0;
 const importErrors = {
+  GRAPH_DELETE_CONFIRMATION_REQUIRED: "删除前需确认目标图谱。",
+  LLM_REPEATED_HTTP_400: "模型服务连续返回 HTTP 400，评审已中止",
+  LLM_TIMEOUT: "等待模型响应超时",
+  LLM_REPEATED_TIMEOUT: "连续三次模型请求超时，评审已停止",
+  LLM_TRANSPORT_ERROR: "无法连接模型服务",
+  LLM_REPEATED_TRANSPORT_ERROR: "模型连接连续失败，评审已停止",
+  RUN_TIME_LIMIT: "已达到评审时间上限，已保留部分结果",
+  RUN_CANCELLED: "评审已停止，已保留部分结果",
+  RUN_NOT_ACTIVE: "此评审已结束",
+  RUN_TIME_LIMIT_INVALID: "评审时间上限配置无效",
+  GRAPH_DELETE_BUSY: "质控数据库正忙，请稍后重试",
+  GRAPH_DELETE_CONFLICT: "图谱存在未解除的关联，删除已回滚",
+  GRAPH_DELETE_DISK_FULL: "删除图谱时 SQLite 可用空间不足（SQLITE_FULL），操作已回滚",
+  GRAPH_DELETE_DATABASE_READ_ONLY: "质控数据库无写入权限，删除未完成",
+  GRAPH_DELETE_STORAGE_ERROR: "图谱删除未完成，数据库写入失败",
+  GRAPH_REVIEW_ACTIVE: "此图谱有排队或运行中的评审，完成后再删除。",
   LITKG_EXPORT_TOO_LARGE: 'LitKG 快照超过读取上限（图谱导出为 128 MiB）。请缩小知识库范围。',
   LITKG_UPSTREAM_HTTP_404: 'LitKG API 未找到该知识库或导出接口，请重新加载列表并确认 API 已更新。',
   LITKG_UPSTREAM_TIMEOUT: 'LitKG 导出等待超时，请检查主 API 的导出耗时。',
@@ -40,11 +58,44 @@ function switchTab(tab){activeTab=tab;document.querySelectorAll('.tab').forEach(
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 function currentGraph(selector){return graphs.find(g=>g.id===$(selector).value);}
 function displayClaim(c){const value=x=>x?.label??x?.value??x?.text??x?.id??'?';return `${value(c.subject)} — ${c.predicate} → ${value(c.object)}`;}
-async function refresh(){const oldAudit=$('#audit-graph').value,oldHuman=$('#human-graph').value;graphs=(await api('/api/graphs')).graphs;selected=new Set([...selected].filter(id=>graphs.some(g=>g.id===id)));if(!selected.size)graphs.slice(0,3).forEach(g=>selected.add(g.id));const options=graphs.map(g=>`<option value="${esc(g.id)}">${esc(g.name)} · ${g.claim_count} claims</option>`).join('');document.querySelectorAll('.graph-select').forEach(s=>s.innerHTML=options);if(graphs.some(g=>g.id===oldAudit))$('#audit-graph').value=oldAudit;if(graphs.some(g=>g.id===oldHuman))$('#human-graph').value=oldHuman;renderCompare();if(activeTab==='audit')await renderAudit();if(activeTab==='human')await renderSample();if(poll)clearTimeout(poll);if(graphs.some(g=>['queued','running'].includes(g.latest_run?.status)))poll=setTimeout(()=>guarded(refresh),3500);}
+let graphOverviewSignature = '', graphOptionsMarkup = null;
+let auditPage = {graph: null, offset: 0}, auditViewKey = '';
+let auditLoadVersion = 0, sampleLoadVersion = 0, claimLoadVersion = 0;
+async function refresh() { const version = ++refreshVersion;const result = await api('/api/graphs?view=overview'); if (version !== refreshVersion) return; const oldAudit=$('#audit-graph').value,oldHuman=$('#human-graph').value; const signature = JSON.stringify(result.graphs);
+  const graphListChanged = signature !== graphOverviewSignature;
+  graphOverviewSignature = signature;
+  graphs = result.graphs;selected=new Set([...selected].filter(id=>graphs.some(g=>g.id===id)));if(!selected.size)graphs.slice(0,3).forEach(g=>selected.add(g.id));const options=graphs.map(g=>`<option value="${esc(g.id)}">${esc(g.name)} · ${g.claim_count} claims</option>`).join('');if (graphOptionsMarkup !== options) { document.querySelectorAll('.graph-select').forEach(s=>s.innerHTML=options); graphOptionsMarkup = options; }if(graphs.some(g=>g.id===oldAudit))$('#audit-graph').value=oldAudit;if(graphs.some(g=>g.id===oldHuman))$('#human-graph').value=oldHuman;if (graphListChanged) renderCompare();if(activeTab==='audit')await renderAudit();if(activeTab==='human')await renderSample();if(poll)clearTimeout(poll);if(graphs.some(g=>['queued','running'].includes(g.latest_run?.status)))poll=setTimeout(()=>guarded(refresh),5000);}
+async function deleteGraph(id, button) {
+  const graph = graphs.find(item => item.id === id);
+  if (!graph || deletingGraphs.has(id)) return;
+  if (!window.confirm("永久删除质控图谱「" + graph.name + "」及其全部评审结果？此操作无法撤销。")) return;
+  deletingGraphs.add(id);
+  button.disabled = true;
+  try {
+    await api('/api/graphs/' + encodeURIComponent(id) + '/delete', { confirm_graph_id: id });
+    if (currentGraph('#human-graph')?.id === id) {
+      $('#review-round').innerHTML = '';
+      humanState = null;
+      $('#sample-info').textContent='尚未创建评审轮次。';$('#sample-list').innerHTML='';$('#claim-detail').innerHTML='';activeClaim=null;
+    }
+    delete roundByGraph[id];
+    selected.delete(id);
+    graphs = graphs.filter(item => item.id !== id);
+    try { await refresh(); } catch { notice("图谱已删除，列表刷新失败，请点击刷新", true); return; }
+    notice("已删除图谱及其全部评审结果。");
+  } finally {
+    deletingGraphs.delete(id);
+    renderCompare();
+  }
+}
+
 function renderCompare(){
   const scenario=$('#scenario').value;
-  $('#graphs').innerHTML=graphs.length?graphs.map(g=>`<div class="graph-row"><input type="checkbox" data-graph="${esc(g.id)}" ${selected.has(g.id)?'checked':''}><div><strong>${esc(g.name)}</strong><small>${g.claim_count} claims · ${g.document_count} 文献 · ${esc(g.snapshot_hash.slice(0,10))}</small></div>${badge(g.latest_run?.status||'未评审',g.latest_run?.report?.score_complete?'':'warning')}</div>`).join(''):'<div class="empty">还没有图谱。先导入一个快照。</div>';
+  $('#graphs').innerHTML=graphs.length?graphs.map(g=>`<div class="graph-row"><input type="checkbox" data-graph="${esc(g.id)}" ${selected.has(g.id)?'checked':''}><div><strong>${esc(g.name)}</strong><small>${g.claim_count} claims · ${g.document_count} 文献 · ${esc(g.snapshot_hash.slice(0,10))}</small></div>${badge(g.latest_run?.status||'未评审',g.latest_run?.report?.score_complete?'':'warning')}<button type="button" class="danger graph-delete" data-delete-graph="${esc(g.id)}" ${(deletingGraphs.has(g.id) || ['queued', 'running'].includes(g.latest_run?.status)) ? 'disabled' : ''}>删除</button></div>`).join(''):'<div class="empty">还没有图谱。先导入一个快照。</div>';
   $('#graphs').querySelectorAll('[data-graph]').forEach(c=>c.onchange=()=>{c.checked?selected.add(c.dataset.graph):selected.delete(c.dataset.graph);renderCompare();});
+  $('#graphs').querySelectorAll('[data-delete-graph]').forEach(button => {
+    button.onclick = () => guarded(() => deleteGraph(button.dataset.deleteGraph, button));
+  });
   const chosen=graphs.filter(g=>selected.has(g.id));renderRadar(chosen);
   $('#scoretable').innerHTML=`<table><thead><tr><th>图谱</th><th>综合评分</th><th>机器综合分</th><th>人工分 / 有效权重</th><th>已测权重</th>${Object.values(labels).map(l=>`<th>${l}</th>`).join('')}<th>适用性</th></tr></thead><tbody>${chosen.map(g=>{
     const r=g.latest_run?.report,c=r?.scenarios?.[scenario],h=r?.human;
@@ -96,25 +147,76 @@ on('#import-local', async () => {
   }
 });
 async function renderAudit(){
+  $('#cancel-run').disabled = true;
   const g=currentGraph('#audit-graph');if(!g){$('#audit-result').textContent='请先导入图谱。';$('#dimension-scores').innerHTML='';return;}
-  const run=g.latest_run,r=run?.report;
+  if (auditPage.graph !== g.id) {
+    auditPage = {graph: g.id, offset: 0};
+  }
+  const header = g.latest_run;
+  const viewKey = JSON.stringify([g.id, header?.id, header?.updated_at, header?.cancel_requested,
+                                  g.review_revision, g.round_count, auditPage.offset]);
+  if (auditViewKey === viewKey) return;
+  const load = ++auditLoadVersion;
+  const response = header ? await api('/api/graphs/' + encodeURIComponent(g.id) + '/report?offset=' + auditPage.offset) : {run: null};
+  if (load !== auditLoadVersion || currentGraph('#audit-graph')?.id !== g.id) return;
+  const run = response.run;
+  const r = run?.report;
+  $('#cancel-run').disabled = !run?.id || !!run.cancel_requested || !['queued', 'running'].includes(run.status);
   $('#run-llm').disabled=!config.llm_configured||['queued','running'].includes(run?.status);
   $('#run-auto').disabled=['queued','running'].includes(run?.status);
   $('#llm-note').textContent=config.llm_configured?`模型：${config.model}；评分量表缺项时会单独补评。`:'尚未配置 LLM：可进行本体检测与人工评审。';
-  $('#audit-result').innerHTML=run?`${badge(run.status)} ${r?.gate?badge(r.gate,r.gate==='PASS'?'':'warning'):''}<p class="muted">${r?.evaluation_status==='completed_with_gaps'?'任务已执行结束，但部分证据或评分尚未完成；具体原因见各维度。':''}</p><div class="stats"><div><span class="score">${r?.metrics?.reviewed??0}</span><small>已审 / ${g.claim_count} 条</small></div><div><span class="score">${score(r?.machine_dimensions?.correctness??r?.dimensions?.correctness)}</span><small>机器正确性</small></div><div><span class="score">${score(r?.human?.metrics?.score)}</span><small>人工汇总分 · ${r?.human?.metrics?.reviewer_count??0} 位评审员</small></div><div><span class="score">${score(r?.dimensions?.correctness)}</span><small>融合后的正确性</small></div></div>${r?.human?`<p class="muted">人工 ${r.human.rounds} 轮 · 已判 ${r.human.metrics.decided}/${r.human.sampled_unique_claims} 个抽样claim · 有效权重 ${(r.human.effective_weight*100).toFixed(1)}% · 分歧 ${r.human.metrics.disagreements} 条。人工样本不会补齐未审原文。</p>`:''}${run.error?`<p>${esc(run.error)}</p>`:''}${r?.errors?.length?`<details><summary>${r.errors.length} 个未完成项 / 错误</summary><pre>${esc(JSON.stringify({summary:r.failure_summary,errors:r.errors},null,2))}</pre></details>`:''}`:'<p class="muted">尚未运行评审。</p>';
+  const errorEvents = r?.errors ?? [];
+  const invalidVerdicts = new Set(errorEvents.filter(e => e.code === "INVALID_ASSESSMENT" && e.claim_id != null).map(e => String(e.claim_id)));
+  for (const id of r?.preview?.failed_claim_ids ?? []) invalidVerdicts.add(id);
+  const isFailedVerdict = a => a.verdict === 'INSUFFICIENT_EVIDENCE' && a.rationale === "无效标签、无效证据或不满足判定前置条件" && invalidVerdicts.has(String(a.claim_id));
+  const reviewedClaims = r?.preview?.reviewed ?? new Set((r?.assessments ?? []).filter(a => !isFailedVerdict(a)).map(a => String(a.claim_id))).size;
+  const failedBlocks = r?.preview?.failed_blocks ?? new Set(errorEvents.filter(e => e.code === 'INVALID_OR_UNREVIEWED_BLOCK' && e.doc_id != null && e.block_id != null).map(e => JSON.stringify([String(e.doc_id), String(e.block_id)]))).size;
+  const page = r?.preview;
+  const canGoBack = page && page.offset > 0;
+  const canGoForward = page && page.offset + page.size < page.assessments;
+  const pageButtons = page && page.assessments ? [
+    '<button type="button" data-report-offset="' + Math.max(0, page.offset - page.size) + '"' + (canGoBack ? '' : ' disabled') + '>' + "上一页" + '</button>',
+    ' ' + (page.offset + 1) + '-' + Math.min(page.assessments, page.offset + page.size) + ' / ' + page.assessments + ' ',
+    '<button type="button" data-report-offset="' + (page.offset + page.size) + '"' + (canGoForward ? '' : ' disabled') + '>' + "下一页" + '</button>'
+  ].join('') : '';
+  $('#audit-result').innerHTML=run?`${badge(run.status)} ${r?.gate?badge(r.gate,r.gate==='PASS'?'':'warning'):''}<p class="muted">${r?.evaluation_status==='completed_with_gaps'?'任务已执行结束，但部分证据或评分尚未完成；具体原因见各维度。':''}</p><div class="stats"><div><span class="score">${reviewedClaims}</span><small>已审 / ${g.claim_count} 条</small></div><div><span class="score">${score(r?.machine_dimensions?.correctness??r?.dimensions?.correctness)}</span><small>机器正确性</small></div><div><span class="score">${score(r?.human?.metrics?.score)}</span><small>人工汇总分 · ${r?.human?.metrics?.reviewer_count??0} 位评审员</small></div><div><span class="score">${score(r?.dimensions?.correctness)}</span><small>融合后的正确性</small></div></div>${r?.human?`<p class="muted">人工 ${r.human.rounds} 轮 · 已判 ${r.human.metrics.decided}/${r.human.sampled_unique_claims} 个抽样claim · 有效权重 ${(r.human.effective_weight*100).toFixed(1)}% · 分歧 ${r.human.metrics.disagreements} 条。人工样本不会补齐未审原文。</p>`:''}<div>未完成 claim ${Math.max(0, g.claim_count - reviewedClaims)} / 失败 block ${failedBlocks}</div>${r?.progress ? `<div>已发模型请求 ${r.progress.requests} / ${esc(r.progress.stage)}</div>` : ''}${run.cancel_requested && ['queued', 'running'].includes(run.status) ? `<p>${esc("已请求停止，正在等待当前请求结束")}</p>` : ''}${pageButtons ? `<div>${pageButtons} <small>${esc("列表分页加载，完整报告可通过导出查看")}</small></div>` : ''}${run.error?`<p>${esc(importError(run.error))}</p>`:''}${r?.errors?.length?`<details><summary>${(page?.errors ?? errorEvents.length)} 个错误事件 / 错误</summary><pre>${esc(JSON.stringify({summary:r.failure_summary,errors:r.errors},null,2))}</pre></details>`:''}`:'<p class="muted">尚未运行评审。</p>';
   $('#dimension-scores').innerHTML=Object.entries(labels).map(([k,label])=>{
     const d=r?.dimension_details?.[k],v=r?.dimensions?.[k];
     return `<div class="dimension-card"><h3>${label}</h3><div class="score">${score(v)}</div>${badge(v==null?'缺少评分依据':d?.status==='complete'?'已评分':'范围内暂定分',v==null?'warning':'')}<p>${esc(d?.reason||'运行原文LLM评审后提供该维度的分数和依据。')}</p>${d?.coverage!=null?`<small>评估覆盖 ${(100*d.coverage).toFixed(1)}% · ${d.evaluated??0}/${d.total??'—'}</small>`:''}<details><summary>计分依据</summary><pre>${esc(JSON.stringify(d||{},null,2))}</pre></details></div>`;
   }).join('');
-  $('#findings').innerHTML=r?`<div class="scroll"><table><thead><tr><th>Claim / 对象</th><th>判定</th><th>领域 / 粒度</th><th>理由</th></tr></thead><tbody>${(r.assessments||[]).map(a=>`<tr><td>${esc(a.claim_id)}</td><td>${badge(verdicts[a.verdict]||a.verdict,a.verdict==='SUPPORTED'?'':'warning')}</td><td>${score(a.specialization)} / ${score(a.granularity)}</td><td class="wrap">${esc(a.rationale)}<details><summary>证据及量表</summary><pre>${esc(JSON.stringify({evidence:a.evidence,rubric:(r.dimension_assessments||[]).find(v=>v.claim_id===a.claim_id)},null,2))}</pre></details></td></tr>`).join('')}${(r.ontology?.findings||[]).map(f=>`<tr><td>${esc(f.target)}</td><td>${badge(f.rule,'danger')}</td><td>—</td><td class="wrap">${esc(f.message)}</td></tr>`).join('')}</tbody></table></div>`:'';
+  $('#findings').innerHTML=r?`<div class="scroll"><table><thead><tr><th>Claim / 对象</th><th>判定</th><th>领域 / 粒度</th><th>理由</th></tr></thead><tbody>${(r.assessments||[]).map(a=>`<tr><td>${esc(a.claim_id)}</td><td>${isFailedVerdict(a) ? badge("未完成评估", 'warn') : badge(verdicts[a.verdict]||a.verdict,a.verdict==='SUPPORTED'?'':'warning')}</td><td>${score(a.specialization)} / ${score(a.granularity)}</td><td class="wrap">${esc(isFailedVerdict(a) ? "未获得通过校验的判定" : a.rationale)}<details><summary>证据及量表</summary><pre>${esc(JSON.stringify({evidence:a.evidence,rubric:(r.dimension_assessments||[]).find(v=>v.claim_id===a.claim_id)},null,2))}</pre></details></td></tr>`).join('')}${(r.ontology?.findings||[]).map(f=>`<tr><td>${esc(f.target)}</td><td>${badge(f.rule,'danger')}</td><td>—</td><td class="wrap">${esc(f.message)}</td></tr>`).join('')}</tbody></table></div>`:'';
   $('#omissions').innerHTML=r?`<pre>${esc(JSON.stringify(r.proxies||{},null,2))}</pre><div class="scroll"><table><thead><tr><th>候选</th><th>匹配</th><th>理由</th></tr></thead><tbody>${(r.matches||[]).map(m=>{const c=r.candidates.find(c=>c.id===m.candidate_id);return `<tr><td class="wrap">${esc(c?`${c.subject} — ${c.predicate} → ${c.object}`:m.candidate_id)}<details><summary>来源证据</summary><pre>${esc(JSON.stringify(c?.evidence||[],null,2))}</pre></details></td><td>${esc(m.status)}</td><td class="wrap">${esc(m.rationale)}</td></tr>`;}).join('')}</tbody></table></div><details><summary>实体合并 / 拆分疑点与文献覆盖</summary><pre>${esc(JSON.stringify({identity_issues:r.identity_issues,coverage:r.document_coverage},null,2))}</pre></details>`:'';
+  document.querySelectorAll('[data-report-offset]').forEach(button => {
+    button.onclick = () => guarded(() => {
+      auditPage.offset = Number(button.dataset.reportOffset);
+      return renderAudit();
+    });
+  });
+  auditViewKey = viewKey;
 }
+on('#cancel-run', async () => {
+  const run = currentGraph('#audit-graph')?.latest_run;
+  if (!run?.id || run.cancel_requested || !['queued', 'running'].includes(run.status)) return;
+  const button = $('#cancel-run');
+  button.disabled = true;
+  try {
+    await api('/api/runs/' + encodeURIComponent(run.id) + '/cancel', {});
+    notice("已请求停止，正在等待当前请求结束");
+    await refresh();
+  } catch (error) {
+    button.disabled = false;
+    throw error;
+  }
+});
 for(const [id,mode] of [['#run-auto','automatic'],['#run-llm','llm']])on(id,async()=>{const g=currentGraph('#audit-graph');if(!g)throw Error('请先导入图谱');await api(`/api/graphs/${g.id}/runs`,{mode});notice(mode==='llm'?'原文评审已排队，可切换页面；进度与结果会保存。':'本地约束检测已开始。');await refresh();});
 on('#fork',async()=>{const g=currentGraph('#audit-graph');if(!g)throw Error('请先选择图谱');const old=(await api(`/api/graphs/${g.id}`)).graph;const scope=$('#fork-scope').value.trim()||old.policy.scope;if(!scope)throw Error('请填写抽取范围');const payload={graph:{nodes:old.nodes,claims:old.claims},documents:old.documents,policy:{...old.policy,scope},metadata:{...old.metadata,parent_snapshot:old.snapshot_hash}};if($('#fork-complete').checked)payload.documents.forEach(d=>d.parsing_status='complete');await api('/api/graphs',{name:g.name+' · 补充核验',payload});await refresh();notice('已创建补充核验快照；请对新快照重新评审。');});
 on('#export',async()=>{const g=currentGraph('#audit-graph');if(!g)throw Error('请先选择图谱');const v=await api(`/api/graphs/${g.id}/export`);const blob=new Blob([JSON.stringify(v,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`quality-${g.id}.json`;a.click();URL.revokeObjectURL(url);});
 async function renderSample(){
+  const load = ++sampleLoadVersion;
   const g=currentGraph('#human-graph');if(!g)return;
-  const round=roundByGraph[g.id],state=await api(`/api/graphs/${g.id}/sample${round?'?round_id='+encodeURIComponent(round):''}`);humanState=state;
+  const round=roundByGraph[g.id],state=await api(`/api/graphs/${g.id}/sample${round?'?round_id='+encodeURIComponent(round):''}`);
+  if (load !== sampleLoadVersion || currentGraph('#human-graph')?.id !== g.id) return;
+  humanState = state;
   $('#review-round').innerHTML=state.rounds.map(r=>`<option value="${esc(r.id)}">${esc(r.name)} · ${r.claim_ids.length}条 · 已评${r.metrics.reviewed}</option>`).join('');
   if(!state.sample){$('#sample-info').textContent='尚未创建评审轮次。';$('#sample-list').innerHTML='';$('#claim-detail').innerHTML='';activeClaim=null;return;}
   roundByGraph[g.id]=state.sample.id;$('#review-round').value=state.sample.id;
@@ -124,7 +226,9 @@ async function renderSample(){
   $('#sample-list').querySelectorAll('[data-claim]').forEach(b=>b.onclick=()=>guarded(()=>showClaim(g.id,b.dataset.claim)));
 }
 async function showClaim(gid,cid){
+  const load = ++claimLoadVersion;
   activeClaim=cid;const v=await api(`/api/graphs/${gid}/claims/${encodeURIComponent(cid)}`);
+  if (load !== claimLoadVersion || currentGraph('#human-graph')?.id !== gid) return;
   const verdictLabels={supported:'正确',partial:'部分正确',incorrect:'错误',uncertain:'证据不足'},c=humanState?.consensus.find(c=>c.claim_id===cid);
   $('#claim-detail').innerHTML=`<div class="claim-label">${esc(displayClaim(v.claim))}</div><details><summary>完整声明与限定条件</summary><pre>${esc(JSON.stringify(v.claim,null,2))}</pre></details>${v.evidence.length?v.evidence.map(e=>{
     const text=e.block?.text,ref=e.reference,a=e.anchor;
