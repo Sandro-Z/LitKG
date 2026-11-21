@@ -165,7 +165,7 @@ def convert_document(builder, doc, chunks, entities, relations, stats):
                       evidence_method='neo4j_builder_chunk_cosentence')
 
 
-def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time.sleep, cache_root=None):
+def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time.sleep, cache_root=None, pdf_index=None):
     if variant not in {'sametext', 'pdfnative', 'no-schema'}:
         raise BuilderError(f'unknown variant {variant}')
     if not cfg.get('dedicated_database'):
@@ -193,7 +193,8 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
             convert_document(builder, doc, saved['chunks'], saved['entities'], saved['relations'], stats)
             continue
         if variant == 'pdfnative':
-            pdf = Path(pdf_dir or 'pdfs') / f'{doc.get("source_sha256")}.pdf'
+            indexed = (pdf_index or {}).get(doc.get('source_sha256'))
+            pdf = Path(indexed) if indexed else Path(pdf_dir or 'pdfs') / f'{doc.get("source_sha256")}.pdf'
             if not doc.get('source_sha256') or not pdf.is_file():
                 stats['pdf_missing'] += 1
                 continue

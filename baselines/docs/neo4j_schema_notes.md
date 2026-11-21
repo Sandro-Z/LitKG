@@ -4,7 +4,7 @@ Pinned release: `neo4j-labs/llm-graph-builder` tag **v0.8.7**, commit `1ade47de6
 
 ## Requirements (README)
 
-- Neo4j **5.23 or later** with **APOC** (the backend uses `CALL (variable) { ... }`). `baselines/deploy/docker-compose.builder.yml` (started by `scripts/run_baselines.sh`) adds `neo4j:5.26-community` with APOC, because the builder's own compose file has no Neo4j service.
+- Neo4j **5.23 or later** with **APOC** (the backend uses `CALL (variable) { ... }`). `baselines/deploy/docker-compose.builder.yml` (started by `scripts/baseline_neo4j_builder.sh`) adds `neo4j:5.26-community` with APOC, because the builder's own compose file has no Neo4j service.
 
 ## Backend routes used (`backend/score.py`)
 

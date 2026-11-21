@@ -1,5 +1,5 @@
 # Neo4j LLM Graph Builder backend (pinned clone) + a dedicated Neo4j 5.x with APOC.
-# Started by scripts/run_baselines.sh; all variables below are exported by that script.
+# Started by scripts/baseline_neo4j_builder.sh; all variables below are exported by that script.
 # Secrets come from git-ignored env files under data/baselines/secrets/.
 name: litkg-baselines
 services:

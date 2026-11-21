@@ -154,19 +154,17 @@ id 模式的缺口来自 LitKG 无对应谓词的 `Cotreatment/Comparison/Drug_I
 
 ## 7. 外部系统如何复用
 
-### 一条命令跑 PubTator3 与 Neo4j LLM Graph Builder 基线
+### 外部系统基线（与金标准评测无关的独立工具）
 
-`baselines/`（包 `kgb`）与 `scripts/run_baselines.sh` 在同一语料上生成外部系统图谱，不需要额外仓库：
+用同一批 PDF 和一个 LLM API 生成对比图谱，分别执行（详见 `baselines/README.md`）：
 
 ```bash
-scripts/run_baselines.sh start --qc-graph <QC图谱ID> --llm-base-url http://<host>:<port>/v1 --llm-model <与LitKG相同的模型>
+scripts/baseline_pubtator3.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
 
 ```bash
-scripts/run_baselines.sh status
+scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
-
-脚本自动创建虚拟环境、安装依赖、克隆固定版本的 llm-graph-builder（v0.8.7）、用 Docker 启动专用 Neo4j 与构建器后端，并在后台依次运行 `pubtator3-native`、`pubtator3-llm`、`neo4j-builder-sametext`，最后执行校验和统计。再次执行 `start` 会断点续跑。详见 `baselines/README.md`。
 
 ### 其他系统
 

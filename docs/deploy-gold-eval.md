@@ -101,17 +101,21 @@ python3 benchmarks/prepare.py --all --download
 
 数据写入 `data/benchmarks/`（不进 git）。如果生产机不能访问外网，就在别的机器上生成，然后把整个 `data/benchmarks/` 拷贝过来。之后的完整评测流程见 `docs/benchmark-eval.md` 的第 2–6 节：建知识库 → 导入文本 → 等待抽取 → 导入 QC → 运行金标准评测。
 
-## 6. 外部基线（可选）
+## 6. 外部基线（可选，独立工具）
 
-需要 Docker Compose、Python ≥ 3.11，以及能访问 GitHub、Docker Hub、Hugging Face 和 NCBI 的外网。在 LitKG 仓库根目录执行：
+与金标准评测和 QC 无关。输入是一批与 LitKG 相同的 PDF 和一个 LLM API，输出 QC 可导入的图谱。两个系统分开运行：
 
 ```bash
-scripts/run_baselines.sh start --qc-graph <QC图谱ID> --llm-base-url http://<host>:<port>/v1 --llm-model <与LitKG相同的模型>
+scripts/baseline_pubtator3.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
 
-脚本会提示输入 Key（也可以先设置 `LLM_API_KEY`），然后在后台运行。用 `scripts/run_baselines.sh status` 查看进度。中断后再次执行 `start` 即可续跑。结束后用 `scripts/run_baselines.sh down` 释放 Neo4j 和构建器容器。
+```bash
+scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
+```
 
-资源提示：构建器镜像首次构建需要下载数 GB，内存建议预留 6 GB 以上。它使用独立的 Docker Compose 项目 `litkg-baselines`，端口只绑定 127.0.0.1（17687、18000），不会影响 LitKG 和 QC。
+- 需要 Python ≥ 3.11 和外网：PubTator3 需要访问 NCBI；Neo4j 构建器需要访问 GitHub、Docker Hub 和 Hugging Face。
+- 第二个脚本需要 Docker Compose。构建器首次构建要下载数 GB，内存建议预留 6 GB 以上。它使用独立的 Compose 项目 `litkg-baselines`，端口只绑定 127.0.0.1（17687、18000），不影响 LitKG 和 QC。
+- 详见 `baselines/README.md`。
 
 ## 7. 回滚
 

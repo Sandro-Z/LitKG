@@ -293,6 +293,16 @@ class Neo4jBuilderTests(unittest.TestCase):
         self.assertEqual(builder.nodes['nb:Drugish:Elsewhere']['types'], ['Other'])
         self.assertEqual(meta['stats']['relation_endpoint_outside_document'], 1)
         self.assertEqual(store.queries.count(nb.Q_RESET), 2)
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / 'any-name.pdf'
+            pdf.write_bytes(b'%PDF-1.4 test')
+            docs = corpus()
+            docs[0]['source_sha256'] = 'abc'
+            uploaded = Client()
+            uploaded.upload = lambda filename, data, model: uploaded.calls.append(('upload', filename, data))
+            nb.run(docs, POLICY, cfg, 'pdfnative', uploaded, Store(), sleep=lambda s: None, pdf_index={'abc': str(pdf)})
+            self.assertEqual(uploaded.calls[0][2], b'%PDF-1.4 test')
+            self.assertTrue(uploaded.calls[0][1].endswith('.pdf'))
         with tempfile.TemporaryDirectory() as cache:
             first = Client()
             nb.run(corpus(), POLICY, cfg, 'sametext', first, Store(), sleep=lambda s: None, cache_root=cache)
@@ -302,6 +312,41 @@ class Neo4jBuilderTests(unittest.TestCase):
             self.assertEqual((len(first.calls), resumed.calls), (2, []))
             self.assertEqual(meta2['stats']['documents_from_checkpoint'], 1)
             self.assertEqual(len(builder2.claims), len(builder.claims))
+
+
+class CorpusTests(unittest.TestCase):
+    def test_pdfs_become_documents_with_litkg_policy(self):
+        import importlib.util
+        if importlib.util.find_spec('pypdf') is None:
+            self.skipTest('pypdf not installed')
+        import shutil
+        import sys
+        repo = Path(__file__).resolve().parents[2]
+        sys.path.insert(0, str(repo / 'tests'))
+        from pdf_fixtures import text_pdf
+        from kgb.corpus import build as build_corpus
+        with tempfile.TemporaryDirectory() as directory:
+            pdfs = Path(directory) / 'pdfs'
+            (pdfs / 'sub').mkdir(parents=True)
+            with text_pdf(['Aspirin lowers PTGS2.', 'See https://doi.org/10.1234/example.5']) as path:
+                shutil.copy(path, pdfs / 'a.pdf')
+                shutil.copy(path, pdfs / 'sub' / 'copy.PDF')          # duplicate content
+            (pdfs / 'broken.pdf').write_bytes(b'%PDF-1.4 not really')
+            stats = build_corpus(pdfs, Path(directory) / 'corpus', repo, Path(directory) / 'cache', resolve=False,
+                                 log=lambda *a: None)
+            corpus = Path(directory) / 'corpus'
+            documents = json.loads((corpus / 'documents.json').read_text())
+            policy = json.loads((corpus / 'policy.json').read_text())
+            index = json.loads((corpus / 'pdf_index.json').read_text())
+            id_map = (corpus / 'id_map.csv').read_text().splitlines()
+        self.assertEqual((stats['documents'], stats['duplicates'], stats['unreadable']), (1, 1, 1))
+        doc = documents[0]
+        self.assertEqual((doc['id'], doc['source_sha256']), (doc['source_sha256'], next(iter(index))))
+        self.assertEqual([b['text'] for b in doc['blocks']][0], 'Aspirin lowers PTGS2.')
+        self.assertEqual([b['id'] for b in doc['blocks']], ['p1', 'p2'])
+        self.assertIn('TREATS', policy['ontology']['predicates'])
+        self.assertIsNone(policy['scope'])
+        self.assertEqual(id_map[1].split(',')[3], '10.1234/example.5')
 
 
 @unittest.skipUnless(os.environ.get('KGB_QC_PATH'), 'set KGB_QC_PATH to a LitKG checkout for the QC import dry run')

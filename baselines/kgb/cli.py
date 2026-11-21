@@ -133,8 +133,10 @@ def cmd_run(cfg, args):
         password = config_mod.secret(cfg['neo4j'], 'password_file', 'password_env')
         client, store = nb.BuilderClient(cfg['neo4j'], password), nb.Neo4jStore(cfg['neo4j'], password)
         try:
+            index_path = Path(cfg['paths']['corpus']).parent / 'pdf_index.json'
+            pdf_index = load_json(index_path) if index_path.is_file() else None
             builder, meta = nb.run(documents, policy, cfg['neo4j'], args.variant, client, store, cfg['paths']['pdfs'],
-                                   cache_root=cfg['paths']['cache'])
+                                   cache_root=cfg['paths']['cache'], pdf_index=pdf_index)
         finally:
             store.close()
         model = cfg['neo4j'].get('model_name') or cfg['neo4j']['model']
@@ -187,6 +189,14 @@ def cmd_validate(cfg, args):
     return 1 if failed else 0
 
 
+def cmd_corpus(cfg, args):
+    from .corpus import build as build_corpus
+    stats = build_corpus(args.pdfs, Path(cfg['paths']['corpus']).parent, args.litkg_root, cfg['paths']['cache'],
+                         resolve=not args.no_pmid)
+    print(', '.join(f'{k}={v}' for k, v in stats.items() if not k.endswith('sha256')))
+    return 0
+
+
 def cmd_stats(cfg, args):
     from .stats import write
     print(write(cfg['paths']['out']))
@@ -197,6 +207,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='kgb', description=__doc__)
     parser.add_argument('--config', default='config.toml')
     sub = parser.add_subparsers(dest='command', required=True)
+    corpus = sub.add_parser('corpus', help='build corpus/documents.json, policy.json and id_map.csv from PDFs')
+    corpus.add_argument('--pdfs', required=True)
+    corpus.add_argument('--litkg-root', default=str(ROOT.parent))
+    corpus.add_argument('--no-pmid', action='store_true', help='skip DOI -> PMID resolution (NCBI E-utilities)')
     sub.add_parser('prep')
     run = sub.add_parser('run')
     run.add_argument('system', choices=['pubtator3', 'neo4j'])
@@ -214,7 +228,7 @@ def main(argv=None):
         if args.variant not in allowed:
             parser.error(f'--variant must be one of {sorted(allowed)} for {args.system}')
     cfg = config_mod.load(args.config)
-    return {'prep': cmd_prep, 'run': cmd_run, 'validate': cmd_validate, 'stats': cmd_stats}[args.command](cfg, args)
+    return {'corpus': cmd_corpus, 'prep': cmd_prep, 'run': cmd_run, 'validate': cmd_validate, 'stats': cmd_stats}[args.command](cfg, args)
 
 
 if __name__ == '__main__':

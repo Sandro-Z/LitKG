@@ -1,73 +1,61 @@
-# 外部系统基线（PubTator3 / Neo4j LLM Graph Builder）
+# 外部系统基线：PubTator3 / Neo4j LLM Graph Builder
 
-在与某个 LitKG 知识库**完全相同的语料**上，用外部系统构建图谱，并导出为 QC canonical JSON，与 LitKG 横向评测。代码在本目录的 `kgb` 包中，不导入 LitKG 业务代码。只有校验步骤会只读地调用 `quality_control.models.normalize` 试跑。
+两个互相独立的一键脚本。输入是**与 LitKG 相同的一批 PDF** 和**一个 LLM API**，它们调用对比系统自己的服务或代码，输出 QC 可导入的图谱 JSON。整个过程不依赖 LitKG 或 QC 服务。生成后按 QC 子系统的方法评审：在 QC“导入图谱 → 通用 JSON”中上传，再运行“原文 LLM 评审”。
 
-| 变体 | 实体 | 关系 | 输入文本 |
-|---|---|---|---|
-| `pubtator3-native` | PubTator3 自由文本 NER | PubTator 预计算的文档级关系（需要 PMID） | same-text |
-| `pubtator3-llm` | 同上 | 与 LitKG 相同的 LLM 按窗口抽取，有 policy 谓词清单、domain/range 校验和逐字 quote 校验 | same-text |
-| `neo4j-builder-sametext` | 构建器 LLM，节点标签为 policy 实体类型 | 构建器 LLM，关系为 policy 谓词 | same-text `.txt` |
-| `neo4j-builder-pdfnative` / `-no-schema` | 可选变体 | | 原 PDF / 不给 schema |
+两个脚本都在后台运行，前台只显示进度，按 Ctrl-C 只会停止观看，不会停止任务。中断后重新执行同一条命令即可断点续跑。LLM Key 从 `$LLM_API_KEY` 读取，没有设置时会提示输入（不回显），保存在工作目录的 `secrets/llm_api_key`（权限 600），不会写入日志或输出。
 
-## 一条命令运行（后台、可断点续跑）
-
-前提：LitKG 知识库已经导入 QC（`POST /api/import/litkg`），并记下 QC 图谱 ID；主机有 Python ≥ 3.11；跑 Neo4j 变体还需要 Docker Compose。
+## PubTator3
 
 ```bash
-scripts/run_baselines.sh start --qc-graph <QC图谱ID> --llm-base-url http://<host>:<port>/v1 --llm-model <与LitKG相同的模型>
+scripts/baseline_pubtator3.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
 
-第一次运行时会提示输入 LLM API Key（输入不回显）；也可以先 `export LLM_API_KEY=…`。Key 保存在 `data/baselines/secrets/llm_api_key`（权限 600），不会出现在日志、配置或输出中。
+- 用 pypdf 逐页提取文本，清理规则与 LitKG 的 `fallback_pdf_text` 一致。
+- 实体：调用 PubTator3 自由文本 NER（官方接口，限速 3 次/秒）。
+- 关系有两种来源：
+  - **native**：从 PDF 中提取 DOI，经 NCBI E-utilities 解析为 PMID，再取 PubTator3 预计算的文档级关系。没有 DOI/PMID 的 PDF 只有实体，没有关系。
+  - **llm**：把 PubTator 实体和 LitKG 谓词清单交给你提供的 LLM 抽取关系，并校验实体编号、谓词、domain/range 和逐字证据。
+- 输出：`data/baselines/pubtator3/out/graph.pubtator3-native.json` 和 `graph.pubtator3-llm.json`。
+
+## Neo4j LLM Graph Builder
+
+需要 Docker Compose。
 
 ```bash
-scripts/run_baselines.sh status
+scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
 
-```bash
-scripts/run_baselines.sh logs
-```
+- 克隆固定版本 `neo4j-labs/llm-graph-builder` v0.8.7（commit `1ade47de…3142`），用 `deploy/docker-compose.builder.yml` 启动它的后端和一个专用 Neo4j 5.26 + APOC。端口只绑定 127.0.0.1：Neo4j 为 17687，后端为 18000。
+- 把每个 PDF 原样上传给构建器，由构建器用自己的 PDF 解析和 LLM 抽取。schema 为 LitKG 的实体类型和谓词。每个 PDF 处理完都会存检查点。
+- 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
+- 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
 
-```bash
-scripts/run_baselines.sh stop
-```
+## 通用命令与选项
 
-```bash
-scripts/run_baselines.sh down
-```
+两个脚本都支持：
+- `status`：查看是否在运行、最近的日志和已生成的图谱。
+- `logs`：持续查看日志。
+- `stop`：停止后台任务。
+- `--detach`：启动后立即返回，不在前台观看进度。
+- `--force`：用缓存或检查点重建输出。
+- `--name <语料名>`：图谱名称中使用的语料名，默认为 PDF 目录名。
 
-`down` 会停止 Neo4j 和构建器容器。
+用 `KGB_WORK=<目录>` 可以把工作目录放到别处，例如同时处理多批 PDF。
 
-脚本会依次完成：
-1. 在 `data/baselines/venv` 创建虚拟环境，安装 `requirements.txt`（固定版本）。
-2. 从 QC 下载该图谱的 `documents` 和 `policy`，原样复制，因此 `corpus_hash` 一致。
-3. 生成 same-text 文本，然后依次运行 `pubtator3-native`、`pubtator3-llm`、`neo4j-builder-sametext`。
-4. 跑 Neo4j 变体时，克隆固定版本的 `neo4j-labs/llm-graph-builder` v0.8.7（commit `1ade47de…3142`）到 `data/baselines/vendor/`，并用 `deploy/docker-compose.builder.yml` 启动专用 Neo4j 5.26 + APOC 和构建器后端。端口只绑定 127.0.0.1：Neo4j 为 17687，后端为 18000，可用 `KGB_NEO4J_BOLT_PORT`、`KGB_BUILDER_PORT` 修改。Neo4j 密码自动生成。这个数据库专供基线使用，每篇文档之间都会被清空。
-5. 校验所有输出，生成 `data/baselines/out/stats.md`。
+每次运行还会产出：
+- `out/stats.md`：节点数、claim 数、锚定率、未映射谓词、LLM 用量、失败计数，以及随机 20 条 claim。
+- `out/run_manifest.json`：版本、配置（不含凭据）、提示词和映射的 hash。
 
-断点续跑：
-- 再次执行 `start`（不需要参数）会跳过已产出的变体。
-- PubTator 响应（按文本 sha256）、待取回的会话、LLM 响应（按提示词 + 窗口文本 sha256 + 模型）、已完成的 Neo4j 文档都缓存在 `data/baselines/cache/`，命中缓存时不会重复调用。
-- `--force` 会用缓存重建输出。
-- `--variants "pubtator3-native neo4j-builder-pdfnative"` 可以指定要跑的变体。
-- `KGB_WORK=<目录>` 可以把工作目录放到别处，用于同时处理多个语料。
+## 与 LitKG 的可比性
 
-产出在 `data/baselines/out/`：`graph.<variant>.json`、`stats.md`、`run_manifest.json`。
+- **本体一致**：`policy` 直接取自 LitKG 的实体类型和谓词注册表，与 LitKG 快照导入 QC 后的 `policy` 相同，QC 比较页会显示“范围/本体一致：是”。
+- **语料不一致**：文献 `id` 为 PDF 的 sha256，与 LitKG 的 `source_sha256` 相同，但文本块来自各基线自己的 PDF 解析，不是 LitKG 的 chunk。因此 QC 比较页会显示“语料不一致”。逐图谱的原文评审不受影响。
+- **两个基线之间语料一致**：两个脚本从同一批 PDF 生成完全相同的 `documents`，彼此的 `corpus_hash` 一致。
+- 其他差异会写入每个图谱的 `metadata.consistency` 和 `stats.md`。例如：
+  - PubTator 的关系模型 BioREx 在 BioRED 上训练过。
+  - 构建器的切块和提示词与 LitKG 不同，`temperature` 固定为 0。
 
-## 导入 QC 比较
-
-1. QC“导入图谱 → 通用 JSON”，上传 `data/baselines/out/graph.*.json`。不要再附加原文文件，否则 `corpus_hash` 会改变。
-2. 对每个图谱运行“原文 LLM 评审”。所有图谱用同一个评审模型，建议与抽取模型不同。
-3. 在比较页确认“语料一致：是”和“范围/本体一致：是”，再看分数。
-4. 如果语料是金标准数据集，再运行“金标准评测”，选择 `pubtator3` 或 `neo4j-builder` 档案。
-
-## 可比性与已知差异
-
-每个输出的 `metadata.consistency` 和 `stats.md` 都列出了与 LitKG 的差异，主要有：
-- PubTator 的关系来自它自己的 BioREx 模型，而 BioREx 在 BioRED 上训练过，所以在 BioRED 上的分数偏乐观。
-- 构建器的切块和提示词与 LitKG 不同；`temperature` 固定为 0，`max_tokens` 不可设置。
-- PubTator 自由文本接口未就绪时返回 HTTP 400，而不是文档写的 404。
-
-细节见 `docs/pubtator3_api_notes.md` 和 `docs/neo4j_schema_notes.md`。
+接口实测细节见 `docs/pubtator3_api_notes.md` 和 `docs/neo4j_schema_notes.md`。
 
 ## 开发与测试
 
@@ -75,4 +63,4 @@ scripts/run_baselines.sh down
 cd baselines && PYTHONPATH=. KGB_QC_PATH=.. python -m unittest discover -s tests -v
 ```
 
-也可以不用脚本，直接调用 CLI：`PYTHONPATH=baselines python -m kgb.cli --config <config.toml> prep|run|validate|stats`。配置样例见 `config.example.toml`。
+也可以直接使用底层 CLI：`PYTHONPATH=baselines python -m kgb.cli --config <config.toml> corpus|prep|run|validate|stats`。

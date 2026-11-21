@@ -8,5 +8,6 @@ idna==3.20
 typing_extensions==4.16.0
 neo4j==6.4.1
 pytz==2026.6
+pypdf==7.1.1
 # Python < 3.11 only:
 tomli==2.2.1; python_version < "3.11"
