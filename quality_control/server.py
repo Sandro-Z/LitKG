@@ -24,6 +24,8 @@ from .store import ActiveGraphRunError, Store
 STATIC = Path(__file__).parent / 'static'
 MAX_BODY = 64 * 1024 * 1024
 MAX_LITKG_EXPORT = 128 * 1024 * 1024
+MAX_GOLD_FILE = 256 * 1024 * 1024
+GOLD_FILE = re.compile(r'gold\.([a-z0-9]+)-([a-z0-9]+)\.json')
 
 
 class Service:
@@ -31,7 +33,35 @@ class Service:
         self.store, self.client_factory = store, client_factory
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.litkg_base = os.environ.get('QC_LITKG_URL', 'http://host.docker.internal:8080').rstrip('/')
+        # Gold files produced on the server by benchmarks/prepare.py (mounted read-only in Docker).
+        self.gold_dir = Path(os.environ.get('QC_GOLD_DIR', str(Path(__file__).resolve().parents[1] / 'data' / 'benchmarks')))
         self.store.recover()
+
+    def gold_files(self):
+        """gold.<bench>-<split>.json files available on the server (no content is read here)."""
+        result = []
+        if self.gold_dir.is_dir():
+            for path in sorted(self.gold_dir.iterdir()):
+                match = GOLD_FILE.fullmatch(path.name)
+                if match and path.is_file() and not path.is_symlink():
+                    stat = path.stat()
+                    result.append(dict(file=path.name, kind='dimbre' if match.group(1) == 'dimbre' else 'biored',
+                                       benchmark=match.group(1), split=match.group(2), bytes=stat.st_size,
+                                       modified=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(stat.st_mtime))))
+        return result
+
+    def read_gold_file(self, name):
+        if not isinstance(name, str) or not GOLD_FILE.fullmatch(name):
+            raise ValueError('GOLD_FILE_INVALID')
+        path = self.gold_dir / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('GOLD_FILE_NOT_FOUND')
+        if path.stat().st_size > MAX_GOLD_FILE:
+            raise ValueError('GOLD_FILE_TOO_LARGE')
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, UnicodeError):
+            raise ValueError('GOLD_PAYLOAD_INVALID') from None
 
     def local_get(self, path, *, max_bytes=MAX_BODY):
         if not re.fullmatch(r'/knowledge-bases(?:\?limit=500|/[1-9][0-9]*/quality-export)', path):
@@ -227,9 +257,16 @@ def handler(service):
                 self.reply({'graphs': service.store.list_graphs()})
             elif method == 'GET' and path == '/api/gold-profiles':
                 self.reply({'profiles': list_profiles(), 'version': GOLD_EVAL_VERSION})
+            elif method == 'GET' and path == '/api/gold-files':
+                self.reply({'files': service.gold_files(), 'directory_configured': service.gold_dir.is_dir()})
             elif method == 'POST' and path == '/api/gold-sets':
                 body = self.body()
-                result = service.store.add_gold_set(body.get('kind'), body.get('name'), body.get('payload'))
+                payload = body.get('payload')
+                if body.get('server_file') is not None:
+                    # Import a file that already exists on the server; nothing is uploaded.
+                    payload = service.read_gold_file(body['server_file'])
+                kind = body.get('kind') or (payload.get('kind') if isinstance(payload, dict) else None)
+                result = service.store.add_gold_set(kind, body.get('name'), payload)
                 self.reply(result, 201 if result['created'] else 200)
             elif method == 'GET' and path == '/api/gold-sets':
                 self.reply({'gold_sets': service.store.list_gold_sets()})

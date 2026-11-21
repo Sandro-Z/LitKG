@@ -13,6 +13,7 @@ services:
       SQLITE_TMPDIR: /tmp
       QC_LITKG_URL: ${QC_LITKG_URL:-http://host.docker.internal:8080}
       QC_LITKG_SOURCE_DIR: /litkg-sources
+      QC_GOLD_DIR: /gold
       QC_LLM_BASE_URL: ${QC_LLM_BASE_URL:-}
       QC_LLM_MODEL: ${QC_LLM_MODEL:-}
       QC_LLM_API_KEY_FILE: ${QC_LLM_API_KEY_FILE:-}
@@ -22,6 +23,7 @@ services:
     volumes:
       - review_tmp:/tmp
       - "${QC_LITKG_UPLOAD_DIR:-./data/uploads}:/litkg-sources:ro"
+      - "${QC_GOLD_HOST_DIR:-./data/benchmarks}:/gold:ro"
       - qc_data:/data
       - ./quality_control/secrets:/run/secrets:ro
     security_opt:

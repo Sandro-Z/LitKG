@@ -331,7 +331,9 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.tmp.name) / 'qc.sqlite3')
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler(Service(self.store)))
+        self.service = Service(self.store)
+        self.service.gold_dir = Path(self.tmp.name) / 'benchmarks'
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler(self.service))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f'http://127.0.0.1:{self.server.server_address[1]}'
 
@@ -390,6 +392,28 @@ class ApiTests(unittest.TestCase):
             db.execute("UPDATE gold_sets SET name='changed'")
         status, _ = self.call(f'/api/graphs/{graph_a}/delete', {'confirm_graph_id': graph_a})
         self.assertEqual(status, 200)
+
+    def test_server_side_gold_files_are_listed_and_imported(self):
+        status, body = self.call('/api/gold-files')
+        self.assertEqual((status, body), (200, {'files': [], 'directory_configured': False}))
+        self.service.gold_dir.mkdir()
+        (self.service.gold_dir / 'gold.biored-fixture.json').write_text(json.dumps(biored_gold()))
+        (self.service.gold_dir / 'documents.biored-fixture.json').write_text('[]')
+        (self.service.gold_dir / 'notes.txt').write_text('ignored')
+        status, body = self.call('/api/gold-files')
+        self.assertEqual([(f['file'], f['kind'], f['split']) for f in body['files']],
+                         [('gold.biored-fixture.json', 'biored', 'fixture')])
+        status, created = self.call('/api/gold-sets', {'server_file': 'gold.biored-fixture.json'})
+        self.assertEqual((status, created['created'], created['summary']['documents']), (201, True, 3))
+        status, again = self.call('/api/gold-sets', {'kind': 'biored', 'payload': biored_gold()})
+        self.assertEqual((status, again['id']), (200, created['id']))   # same content as the upload path
+        self.assertEqual(self.store.list_gold_sets()[0]['name'], 'biored-fixture')
+        for name, code in (('../gold.biored-fixture.json', 'GOLD_FILE_INVALID'), ('gold.biored-missing.json', 'GOLD_FILE_NOT_FOUND'),
+                           ('documents.biored-fixture.json', 'GOLD_FILE_INVALID')):
+            status, body = self.call('/api/gold-sets', {'server_file': name})
+            self.assertEqual((status, body['error']), (400, code))
+        status, body = self.call('/api/gold-sets', {'server_file': 'gold.biored-fixture.json', 'kind': 'dimbre'})
+        self.assertEqual((status, body['error']), (400, 'GOLD_PAYLOAD_INVALID'))
 
     def test_invalid_requests(self):
         graph = self.store.add_graph(system_graph(), {})

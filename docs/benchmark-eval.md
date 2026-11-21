@@ -94,15 +94,18 @@ curl -s -X POST http://127.0.0.1:8090/api/import/litkg \
 
 前端“金标准评测”页：
 
-1. 导入 `gold.biored-test.json`（类型 BioRED）或 `gold.dimbre-test.json`（类型 DiMB-RE）。导入后不可修改，相同内容按 hash 去重。
+1. 在“服务器上的金标准文件”中选择 `gold.biored-test.json` 或 `gold.dimbre-test.json`，点击“从服务器导入”。这些文件就是第 1 步在服务器 `data/benchmarks/` 下生成的，QC 容器以只读方式挂载为 `/gold`，不需要下载再上传。“或从本机上传”仅作备用。导入后不可修改，相同内容按 hash 去重。
 2. 选择图谱、金标准集、映射档案（`litkg` / `pubtator3` / `neo4j-builder`）、对齐模式，以及是否包含“需核对”规则。
 3. 点击“运行金标准评测”。比较表列出同一金标准集上的所有评测，并显示金标准 hash 与对齐文档集合是否一致。点击一行可查看分类型指标；“下载 FP / FN 错误样本”导出 claim、证据 quote 和对应金标准。
 
 等价 API：
 
 ```bash
-curl -s -X POST http://127.0.0.1:8090/api/gold-sets -H 'Content-Type: application/json' \
-  --data-binary @<(python3 -c 'import json;print(json.dumps({"kind":"biored","name":"biored-test","payload":json.load(open("data/benchmarks/gold.biored-test.json"))}))')
+curl -s http://127.0.0.1:8090/api/gold-files
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8090/api/gold-sets -H 'Content-Type: application/json' -d '{"server_file":"gold.biored-test.json"}'
 ```
 
 ```bash

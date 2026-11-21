@@ -255,8 +255,10 @@ const pct=v=>v===null||v===undefined?'—':(100*v).toFixed(1);
 const prfCell=m=>m?`${pct(m.precision)} / ${pct(m.recall)} / ${pct(m.f1)} <span class="muted">(tp ${m.tp}, pred ${m.n_pred}, gold ${m.n_gold})</span>`:'—';
 const ciCell=c=>c&&c.low!==null&&c.low!==undefined?`[${pct(c.low)}, ${pct(c.high)}]`:'—';
 const yes=(ok)=>ok?badge('是'):badge('否','warn');
-Object.assign(importErrors,{GOLD_PAYLOAD_INVALID:'金标准文件格式无效，或与所选类型不符。',GOLD_KIND_INVALID:'金标准类型须为 BioRED 或 DiMB-RE。',GOLD_ENTITY_OFFSET_INVALID:'金标准实体偏移与文本不一致。',GOLD_DUPLICATE_DOCUMENT:'金标准包含重复文献 ID。',GOLD_SET_NOT_FOUND:'未找到金标准集。',GOLD_SET_REQUIRED:'请选择金标准集。',GOLD_PROFILE_NOT_FOUND:'未找到映射档案。',GOLD_PROFILE_BENCHMARK_MISSING:'该档案没有此金标准的映射。',GOLD_MODE_INVALID:'对齐模式无效。',GOLD_REVIEW_LEVELS_INVALID:'映射审核级别无效。',GOLD_KIND_MISMATCH:'金标准类型不一致。'});
-async function loadGold(){const [s,p]=await Promise.all([api('/api/gold-sets'),api('/api/gold-profiles')]);goldSets=s.gold_sets;goldProfiles=p.profiles;
+Object.assign(importErrors,{GOLD_PAYLOAD_INVALID:'金标准文件格式无效，或与所选类型不符。',GOLD_KIND_INVALID:'金标准类型须为 BioRED 或 DiMB-RE。',GOLD_ENTITY_OFFSET_INVALID:'金标准实体偏移与文本不一致。',GOLD_DUPLICATE_DOCUMENT:'金标准包含重复文献 ID。',GOLD_SET_NOT_FOUND:'未找到金标准集。',GOLD_SET_REQUIRED:'请选择金标准集。',GOLD_PROFILE_NOT_FOUND:'未找到映射档案。',GOLD_PROFILE_BENCHMARK_MISSING:'该档案没有此金标准的映射。',GOLD_MODE_INVALID:'对齐模式无效。',GOLD_REVIEW_LEVELS_INVALID:'映射审核级别无效。',GOLD_KIND_MISMATCH:'金标准类型不一致。',GOLD_FILE_INVALID:'金标准文件名无效。',GOLD_FILE_NOT_FOUND:'服务器上找不到该金标准文件。',GOLD_FILE_TOO_LARGE:'金标准文件过大。'});
+async function loadGold(){const [s,p,f]=await Promise.all([api('/api/gold-sets'),api('/api/gold-profiles'),api('/api/gold-files')]);goldSets=s.gold_sets;goldProfiles=p.profiles;
+  const imported=new Set(goldSets.map(g=>g.name));
+  $('#gold-server-file').innerHTML=f.files.length?f.files.map(x=>`<option value="${esc(x.file)}">${esc(x.file)} · ${esc(x.kind)} · ${(x.bytes/1048576).toFixed(1)} MiB${imported.has(x.benchmark+'-'+x.split)?' · 已导入':''}</option>`).join(''):`<option value="">${f.directory_configured?'服务器目录中没有 gold.*.json，请先运行 benchmarks/prepare.py':'未配置服务器金标准目录（QC_GOLD_DIR）'}</option>`;
   const keep=$('#gold-set').value,keepP=$('#gold-profile').value;
   $('#gold-set').innerHTML=goldSets.map(g=>`<option value="${esc(g.id)}">${esc(g.name)} · ${esc(g.kind)} · ${g.summary.documents} 篇</option>`).join('');
   if(goldSets.some(g=>g.id===keep))$('#gold-set').value=keep;
@@ -295,6 +297,9 @@ async function showGoldEval(id,mode){const v=await api(`/api/gold-evals/${id}`),
   html+=`<p><button id="gold-errors">下载 FP / FN 错误样本</button></p><ul class="muted">${r.limitations.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`;
   $('#gold-detail').innerHTML=html;
   $('#gold-errors').onclick=()=>guarded(async()=>{const e=await api(`/api/gold-evals/${id}/errors`);const blob=new Blob([JSON.stringify(e,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`gold-errors-${id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});}
+on('#gold-import-server',async()=>{const file=$('#gold-server-file').value;if(!file)throw Error('服务器上没有可导入的金标准文件');
+  notice('正在从服务器导入金标准集…');const v=await api('/api/gold-sets',{server_file:file,name:$('#gold-name').value||undefined});
+  notice(v.created?`已导入 ${file}（hash ${v.gold_hash.slice(0,12)}）`:`${file} 内容与已导入的金标准集相同，未重复导入`);await loadGold();$('#gold-set').value=v.id;await renderGoldCompare();});
 on('#gold-import',async()=>{const file=$('#gold-file').files[0];if(!file)throw Error('请选择 gold.*.json 文件');const payload=JSON.parse(await file.text());
   const v=await api('/api/gold-sets',{kind:$('#gold-kind').value,name:$('#gold-name').value||file.name.replace(/\.json$/,''),payload});
   notice(v.created?`已导入金标准集（hash ${v.gold_hash.slice(0,12)}）`:'相同内容的金标准集已存在，未重复导入');await loadGold();$('#gold-set').value=v.id;await renderGoldCompare();});

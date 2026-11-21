@@ -91,7 +91,7 @@ curl -s http://127.0.0.1:8090/api/gold-profiles | python3 -c 'import json,sys; p
 
 应输出 `['litkg', 'neo4j-builder', 'pubtator3']`。在浏览器中打开 QC，侧栏应出现“金标准评测”。
 
-QC 通过 `QC_LITKG_UPLOAD_DIR`（默认 `./data/uploads`）只读挂载 LitKG 的上传目录，以便识别纯文本原文。如果生产环境改过上传目录，这个变量也要同步修改。
+QC 通过 `QC_LITKG_UPLOAD_DIR`（默认 `./data/uploads`）只读挂载 LitKG 的上传目录，以便识别纯文本原文；通过 `QC_GOLD_HOST_DIR`（默认 `./data/benchmarks`）只读挂载金标准目录，网页上直接列出服务器上的 `gold.*.json` 供导入。如果生产环境改过这两个目录，这两个变量也要同步修改。
 
 ## 5. 准备金标准数据（需要外网）
 
