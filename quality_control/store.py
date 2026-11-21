@@ -98,6 +98,19 @@ class Store:
                     claim_id TEXT NOT NULL, reviewer TEXT NOT NULL, verdict TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS review_rounds(id TEXT PRIMARY KEY, graph_id TEXT NOT NULL REFERENCES graphs(id),
                     name TEXT NOT NULL, seed TEXT NOT NULL, claim_ids TEXT NOT NULL, uncertainty REAL NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS gold_sets(id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+                    gold_hash TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS gold_evals(id TEXT PRIMARY KEY, graph_id TEXT NOT NULL REFERENCES graphs(id),
+                    gold_set_id TEXT NOT NULL REFERENCES gold_sets(id), profile TEXT NOT NULL, profile_hash TEXT NOT NULL,
+                    modes TEXT NOT NULL, report TEXT NOT NULL, errors TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS gold_evals_graph ON gold_evals(graph_id, created_at);
+                CREATE INDEX IF NOT EXISTS gold_evals_gold_set ON gold_evals(gold_set_id, created_at);
+                CREATE TRIGGER IF NOT EXISTS gold_sets_immutable BEFORE UPDATE ON gold_sets
+                    BEGIN SELECT RAISE(ABORT, 'GOLD_SET_IMMUTABLE'); END;
+                CREATE TRIGGER IF NOT EXISTS gold_sets_no_delete BEFORE DELETE ON gold_sets
+                    BEGIN SELECT RAISE(ABORT, 'GOLD_SET_IMMUTABLE'); END;
+                CREATE TRIGGER IF NOT EXISTS gold_evals_immutable BEFORE UPDATE ON gold_evals
+                    BEGIN SELECT RAISE(ABORT, 'GOLD_EVAL_IMMUTABLE'); END;
             ''')
             db.execute('BEGIN IMMEDIATE')
             db.execute("""CREATE TABLE IF NOT EXISTS graph_overview (
@@ -205,6 +218,7 @@ class Store:
             db.execute('DELETE FROM review_rounds WHERE graph_id=?', (graph_id,))
             db.execute('DELETE FROM samples WHERE graph_id=?', (graph_id,))
             db.execute('DELETE FROM runs WHERE graph_id=?', (graph_id,))
+            db.execute('DELETE FROM gold_evals WHERE graph_id=?', (graph_id,))
             db.execute('DELETE FROM graphs WHERE id=?', (graph_id,))
         self._graph_report_page.cache_clear()
 
@@ -432,3 +446,87 @@ class Store:
             db.execute('INSERT INTO reviews(graph_id,claim_id,reviewer,verdict,note,created_at,round_id) VALUES (?,?,?,?,?,?,?)',
                        (gid, cid, reviewer.strip(), verdict, note, now(), state['sample']['id']))
         return self.sample_state(gid, state['sample']['id'])
+
+    # ---- gold-standard evaluation (separate from machine/human QC scores)
+
+    def add_gold_set(self, kind, name, payload):
+        from .gold import validate_gold
+        from .models import digest
+        summary = validate_gold(kind, payload)
+        gold_hash = digest(payload)
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            name = payload.get('name') or f'{kind}-{gold_hash[:8]}'
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT id FROM gold_sets WHERE gold_hash=?', (gold_hash,)).fetchone()
+            if row:
+                return dict(id=row['id'], gold_hash=gold_hash, created=False, summary=summary)
+            gid = uuid.uuid4().hex
+            db.execute('INSERT INTO gold_sets VALUES (?,?,?,?,?,?,?)',
+                       (gid, kind, name.strip()[:200], gold_hash, json.dumps(payload, ensure_ascii=False),
+                        json.dumps(summary, ensure_ascii=False), now()))
+        return dict(id=gid, gold_hash=gold_hash, created=True, summary=summary)
+
+    def list_gold_sets(self):
+        with self.connect() as db:
+            rows = db.execute('SELECT id,kind,name,gold_hash,summary,created_at FROM gold_sets ORDER BY created_at DESC').fetchall()
+        return [dict(row, summary=json.loads(row['summary'])) for row in rows]
+
+    def gold_set(self, gold_set_id):
+        with self.connect() as db:
+            row = db.execute('SELECT kind,payload FROM gold_sets WHERE id=?', (gold_set_id,)).fetchone()
+        if not row:
+            raise KeyError('GOLD_SET_NOT_FOUND')
+        return row['kind'], json.loads(row['payload'])
+
+    def latest_llm_report(self, graph_id):
+        with self.connect() as db:
+            row = db.execute("SELECT id,report FROM runs WHERE graph_id=? AND mode='llm' AND status='completed' "
+                             "AND report IS NOT NULL ORDER BY created_at DESC LIMIT 1", (graph_id,)).fetchone()
+        return (row['id'], json.loads(row['report'])) if row else (None, None)
+
+    def add_gold_eval(self, graph_id, gold_set_id, report, errors):
+        eid = uuid.uuid4().hex
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            _require_graph(db, graph_id)
+            db.execute('INSERT INTO gold_evals VALUES (?,?,?,?,?,?,?,?,?)',
+                       (eid, graph_id, gold_set_id, report['profile']['name'], report['profile']['hash'],
+                        json.dumps(report['modes']), json.dumps(report, ensure_ascii=False),
+                        json.dumps(errors, ensure_ascii=False), now()))
+        return eid
+
+    def list_gold_evals(self, graph_id=None, gold_set_id=None):
+        query, params = ['1=1'], []
+        if graph_id is not None:
+            query.append('e.graph_id=?')
+            params.append(graph_id)
+        if gold_set_id is not None:
+            query.append('e.gold_set_id=?')
+            params.append(gold_set_id)
+        with self.connect() as db:
+            if graph_id is not None:
+                _require_graph(db, graph_id)
+            rows = db.execute(f"""SELECT e.id,e.graph_id,g.name AS graph_name,e.gold_set_id,e.profile,e.modes,e.report,e.created_at
+                                  FROM gold_evals AS e JOIN graphs AS g ON g.id=e.graph_id
+                                  WHERE {' AND '.join(query)} ORDER BY e.created_at DESC""", params).fetchall()
+        result = []
+        for row in rows:
+            report = json.loads(row['report'])
+            for mode in report.get('results', {}).values():
+                mode.pop('per_document', None)
+            result.append(dict(id=row['id'], graph_id=row['graph_id'], graph_name=row['graph_name'],
+                               gold_set_id=row['gold_set_id'], profile=row['profile'], modes=json.loads(row['modes']),
+                               created_at=row['created_at'], report=report))
+        return result
+
+    def gold_eval(self, eval_id, errors=False):
+        with self.connect() as db:
+            row = db.execute('SELECT id,graph_id,gold_set_id,report,errors,created_at FROM gold_evals WHERE id=?',
+                             (eval_id,)).fetchone()
+        if not row:
+            raise KeyError('GOLD_EVAL_NOT_FOUND')
+        if errors:
+            return dict(id=row['id'], graph_id=row['graph_id'], errors=json.loads(row['errors']))
+        return dict(id=row['id'], graph_id=row['graph_id'], gold_set_id=row['gold_set_id'],
+                    created_at=row['created_at'], report=json.loads(row['report']))
