@@ -1,6 +1,6 @@
 {
  "profile": "pubtator3",
- "version": "1.0.0",
+ "version": "1.1.0",
  "description": "kg-baselines PubTator3 graphs (native and PubTator entities + LLM relations). Nodes carry PubTator concept IDs in xrefs.",
  "entity_id_fields": [
   "xrefs"
@@ -32,6 +32,86 @@
   "biored": {
    "relation_rules": [
     {
+     "id": "p3-bioc-association",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Association"
+     },
+     "label": "Association",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-positive_correlation",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Positive_Correlation"
+     },
+     "label": "Positive_Correlation",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-negative_correlation",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Negative_Correlation"
+     },
+     "label": "Negative_Correlation",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-bind",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Bind"
+     },
+     "label": "Bind",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-cotreatment",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Cotreatment"
+     },
+     "label": "Cotreatment",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-comparison",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Comparison"
+     },
+     "label": "Comparison",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-conversion",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Conversion"
+     },
+     "label": "Conversion",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-drug_interaction",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Drug_Interaction"
+     },
+     "label": "Drug_Interaction",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
      "id": "p3-pos",
      "predicate": "*",
      "when": {
@@ -39,7 +119,7 @@
      },
      "label": "Positive_Correlation",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-neg",
@@ -49,7 +129,7 @@
      },
      "label": "Negative_Correlation",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-assoc",
@@ -59,17 +139,7 @@
      },
      "label": "Association",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
-    },
-    {
-     "id": "p3-bind",
-     "predicate": "*",
-     "when": {
-      "qualifiers.original_predicate": "bind"
-     },
-     "label": "Bind",
-     "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-cotreat",
@@ -79,7 +149,7 @@
      },
      "label": "Cotreatment",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-drugint",
@@ -89,7 +159,7 @@
      },
      "label": "Drug_Interaction",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-compare",
@@ -99,7 +169,7 @@
      },
      "label": "Comparison",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-convert",
@@ -109,7 +179,7 @@
      },
      "label": "Conversion",
      "review": "needs_review",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-treat",
@@ -119,7 +189,7 @@
      },
      "label": "Negative_Correlation",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-cause",
@@ -129,7 +199,7 @@
      },
      "label": "Positive_Correlation",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-inhibit",
@@ -139,7 +209,7 @@
      },
      "label": "Negative_Correlation",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-stimulate",
@@ -149,7 +219,7 @@
      },
      "label": "Positive_Correlation",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-prevent",
@@ -159,7 +229,7 @@
      },
      "label": "Negative_Correlation",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "p3-interact",
@@ -169,7 +239,7 @@
      },
      "label": "Association",
      "review": "TODO",
-     "source": "PubTator3 relation type (qualifiers.original_predicate); verify against the API notes in kg-baselines/docs/pubtator3_api_notes.md"
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see kg-baselines/docs/pubtator3_api_notes.md"
     },
     {
      "id": "corr-pos",
