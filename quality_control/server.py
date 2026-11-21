@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .engine import evaluate
 from .adaptive import configured_max_concurrency
+from .gold import DEFAULT_REVIEW_LEVELS, GOLD_EVAL_VERSION, evaluate as evaluate_gold, list_profiles
 from .llm import Client, NoRedirect
 from .models import normalize, blocks, anchor, digest, public_claim, SCENARIOS, VERSION
 from .sources import attach_litkg_sources, attach_uploaded_sources
@@ -57,6 +58,26 @@ class Service:
             return json.loads(raw)
         except (ValueError, UnicodeError):
             raise ValueError("LITKG_UPSTREAM_INVALID_JSON") from None
+
+    def gold_eval(self, gid, body):
+        """Run a gold-standard evaluation synchronously; the snapshot is only read."""
+        graph = self.store.graph(gid)
+        gold_set_id = body.get('gold_set_id')
+        if not isinstance(gold_set_id, str):
+            raise ValueError('GOLD_SET_REQUIRED')
+        kind, gold = self.store.gold_set(gold_set_id)
+        modes = body.get('modes', ['id', 'mention'])
+        if isinstance(modes, str):
+            modes = ['id', 'mention'] if modes == 'both' else [modes]
+        levels = body.get('review_levels', list(DEFAULT_REVIEW_LEVELS))
+        if not isinstance(modes, list) or not isinstance(levels, list):
+            raise ValueError('GOLD_REQUEST_INVALID')
+        qc_run_id, qc_report = self.store.latest_llm_report(gid)
+        report, errors = evaluate_gold(graph, gold, kind, body.get('profile', 'litkg'), modes,
+                                       review_levels=levels, qc_report=qc_report, qc_run_id=qc_run_id,
+                                       bootstrap_rounds=body.get('bootstrap', 1000), gold_set=gold_set_id)
+        eid = self.store.add_gold_eval(gid, gold_set_id, report, errors)
+        return dict(id=eid, graph_id=gid, report=report)
 
     def submit(self, gid, mode):
         if mode not in {'automatic', 'llm'}:
@@ -204,6 +225,20 @@ def handler(service):
                     self.reply({'graphs': service.store.list_graph_overviews()})
                     return
                 self.reply({'graphs': service.store.list_graphs()})
+            elif method == 'GET' and path == '/api/gold-profiles':
+                self.reply({'profiles': list_profiles(), 'version': GOLD_EVAL_VERSION})
+            elif method == 'POST' and path == '/api/gold-sets':
+                body = self.body()
+                result = service.store.add_gold_set(body.get('kind'), body.get('name'), body.get('payload'))
+                self.reply(result, 201 if result['created'] else 200)
+            elif method == 'GET' and path == '/api/gold-sets':
+                self.reply({'gold_sets': service.store.list_gold_sets()})
+            elif method == 'GET' and path == '/api/gold-evals':
+                gold_set_id = urllib.parse.parse_qs(parts.query).get('gold_set_id', [None])[0]
+                self.reply({'evals': service.store.list_gold_evals(gold_set_id=gold_set_id)})
+            elif method == 'GET' and re.fullmatch(r'/api/gold-evals/[0-9a-f]{32}(?:/errors)?', path):
+                pieces = path.strip('/').split('/')
+                self.reply(service.store.gold_eval(pieces[2], errors=len(pieces) == 4))
             elif method == 'POST' and re.fullmatch(r'/api/runs/[^/]+/cancel', path):
                 self.body()
                 run_id = path.split('/')[3]
@@ -252,6 +287,10 @@ def handler(service):
                 elif method == 'GET' and action == 'export':
                     graph = service.store.graph(gid)
                     self.reply(dict(graph=graph, run=service.store.latest_run(gid), human=service.store.sample_state(gid)))
+                elif method == 'POST' and action == 'gold-evals' and len(pieces) == 4:
+                    self.reply(service.gold_eval(gid, self.body()), 201)
+                elif method == 'GET' and action == 'gold-evals' and len(pieces) == 4:
+                    self.reply({'evals': service.store.list_gold_evals(graph_id=gid)})
                 elif method == 'POST' and action == 'runs':
                     self.reply(service.submit(gid, self.body().get('mode', 'automatic')), 202)
                 elif method == 'POST' and action == 'sample':

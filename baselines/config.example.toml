@@ -1,0 +1,48 @@
+# Copy to config.toml (git-ignored). Never put credentials in this file:
+# use *_file paths or environment variables only.
+
+[paths]
+corpus = "corpus/documents.json"   # QC .graph.documents, copied verbatim into every output
+policy = "corpus/policy.json"      # QC .graph.policy
+id_map = "corpus/id_map.csv"       # optional: doc_id,pmid,pmcid
+pdfs = "pdfs"
+cache = "cache"
+out = "out"
+corpus_name = "my-corpus"
+
+[llm]
+base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible /v1
+model = "same-model-as-litkg"           # MUST equal the LitKG extraction model
+litkg_model = "same-model-as-litkg"     # what LitKG used (LLM_MODEL); recorded and compared
+temperature = 0
+max_tokens = 4096
+concurrency = 2
+api_key_file = "secrets/llm_api_key"    # or leave empty and export KGB_LLM_API_KEY
+api_key_env = "KGB_LLM_API_KEY"
+
+[pubtator]
+requests_per_second = 3                 # official limit: no more than three requests per second
+max_chars = 3000                        # free-text piece size (limit undocumented; see docs)
+bioconcepts = ["All"]                   # only value that returned data on 2026-11-21; see docs/pubtator3_api_notes.md
+max_wait_400 = 300                      # HTTP 400 on retrieve treated as pending for at most this long
+poll_interval = 15
+max_wait = 1800
+window_chars = 12000                    # LitKG chunk/catalog segment size
+window_overlap = 800                    # LitKG chunk overlap
+
+[neo4j]
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+database = "neo4j"
+password_file = "secrets/neo4j_password" # or KGB_NEO4J_PASSWORD
+password_env = "KGB_NEO4J_PASSWORD"
+backend_url = "http://127.0.0.1:8000"
+model = "litkg_compat"                  # backend key: LLM_MODEL_CONFIG_LITKG_COMPAT (must NOT contain OPENAI/AZURE/GEMINI/ANTHROPIC/GROQ/FIREWORKS/BEDROCK/OLLAMA/DIFFBOT)
+model_name = "same-model-as-litkg"       # the underlying model, recorded in metadata
+builder_ref = "v0.8.7"
+builder_commit = "1ade47de63edb161e5ea37a277141643f3af3142"
+token_chunk_size = 200
+chunk_overlap = 20
+chunks_to_combine = 1
+dedicated_database = false               # must be true: the database is cleared between documents
+max_schema_triples = 3000

@@ -458,3 +458,9 @@ CREATE TABLE IF NOT EXISTS scoped_repair_runs (
 -- Review reference lookups used by Claims retrieval and complete exports.
 CREATE INDEX IF NOT EXISTS litkg_review_items_claim_ref_idx ON review_items ((detail ->> 'claim_id'));
 CREATE INDEX IF NOT EXISTS litkg_review_items_chunk_ref_idx ON review_items ((detail ->> 'chunk_id'));
+
+-- Plain-text document import; see db/migrations/20261121_text_documents.sql.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS external_id TEXT;
+CREATE INDEX IF NOT EXISTS documents_external_id ON documents(external_id) WHERE external_id IS NOT NULL;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_block_id TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_offset INT;

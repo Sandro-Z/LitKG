@@ -146,6 +146,10 @@ docker compose up -d --build --no-deps api
 
 API、比较页面及导出在读取时按最新人工记录重新计算，不需要再次调用LLM。报告同时保留 `machine_dimensions`、融合后的 `dimensions`、`machine_scenarios`、`human` 权重/完成度/人数/分歧、`score_revision`；数据库内的原机器评审结果保持原样。人工判断有错或分歧会影响门禁。严格一致支持率及 Wilson 95% 区间仍单独提供，评分是工程加权指标，不能解释为经过校准的全图准确率。
 
+## 金标准评测（BioRED / DiMB-RE）
+
+“金标准评测”页和 `/api/gold-*` 接口在人工标注金标准上计算真实的 Precision / Recall / F1，并在已有 LLM 评审时计算 QC 校准。结果存放在独立的不可变表 `gold_sets` / `gold_evals` 中，版本号为 `GOLD_EVAL_VERSION`，不改变上述机器评分、门禁和人工融合。映射档案见 `gold_profiles/*.json`，每条规则都带 `review` 状态，`TODO` 规则不参与评测。完整流程见 `docs/benchmark-eval.md`。
+
 ## 空分数诊断与旧报告
 
 旧版分数链路过度依赖可选标量和完整抽取响应，未给范围又会直接隐藏完整性。新版分开处理各指标，保留有效候选和证据，并在缺少领域/粒度值时单独补评。普通本体重跑会复用最近一次完成的LLM原文报告，而不会把五个证据维度清空。

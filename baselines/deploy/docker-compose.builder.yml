@@ -1,0 +1,37 @@
+# Neo4j LLM Graph Builder backend (pinned clone) + a dedicated Neo4j 5.x with APOC.
+# Started by scripts/run_baselines.sh; all variables below are exported by that script.
+# Secrets come from git-ignored env files under data/baselines/secrets/.
+name: litkg-baselines
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    env_file: ${KGB_SECRETS}/neo4j.env                  # NEO4J_AUTH=neo4j/<generated>
+    environment:
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+    ports:
+      - "127.0.0.1:${KGB_NEO4J_BOLT_PORT:-17687}:7687"
+    volumes:
+      - kgb_neo4j_data:/data
+  builder-backend:
+    build: ${KGB_BUILDER_DIR}/backend
+    restart: unless-stopped
+    env_file: ${KGB_SECRETS}/builder-backend.env        # LLM_MODEL_CONFIG_LITKG_COMPAT=model,url,key
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      IS_EMBEDDING: "True"
+      EMBEDDING_PROVIDER: sentence-transformer
+      EMBEDDING_MODEL: all-MiniLM-L6-v2
+      GCS_FILE_CACHE: "False"
+    # Fewer workers than upstream (8x8) to keep memory bounded on a shared host.
+    command: ["gunicorn", "score:app", "--workers", "2", "--threads", "4", "--worker-class",
+              "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "1800"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${KGB_BUILDER_PORT:-18000}:8000"
+    depends_on: [neo4j]
+volumes:
+  kgb_neo4j_data:

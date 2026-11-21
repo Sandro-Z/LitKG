@@ -1,0 +1,47 @@
+{
+ "version": "1.0.0",
+ "description": "PubTator3 entity types -> policy node types; unknown types become Other.",
+ "types": {
+  "Gene": {
+   "type": "Gene",
+   "review": "needs_review",
+   "note": "PubTator Gene covers genes and gene products (proteins)"
+  },
+  "Disease": {
+   "type": "Disease",
+   "review": "confirmed"
+  },
+  "Chemical": {
+   "type": "Compound",
+   "review": "confirmed"
+  },
+  "Species": {
+   "type": "Organism",
+   "review": "confirmed"
+  },
+  "Mutation": {
+   "type": "Mutation",
+   "review": "confirmed"
+  },
+  "Variant": {
+   "type": "Mutation",
+   "review": "confirmed"
+  },
+  "DNAMutation": {
+   "type": "Mutation",
+   "review": "confirmed"
+  },
+  "ProteinMutation": {
+   "type": "Mutation",
+   "review": "confirmed"
+  },
+  "SNP": {
+   "type": "Mutation",
+   "review": "confirmed"
+  },
+  "CellLine": {
+   "type": "CellLine",
+   "review": "confirmed"
+  }
+ }
+}

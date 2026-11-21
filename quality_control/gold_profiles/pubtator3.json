@@ -1,0 +1,732 @@
+{
+ "profile": "pubtator3",
+ "version": "1.1.0",
+ "description": "baselines/ PubTator3 graphs (native and PubTator entities + LLM relations). Nodes carry PubTator concept IDs in xrefs.",
+ "entity_id_fields": [
+  "xrefs"
+ ],
+ "surface_fields": [
+  "label",
+  "aliases",
+  "observed_labels"
+ ],
+ "negation_fields": [
+  "qualifiers.negated",
+  "original.negated",
+  "original.claim_json.negated"
+ ],
+ "speculation_fields": [
+  "qualifiers.speculative",
+  "original.speculative",
+  "original.claim_json.speculative"
+ ],
+ "speculative_modality_values": [
+  "speculative",
+  "hypothesis",
+  "hypothetical",
+  "possible",
+  "may"
+ ],
+ "mention_type_filter": true,
+ "benchmarks": {
+  "biored": {
+   "relation_rules": [
+    {
+     "id": "p3-bioc-association",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Association"
+     },
+     "label": "Association",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-positive_correlation",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Positive_Correlation"
+     },
+     "label": "Positive_Correlation",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-negative_correlation",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Negative_Correlation"
+     },
+     "label": "Negative_Correlation",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-bind",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Bind"
+     },
+     "label": "Bind",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-cotreatment",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Cotreatment"
+     },
+     "label": "Cotreatment",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-comparison",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Comparison"
+     },
+     "label": "Comparison",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-conversion",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Conversion"
+     },
+     "label": "Conversion",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-bioc-drug_interaction",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "Drug_Interaction"
+     },
+     "label": "Drug_Interaction",
+     "review": "confirmed",
+     "source": "PubTator3 biocjson export relations[].infons.type uses the BioRED label set (observed 2026-11-21)"
+    },
+    {
+     "id": "p3-pos",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "positive_correlate"
+     },
+     "label": "Positive_Correlation",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-neg",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "negative_correlate"
+     },
+     "label": "Negative_Correlation",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-assoc",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "associate"
+     },
+     "label": "Association",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-cotreat",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "cotreat"
+     },
+     "label": "Cotreatment",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-drugint",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "drug_interact"
+     },
+     "label": "Drug_Interaction",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-compare",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "compare"
+     },
+     "label": "Comparison",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-convert",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "convert"
+     },
+     "label": "Conversion",
+     "review": "needs_review",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-treat",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "treat"
+     },
+     "label": "Negative_Correlation",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-cause",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "cause"
+     },
+     "label": "Positive_Correlation",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-inhibit",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "inhibit"
+     },
+     "label": "Negative_Correlation",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-stimulate",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "stimulate"
+     },
+     "label": "Positive_Correlation",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-prevent",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "prevent"
+     },
+     "label": "Negative_Correlation",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "p3-interact",
+     "predicate": "*",
+     "when": {
+      "qualifiers.original_predicate": "interact"
+     },
+     "label": "Association",
+     "review": "TODO",
+     "source": "PubTator3 API page (Find Related Entities) relation types; verified 2026-11-21, see baselines/docs/pubtator3_api_notes.md"
+    },
+    {
+     "id": "corr-pos",
+     "predicate": "CORRELATED_WITH",
+     "when": {
+      "qualifiers.association_direction": "positive"
+     },
+     "label": "Positive_Correlation",
+     "review": "confirmed",
+     "source": "LitKG association_direction=positive; BioRED label name"
+    },
+    {
+     "id": "corr-neg",
+     "predicate": "CORRELATED_WITH",
+     "when": {
+      "qualifiers.association_direction": "negative"
+     },
+     "label": "Negative_Correlation",
+     "review": "confirmed",
+     "source": "LitKG association_direction=negative; BioRED label name"
+    },
+    {
+     "id": "corr-unspec",
+     "predicate": "CORRELATED_WITH",
+     "label": "Association",
+     "review": "needs_review",
+     "source": "BioRED: associations that cannot be categorized to positive/negative correlation"
+    },
+    {
+     "id": "assoc",
+     "predicate": "ASSOCIATED_WITH",
+     "label": "Association",
+     "review": "confirmed",
+     "source": "Both: association without mechanism or direction"
+    },
+    {
+     "id": "bind",
+     "predicate": "BINDS_TO",
+     "label": "Bind",
+     "review": "confirmed",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Gene-Gene Bind; Chemical-Gene Receptor -> Bind"
+    },
+    {
+     "id": "treats",
+     "predicate": "TREATS",
+     "label": "Negative_Correlation",
+     "review": "needs_review",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Chemical-Disease Treatment -> Negative_Correlation"
+    },
+    {
+     "id": "causes",
+     "predicate": "CAUSES",
+     "label": "Positive_Correlation",
+     "review": "needs_review",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Chemical-Disease Induce -> Positive_Correlation"
+    },
+    {
+     "id": "prevents",
+     "predicate": "PREVENTS",
+     "label": "Negative_Correlation",
+     "review": "needs_review",
+     "source": "BioRED Disease-chemical: chemical drops down the susceptibility of the disease"
+    },
+    {
+     "id": "interacts",
+     "predicate": "INTERACTS_WITH",
+     "label": "Association",
+     "review": "needs_review",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Gene-Gene Regulation/Modification -> Association"
+    },
+    {
+     "id": "activates",
+     "predicate": "ACTIVATES",
+     "label": "Positive_Correlation",
+     "review": "needs_review",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Gene-Gene Upregulation, Chemical-Chemical Increase -> Positive_Correlation"
+    },
+    {
+     "id": "inhibits",
+     "predicate": "INHIBITS",
+     "label": "Negative_Correlation",
+     "review": "needs_review",
+     "source": "BioRED_Annotation_Guideline.pdf, \"Guideline of the relation types\" Table 4: Gene-Gene Downregulation, Chemical-Chemical Inhibition -> Negative_Correlation"
+    },
+    {
+     "id": "affects-up",
+     "predicate": "AFFECTS",
+     "when": {
+      "object.process.direction": "increased"
+     },
+     "label": "Positive_Correlation",
+     "review": "needs_review",
+     "source": "Directional effect on the object aspect"
+    },
+    {
+     "id": "affects-down",
+     "predicate": "AFFECTS",
+     "when": {
+      "object.process.direction": "decreased"
+     },
+     "label": "Negative_Correlation",
+     "review": "needs_review",
+     "source": "Directional effect on the object aspect"
+    },
+    {
+     "id": "affects-other",
+     "predicate": "AFFECTS",
+     "label": "Association",
+     "review": "TODO",
+     "source": "Unclear whether an unspecified effect meets BioRED's explicit-statement rule"
+    },
+    {
+     "id": "transforms",
+     "predicate": "TRANSFORMS",
+     "label": "Conversion",
+     "review": "TODO",
+     "source": "Conversion appears in BioRED data but has no guideline definition"
+    },
+    {
+     "id": "targets",
+     "predicate": "TARGETS",
+     "label": "Bind",
+     "review": "TODO",
+     "source": "Could be Bind or Association; not determinable from definitions"
+    }
+   ],
+   "unsupported_predicates": [
+    "SUBCLASS_OF",
+    "MEMBER_OF",
+    "PART_OF",
+    "DIFFERS_BETWEEN",
+    "PRODUCES",
+    "CONSUMES",
+    "ENCODES",
+    "CATALYZES",
+    "COLONIZES",
+    "CROSS_FEEDS",
+    "COMPETES_WITH",
+    "INFECTS",
+    "PREDICTS",
+    "MEASURED_BY",
+    "SAMPLED_FROM",
+    "LOCATED_IN",
+    "PARTICIPATES_IN"
+   ],
+   "entity_types": [
+    {
+     "type": "Gene",
+     "label": "GeneOrGeneProduct",
+     "review": "confirmed"
+    },
+    {
+     "type": "Protein",
+     "label": "GeneOrGeneProduct",
+     "review": "confirmed"
+    },
+    {
+     "type": "Disease",
+     "label": "DiseaseOrPhenotypicFeature",
+     "review": "confirmed"
+    },
+    {
+     "type": "Phenotype",
+     "label": "DiseaseOrPhenotypicFeature",
+     "review": "needs_review"
+    },
+    {
+     "type": "Compound",
+     "label": "ChemicalEntity",
+     "review": "confirmed"
+    },
+    {
+     "type": "Drug",
+     "label": "ChemicalEntity",
+     "review": "confirmed"
+    },
+    {
+     "type": "Metabolite",
+     "label": "ChemicalEntity",
+     "review": "confirmed"
+    },
+    {
+     "type": "Organism",
+     "label": "OrganismTaxon",
+     "review": "confirmed"
+    },
+    {
+     "type": "MicrobialTaxon",
+     "label": "OrganismTaxon",
+     "review": "confirmed"
+    },
+    {
+     "type": "MicrobialStrain",
+     "label": "OrganismTaxon",
+     "review": "needs_review"
+    },
+    {
+     "type": "Mutation",
+     "label": "SequenceVariant",
+     "review": "confirmed"
+    },
+    {
+     "type": "CellLine",
+     "label": "CellLine",
+     "review": "confirmed"
+    },
+    {
+     "type": "DietaryComponent",
+     "label": null,
+     "review": "TODO"
+    },
+    {
+     "type": "ClinicalOutcome",
+     "label": null,
+     "review": "TODO"
+    },
+    {
+     "type": "RNA",
+     "label": null,
+     "review": "TODO"
+    },
+    {
+     "type": "Chemical",
+     "label": "ChemicalEntity",
+     "review": "needs_review"
+    },
+    {
+     "type": "Species",
+     "label": "OrganismTaxon",
+     "review": "needs_review"
+    },
+    {
+     "type": "Variant",
+     "label": "SequenceVariant",
+     "review": "needs_review"
+    },
+    {
+     "type": "Mutation",
+     "label": "SequenceVariant",
+     "review": "confirmed"
+    }
+   ],
+   "unsupported_labels": []
+  },
+  "dimbre": {
+   "relation_rules": [
+    {
+     "id": "corr-pos",
+     "predicate": "CORRELATED_WITH",
+     "when": {
+      "qualifiers.association_direction": "positive"
+     },
+     "label": "POS_ASSOCIATED_WITH",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Positively associated with = Positive correlation"
+    },
+    {
+     "id": "corr-neg",
+     "predicate": "CORRELATED_WITH",
+     "when": {
+      "qualifiers.association_direction": "negative"
+     },
+     "label": "NEG_ASSOCIATED_WITH",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Negatively associated with example (negative correlation)"
+    },
+    {
+     "id": "corr-unspec",
+     "predicate": "CORRELATED_WITH",
+     "label": "ASSOCIATED_WITH",
+     "review": "needs_review",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Associated with = unspecified relationship, a correlation"
+    },
+    {
+     "id": "assoc",
+     "predicate": "ASSOCIATED_WITH",
+     "label": "ASSOCIATED_WITH",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Associated with = An unspecified relationship, a correlation"
+    },
+    {
+     "id": "interacts",
+     "predicate": "INTERACTS_WITH",
+     "label": "INTERACTS_WITH",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Interacts with = Acts, functions, or operates together with"
+    },
+    {
+     "id": "prevents",
+     "predicate": "PREVENTS",
+     "label": "PREVENTS",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Prevents = Stops, hinders or eliminates"
+    },
+    {
+     "id": "causes",
+     "predicate": "CAUSES",
+     "label": "CAUSES",
+     "review": "confirmed",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Causes = Brings about a condition or an effect"
+    },
+    {
+     "id": "affects-up",
+     "predicate": "AFFECTS",
+     "when": {
+      "object.process.direction": "increased"
+     },
+     "label": "INCREASES",
+     "review": "needs_review",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Increases = Make greater in size, amount, intensity, or degree"
+    },
+    {
+     "id": "affects-down",
+     "predicate": "AFFECTS",
+     "when": {
+      "object.process.direction": "decreased"
+     },
+     "label": "DECREASES",
+     "review": "needs_review",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Decreases = Make smaller in size, amount, intensity, or degree"
+    },
+    {
+     "id": "affects-other",
+     "predicate": "AFFECTS",
+     "label": "AFFECTS",
+     "review": "needs_review",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Affects = direct effect whose nature is not explicit"
+    },
+    {
+     "id": "part-of",
+     "predicate": "PART_OF",
+     "label": "HAS_COMPONENT",
+     "review": "needs_review",
+     "source": "DiMB-RE PURE/icl/prompts/desc_guid_1shot_021424.txt: Has component = one entity is a constituent part of another (subject/object swapped)",
+     "swap": true
+    },
+    {
+     "id": "treats",
+     "predicate": "TREATS",
+     "label": "IMPROVES",
+     "review": "TODO",
+     "source": "IMPROVES describes improved quality/condition; not equivalent to treatment"
+    },
+    {
+     "id": "activates",
+     "predicate": "ACTIVATES",
+     "label": "INCREASES",
+     "review": "TODO",
+     "source": "LitKG ACTIVATES requires an explicit mechanism"
+    },
+    {
+     "id": "inhibits",
+     "predicate": "INHIBITS",
+     "label": "DECREASES",
+     "review": "TODO",
+     "source": "LitKG INHIBITS requires an explicit mechanism"
+    }
+   ],
+   "unsupported_predicates": [
+    "SUBCLASS_OF",
+    "MEMBER_OF",
+    "DIFFERS_BETWEEN",
+    "PRODUCES",
+    "CONSUMES",
+    "TRANSFORMS",
+    "ENCODES",
+    "CATALYZES",
+    "COLONIZES",
+    "CROSS_FEEDS",
+    "COMPETES_WITH",
+    "INFECTS",
+    "PREDICTS",
+    "MEASURED_BY",
+    "SAMPLED_FROM",
+    "BINDS_TO",
+    "TARGETS",
+    "LOCATED_IN",
+    "PARTICIPATES_IN"
+   ],
+   "entity_types": [
+    {
+     "type": "Diet",
+     "label": "DietPattern",
+     "review": "needs_review"
+    },
+    {
+     "type": "DietaryComponent",
+     "label": "Nutrient",
+     "review": "needs_review"
+    },
+    {
+     "type": "MicrobialTaxon",
+     "label": "Microorganism",
+     "review": "needs_review"
+    },
+    {
+     "type": "MicrobialStrain",
+     "label": "Microorganism",
+     "review": "needs_review"
+    },
+    {
+     "type": "MicrobialCommunity",
+     "label": "Microorganism",
+     "review": "needs_review"
+    },
+    {
+     "type": "Metabolite",
+     "label": "Metabolite",
+     "review": "needs_review"
+    },
+    {
+     "type": "Compound",
+     "label": "Chemical",
+     "review": "needs_review"
+    },
+    {
+     "type": "Drug",
+     "label": "Chemical",
+     "review": "needs_review"
+    },
+    {
+     "type": "Disease",
+     "label": "Disease",
+     "review": "needs_review"
+    },
+    {
+     "type": "Gene",
+     "label": "Gene",
+     "review": "needs_review"
+    },
+    {
+     "type": "Protein",
+     "label": "Enzyme",
+     "review": "needs_review"
+    },
+    {
+     "type": "DiversityMetric",
+     "label": "DiversityMetric",
+     "review": "needs_review"
+    },
+    {
+     "type": "BiologicalProcess",
+     "label": "Physiology",
+     "review": "TODO"
+    },
+    {
+     "type": "Phenotype",
+     "label": "Physiology",
+     "review": "TODO"
+    },
+    {
+     "type": "Assay",
+     "label": "Measurement",
+     "review": "TODO"
+    }
+   ],
+   "unsupported_labels": [
+    "WORSENS",
+    "PREDISPOSES",
+    "IMPROVES"
+   ],
+   "factuality_rules": [
+    {
+     "id": "negated",
+     "when": {
+      "$negated": true
+     },
+     "label": "Negated",
+     "review": "needs_review",
+     "source": "verbalizer.json: Negated = 'do(es) not'"
+    },
+    {
+     "id": "speculative",
+     "when": {
+      "$speculative": true
+     },
+     "label": "Unknown",
+     "review": "needs_review",
+     "source": "verbalizer.json: Unknown = 'may'"
+    },
+    {
+     "id": "default",
+     "label": "Factual",
+     "review": "needs_review",
+     "source": "verbalizer.json: Factual = assertion"
+    }
+   ]
+  }
+ }
+}

@@ -121,7 +121,15 @@ def image_chunks(pdf_path, *, settings=None):
 
 
 def parse_sources(pdf_path, text_parser):
-    """Keep the existing parser intact; image discovery cannot erase text."""
+    """Keep the existing parser intact; image discovery cannot erase text.
+
+    Plain-text sources (``*.litkg-text.json``) bypass GROBID and page-image
+    discovery entirely; they have no PDF pages.
+    """
+    from app.ingestion import is_text_source
+    if is_text_source(pdf_path):
+        from app.parser import parse_text_source
+        return parse_text_source(pdf_path)
     try:
         metadata, chunks = text_parser(pdf_path)
     except RuntimeError as exc:
