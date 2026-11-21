@@ -9,7 +9,8 @@
 # predicates), and exports data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json.
 # Runs in the background; rerun the same command to resume (finished PDFs are checkpointed).
 # Options: --name <语料名> --detach --force. "down" stops the Neo4j/builder containers.
-# Needs Docker Compose; ports bind to 127.0.0.1 only (Neo4j 17687, builder 18000).
+# Needs Docker Compose. Run it as your normal user (not "sudo scripts/..."); it uses sudo for docker
+# by itself when needed. Ports bind to 127.0.0.1 only (Neo4j 17687, builder 18000).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${KGB_WORK:-$ROOT/data/baselines/neo4j-builder}"
@@ -21,12 +22,19 @@ BUILDER_COMMIT="1ade47de63edb161e5ea37a277141643f3af3142"
 COMPOSE_FILE="$ROOT/baselines/deploy/docker-compose.builder.yml"
 export KGB_SECRETS="$WORK/secrets" KGB_BUILDER_DIR="$BUILDER_DIR"
 export KGB_NEO4J_BOLT_PORT="${KGB_NEO4J_BOLT_PORT:-17687}" KGB_BUILDER_PORT="${KGB_BUILDER_PORT:-18000}"
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 source "$ROOT/baselines/lib.sh"
-compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
+DOCKER=(docker)
+pick_docker() {   # plain docker if this user may use it, otherwise sudo docker (asks in the foreground)
+  if docker info >/dev/null 2>&1; then DOCKER=(docker)
+  elif command -v sudo >/dev/null && sudo docker info >/dev/null; then DOCKER=(sudo --preserve-env=KGB_SECRETS,KGB_BUILDER_DIR,KGB_NEO4J_BOLT_PORT,KGB_BUILDER_PORT docker)
+  else die "cannot run docker (not installed, or no permission and sudo failed)"; fi
+  "${DOCKER[@]}" compose version >/dev/null 2>&1 || die "the Docker Compose plugin is required (docker compose version)"
+}
+compose() { "${DOCKER[@]}" compose -f "$COMPOSE_FILE" "$@"; }
 
 prepare_config() {
-  command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || die "Docker Compose is required"
+  command -v docker >/dev/null || die "Docker is required for the Neo4j LLM Graph Builder"
   write_config "$BASE_URL" "$MODEL" "$NAME" "
 [neo4j]
 uri = \"bolt://127.0.0.1:$KGB_NEO4J_BOLT_PORT\"
@@ -63,6 +71,8 @@ with GraphDatabase.driver(f"bolt://127.0.0.1:{sys.argv[1]}", auth=("neo4j", open
 PY
 }
 
+builder_ready() { neo4j_ready && curl -sf -o /dev/null "http://127.0.0.1:$KGB_BUILDER_PORT/docs"; }
+
 start_builder() {
   if [[ ! -d "$BUILDER_DIR/.git" ]]; then
     log "cloning $BUILDER_REPO@$BUILDER_REF"
@@ -74,10 +84,16 @@ start_builder() {
   compose up -d --build
   local i
   for i in $(seq 1 120); do
-    if neo4j_ready && curl -sf -o /dev/null "http://127.0.0.1:$KGB_BUILDER_PORT/docs"; then log "builder ready"; return 0; fi
+    if builder_ready; then log "builder ready"; return 0; fi
     sleep 10
   done
   log "builder not ready after 20 minutes; see: docker compose -f $COMPOSE_FILE logs"; return 1
+}
+
+before_background() {   # foreground: docker may need sudo, which can only prompt here
+  if [[ -s "$WORK/out/graph.neo4j-builder-pdfnative.json" && "$FORCE" != 1 ]]; then return 0; fi
+  pick_docker
+  start_builder || die "the builder did not start; fix the error above and rerun the same command"
 }
 
 worker() {
@@ -87,12 +103,12 @@ worker() {
   if [[ -s "$WORK/out/graph.neo4j-builder-pdfnative.json" && "$force" != 1 ]]; then
     log "graph already generated (use --force to rebuild from checkpoints)"
   else
-    start_builder || { log "FAILED to start the builder"; exit 1; }
+    builder_ready || { log "FAILED: Neo4j/builder not reachable; rerun the same command to restart them"; exit 1; }
     log "uploading PDFs and extracting (checkpointed per PDF)"
     kgb run neo4j --variant pdfnative || log "FAILED (rerun the same command to resume)"
   fi
   finish_step
 }
 
-if [[ "${1:-}" == down ]]; then compose down; exit 0; fi
+if [[ "${1:-}" == down ]]; then pick_docker; compose down; exit 0; fi
 dispatch "$@"

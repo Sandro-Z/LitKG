@@ -11,14 +11,40 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+pick_python() {   # first interpreter >= 3.11 that can create a venv with pip
+  local candidate
+  for candidate in "${PYTHON:-}" python3 python3.13 python3.12 python3.11 python; do
+    [[ -n "$candidate" ]] && command -v "$candidate" >/dev/null 2>&1 || continue
+    "$candidate" -c 'import sys, ensurepip, venv; sys.exit(sys.version_info < (3, 11))' 2>/dev/null \
+      && { command -v "$candidate"; return 0; }
+  done
+  return 1
+}
+
 setup_python() {
-  local py="${PYTHON:-python3}"
-  "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "Python >= 3.11 required (set PYTHON=...)"
-  [[ -x "$VENV/bin/python" ]] || { log "creating virtualenv $VENV"; "$py" -m venv "$VENV"; }
+  # A venv without a working pip (e.g. "python3 -m venv" failed half-way) is rebuilt.
+  if [[ -e "$VENV" ]] && ! "$VENV/bin/python" -c 'import sys, pip; sys.exit(sys.prefix == sys.base_prefix)' >/dev/null 2>&1; then
+    log "removing incomplete virtualenv $VENV"
+    rm -rf "$VENV" 2>/dev/null || die "cannot remove $VENV (probably created by an earlier sudo run); run: sudo rm -rf '$VENV'"
+  fi
+  if [[ ! -x "$VENV/bin/python" ]]; then
+    local py
+    py="$(pick_python)" || die "no Python >= 3.11 with venv/ensurepip found. Use your conda/pyenv Python, e.g.
+  PYTHON=\$(which python) $0 ...   (do not prefix the script with sudo; it asks for sudo only for docker)
+or install the venv package (Debian/Ubuntu: sudo apt install python3-venv)."
+    log "creating virtualenv $VENV with $py"
+    "$py" -m venv "$VENV" || { rm -rf "$VENV"; die "creating the virtualenv with $py failed"; }
+  fi
   if [[ ! -f "$VENV/.deps-ok" || "$ROOT/baselines/requirements.txt" -nt "$VENV/.deps-ok" ]]; then
     log "installing pinned dependencies"
-    "$VENV/bin/pip" install --disable-pip-version-check -q -r "$ROOT/baselines/requirements.txt"
+    "$VENV/bin/python" -m pip install --disable-pip-version-check -q -r "$ROOT/baselines/requirements.txt"
     touch "$VENV/.deps-ok"
+  fi
+}
+
+fix_owner() {   # when started via sudo, hand the work directory back to the invoking user
+  if [[ "${EUID:-$(id -u)}" == 0 && -n "${SUDO_UID:-}" ]]; then
+    chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$WORK" 2>/dev/null || true
   fi
 }
 
@@ -77,6 +103,7 @@ finish_step() {
     kgb stats >/dev/null
   fi
   log "DONE. Graphs:"; ls -1 "$WORK"/out/graph.*.json 2>/dev/null || log "no graph produced"
+  fix_owner
 }
 
 parse_args() {
@@ -111,6 +138,9 @@ launch() {
   mkdir -p "$WORK/logs"
   setup_python
   store_key
+  # Optional foreground step defined by a script (e.g. starting Docker services, which may ask for sudo).
+  if declare -F before_background >/dev/null; then before_background; fi
+  fix_owner
   nohup setsid "$0" _worker "$FORCE" >> "$LOG" 2>&1 < /dev/null &
   echo $! > "$PIDFILE"
   [[ "$DETACH" == 1 ]] && { echo "started (pid $!). Progress: $0 status   Log: $LOG"; return 0; }

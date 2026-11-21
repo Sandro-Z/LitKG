@@ -19,7 +19,7 @@ scripts/baseline_pubtator3.sh --pdfs <PDF目录> --llm-base-url http://<host>:<p
 
 ## Neo4j LLM Graph Builder
 
-需要 Docker Compose。
+需要 Docker Compose。请以普通用户身份运行，**不要**在命令前加 `sudo`。如果当前用户没有 Docker 权限，脚本会自己用 `sudo docker`，并在前台提示输入密码。用 `sudo` 运行整个脚本会改用系统 Python（通常缺少 venv 支持），工作目录也会变成 root 所有。
 
 ```bash
 scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
@@ -31,6 +31,8 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
 
 ## 通用命令与选项
+
+Python：脚本会依次尝试 `$PYTHON`、`python3`、`python3.13`/`3.12`/`3.11`、`python`，使用第一个满足“≥ 3.11 且带 venv/ensurepip”的解释器。如需指定，例如用 conda 环境里的 Python：`PYTHON=$(which python) scripts/baseline_….sh …`。损坏的虚拟环境（没有 pip，或其实不是虚拟环境）会被自动重建。
 
 两个脚本都支持：
 - `status`：查看是否在运行、最近的日志和已生成的图谱。
