@@ -8,3 +8,6 @@ outputs/
 audit/
 # Local search configuration (contains a generated runtime secret)
 .web-research.env
+
+# Gold-standard benchmark downloads and generated files (not redistributed)
+data/benchmarks/
