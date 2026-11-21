@@ -204,7 +204,9 @@ class BioredTests(unittest.TestCase):
                                                      for d in gold['documents']]))
         report, _ = self.run_eval(graph, gold)
         micro = report['results']['mention']['metrics']['micro']['pair']
-        self.assertEqual((micro['recall'], micro['precision'], micro['n_gold']), (0.0, None, 4))
+        self.assertEqual((micro['recall'], micro['precision'], micro['f1'], micro['n_gold']), (0.0, None, 0.0, 4))
+        macro = report['results']['mention']['metrics']['macro']['pair']
+        self.assertEqual((macro['recall'], macro['f1']), ({'value': 0.0, 'n': 3}, {'value': 0.0, 'n': 3}))
 
     def test_ambiguous_mentions_do_not_count(self):
         gold = biored_gold()

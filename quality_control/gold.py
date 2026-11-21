@@ -56,10 +56,13 @@ def norm_text(value):
 def prf(tp, n_pred, n_gold):
     precision = tp / n_pred if n_pred else None
     recall = tp / n_gold if n_gold else None
-    if precision is None or recall is None:
+    if tp == 0 and (n_pred or n_gold):
+        # Nothing correct: F1 is 0 even when one side is empty (P or R undefined).
+        f1 = 0.0
+    elif precision is None or recall is None:
         f1 = None
     else:
-        f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+        f1 = 2 * precision * recall / (precision + recall)
     return dict(tp=tp, fp=n_pred - tp, fn=n_gold - tp, n_pred=n_pred, n_gold=n_gold,
                 precision=precision, recall=recall, f1=f1)
 
