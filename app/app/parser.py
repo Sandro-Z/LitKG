@@ -278,6 +278,43 @@ def split_into_chunks(sections, max_chars=12000, overlap_chars=800):
     return chunks
 
 
+def parse_text_source(source_path: str):
+    """Parse a stored ``.litkg-text.json`` document without GROBID.
+
+    Returns ``(metadata, chunks)`` in the same structure as
+    ``parse_pdf_to_chunks``. One source block becomes one chunk unless it is
+    longer than the normal chunk size, in which case the existing splitter is
+    reused. Each chunk records ``source_block_id`` and ``source_offset`` (the
+    Unicode code-point offset of the chunk text inside that block).
+    """
+    import json
+    from app.ingestion import TEXT_SOURCE_SCHEMA
+    with open(source_path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or document.get("schema") != TEXT_SOURCE_SCHEMA:
+        raise RuntimeError("Unsupported text source")
+    chunks = []
+    for block in document.get("blocks", []):
+        text = block.get("text") or ""
+        section = {"section_title": block.get("section") or block.get("id"), "text": text, "page_spans": []}
+        cursor = 0
+        for chunk in split_into_chunks([section]):
+            offset = text.find(chunk["text"], cursor)
+            if offset < 0:
+                raise RuntimeError("Chunk text is not a substring of its source block")
+            cursor = offset + 1
+            chunk.update(source_block_id=block["id"], source_offset=offset)
+            chunks.append(chunk)
+    if not chunks:
+        raise RuntimeError("No text sections extracted from text source")
+    from app.input_quality import inspect_document
+    located = [{**c, 'id': i} for i, c in enumerate(chunks)]
+    issues = inspect_document(located)
+    for i, chunk in enumerate(chunks):
+        chunk['input_issues'] = [{**issue, 'chunk_id': None} for issue in issues if issue['chunk_id'] == i]
+    return {"title": document.get("title"), "doi": None}, chunks
+
+
 def parse_pdf_to_chunks(pdf_path: str):
     used_grobid = False
     try:

@@ -31,6 +31,9 @@ def repair_document_pages(document_id: int, *, dry_run=False):
                     return {"document_id": document_id, "status": "missing"}
                 if document["status"] in {"queued", "parsing", "chunked", "cataloging", "extracting"}:
                     return {"document_id": document_id, "status": "skipped_active"}
+                if str(document["source_path"]).endswith(".litkg-text.json"):
+                    # Plain-text sources have no PDF pages to align.
+                    return {"document_id": document_id, "status": "skipped_text_source"}
                 cur.execute(
                     "SELECT id, text, status, page_start, page_end, page_spans FROM chunks "
                     "WHERE document_id = %s ORDER BY chunk_index FOR UPDATE NOWAIT",

@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import (
+    Body,
     FastAPI,
     File,
     Form,
     HTTPException,
     Query,
+    Request,
     UploadFile,
 )
 
@@ -28,6 +30,7 @@ from app.ingestion import (
     register_document,
     safe_filename,
     store_pdf,
+    store_text_document,
 )
 from app.normalization import normalize_entity_type, normalize_predicate
 from app.provenance import add_claim_location
@@ -53,6 +56,9 @@ MAX_UPLOAD_BYTES = int(
     os.environ.get("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))
 )
 MAX_BATCH_FILES = int(os.environ.get("MAX_BATCH_FILES", "200"))
+MAX_TEXT_DOCUMENTS = int(os.environ.get("MAX_TEXT_DOCUMENTS", "200"))
+MAX_TEXT_DOCUMENT_BYTES = int(os.environ.get("MAX_TEXT_DOCUMENT_BYTES", str(2 * 1024 * 1024)))
+MAX_TEXT_REQUEST_BYTES = int(os.environ.get("MAX_TEXT_REQUEST_BYTES", str(64 * 1024 * 1024)))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
@@ -201,6 +207,23 @@ def _ingest_files(
             status_code=400,
             detail=f"A batch may contain at most {MAX_BATCH_FILES} files",
         )
+    sources = [
+        (safe_filename(upload.filename),
+         lambda upload=upload: store_pdf(upload.file, safe_filename(upload.filename), UPLOAD_DIR, MAX_UPLOAD_BYTES))
+        for upload in files
+    ]
+    return _ingest_sources(knowledge_base_id=knowledge_base_id, sources=sources,
+                           batch_name=batch_name, force_reprocess=force_reprocess)
+
+
+def _ingest_sources(
+    *,
+    knowledge_base_id: int,
+    sources: list,
+    batch_name: str | None,
+    force_reprocess: bool,
+) -> dict[str, Any]:
+    """Register already validated sources; each entry is (filename, store())."""
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -219,7 +242,7 @@ def _ingest_files(
                 (
                     knowledge_base_id,
                     (batch_name or "").strip()[:200] or None,
-                    len(files),
+                    len(sources),
                 ),
             )
             batch_id = cur.fetchone()["id"]
@@ -227,15 +250,9 @@ def _ingest_files(
     document_ids_to_queue = set()
     item_metadata: dict[int, dict[str, Any]] = {}
 
-    for position, upload in enumerate(files):
-        filename = safe_filename(upload.filename)
+    for position, (filename, store) in enumerate(sources):
         try:
-            stored = store_pdf(
-                upload.file,
-                filename,
-                UPLOAD_DIR,
-                MAX_UPLOAD_BYTES,
-            )
+            stored = store()
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     _lock_ingestion_knowledge_base(cur, knowledge_base_id)
@@ -558,6 +575,41 @@ def upload_document_batch(
         batch_name=batch_name,
         force_reprocess=force_reprocess,
     )
+
+
+@app.post(
+    "/knowledge-bases/{knowledge_base_id}/text-documents",
+    status_code=202,
+)
+def upload_text_documents(
+    knowledge_base_id: int,
+    request: Request,
+    documents: list[dict[str, Any]] = Body(...),
+    batch_name: str | None = Query(None, max_length=200),
+    force_reprocess: bool = Query(False),
+):
+    """Import QC-canonical text documents (e.g. benchmark abstracts).
+
+    Each document is stored as ``{sha256}.litkg-text.json`` next to uploaded
+    PDFs, deduplicated by content hash, and processed by the normal
+    parse -> catalog -> extraction pipeline without GROBID.
+    """
+    length = request.headers.get("content-length", "")
+    if length.isdecimal() and int(length) > MAX_TEXT_REQUEST_BYTES:
+        raise HTTPException(status_code=413, detail=f"Request exceeds {MAX_TEXT_REQUEST_BYTES} bytes")
+    if not documents:
+        raise HTTPException(status_code=400, detail="At least one text document is required")
+    if len(documents) > MAX_TEXT_DOCUMENTS:
+        raise HTTPException(status_code=400,
+                            detail=f"A batch may contain at most {MAX_TEXT_DOCUMENTS} text documents")
+    sources = []
+    for index, document in enumerate(documents):
+        label = document.get("external_id") or document.get("id") if isinstance(document, dict) else None
+        filename = safe_filename(str(label or f"document-{index + 1}"))[:200]
+        sources.append((filename, lambda document=document: store_text_document(
+            document, UPLOAD_DIR, MAX_TEXT_DOCUMENT_BYTES)))
+    return _ingest_sources(knowledge_base_id=knowledge_base_id, sources=sources,
+                           batch_name=batch_name, force_reprocess=force_reprocess)
 
 
 @app.get("/knowledge-bases/{knowledge_base_id}/documents")

@@ -636,14 +636,19 @@ def parse_document(document_id: int, publish: bool = True, generation: int | Non
                     for index, chunk in enumerate(parsed_chunks):
                         # Keep unchanged claims until a successful replacement. Original
                         # source snapshots were archived before any text was changed.
+                        # source_block_id/source_offset locate text-source chunks in their
+                        # original block; they stay NULL for PDF chunks.
                         cur.execute("""INSERT INTO chunks (document_id, chunk_index, section_title, page_start, page_end,
-                            page_spans, text, token_estimate, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued')
+                            page_spans, text, token_estimate, status, source_block_id, source_offset)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,%s)
                             ON CONFLICT (document_id, chunk_index) DO UPDATE SET section_title = EXCLUDED.section_title,
                             page_start = EXCLUDED.page_start, page_end = EXCLUDED.page_end, page_spans = EXCLUDED.page_spans,
                             text = EXCLUDED.text, token_estimate = EXCLUDED.token_estimate, status = 'queued',
+                            source_block_id = EXCLUDED.source_block_id, source_offset = EXCLUDED.source_offset,
                             error = NULL, updated_at = now()""",
                             (document_id, index, chunk.get("section_title"), chunk.get("page_start"), chunk.get("page_end"),
-                             Jsonb(chunk.get("page_spans", [])), chunk["text"], chunk.get("token_estimate")))
+                             Jsonb(chunk.get("page_spans", [])), chunk["text"], chunk.get("token_estimate"),
+                             chunk.get("source_block_id"), chunk.get("source_offset")))
                         for issue in chunk.get('input_issues', []):
                             add_review(cur, document_id, 'input-quality-v1', 'input_quality',
                                        {**issue, 'chunk_index': index, 'pipeline_generation': document['pipeline_generation'] + 1})

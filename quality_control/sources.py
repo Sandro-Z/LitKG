@@ -3,6 +3,7 @@ import base64
 import binascii
 from collections import Counter
 import hashlib
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -72,6 +73,29 @@ def _document(raw, filename, origin, complete=False):
     )
 
 
+def _text_source_document(raw, filename):
+    """LitKG plain-text source (``{sha256}.litkg-text.json``): attach its blocks verbatim."""
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        raise ValueError("SOURCE_UNREADABLE") from None
+    if not isinstance(value, dict) or value.get("schema") != "litkg-text-document/1" or not isinstance(value.get("blocks"), list):
+        raise ValueError("SOURCE_UNREADABLE")
+    checksum = hashlib.sha256(raw).hexdigest()
+    blocks = []
+    for block in value["blocks"]:
+        if not isinstance(block, dict) or not isinstance(block.get("text"), str):
+            raise ValueError("SOURCE_UNREADABLE")
+        blocks.append(dict(id=f"original:{checksum}:{block.get('id')}", text=block["text"],
+                           section=block.get("section"), source_block_id=block.get("id"),
+                           kind="text", source_origin="litkg_original", source_filename=filename))
+    if sum(len(b["text"]) for b in blocks) > MAX_SOURCE_TEXT or not any(b["text"].strip() for b in blocks):
+        raise ValueError("SOURCE_UNREADABLE")
+    # The stored text is the complete source, not a lossy PDF rendering.
+    return dict(blocks=blocks, source_sha256=checksum, original_source_status="attached",
+                source_filename=filename, source_origin="litkg_original", parsing_status="complete")
+
+
 def _attach(doc, source):
     new_ids = {b["id"] for b in source["blocks"]}
     existing = [b for b in doc.get("blocks", []) if b["id"] not in new_ids]
@@ -91,7 +115,9 @@ def attach_litkg_sources(graph, directory):
         expected = doc.get("source_sha256")
         status = "missing"
         if isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{64}", expected):
-            file = root / f"{expected}.pdf"
+            text_file = root / f"{expected}.litkg-text.json"
+            is_text = doc.get("source_kind") == "text" or (not text_file.is_symlink() and text_file.is_file())
+            file = text_file if is_text else root / f"{expected}.pdf"
             try:
                 if not file.is_symlink() and file.is_file():
                     with file.open("rb") as handle:
@@ -101,7 +127,8 @@ def attach_litkg_sources(graph, directory):
                     elif hashlib.sha256(raw).hexdigest() != expected:
                         status = "hash_mismatch"
                     else:
-                        _attach(doc, _document(raw, file.name, "litkg_original"))
+                        _attach(doc, _text_source_document(raw, file.name) if is_text
+                                else _document(raw, file.name, "litkg_original"))
                         status = "attached"
             except FileNotFoundError:
                 pass
