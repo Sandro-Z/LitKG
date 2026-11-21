@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .engine import evaluate
+from .adaptive import configured_max_concurrency
 from .llm import Client, NoRedirect
 from .models import normalize, blocks, anchor, digest, public_claim, SCENARIOS, VERSION
 from .sources import attach_litkg_sources, attach_uploaded_sources
@@ -166,6 +167,7 @@ def handler(service):
             elif method == 'GET' and path == '/api/config':
                 client = service.client_factory()
                 self.reply(dict(version=VERSION, llm_configured=client.enabled, model=client.model,
+                                llm_max_concurrency=configured_max_concurrency(),
                                 scenarios={k: {'name': v[0], 'levels': v[1]} for k, v in SCENARIOS.items()}))
             elif method == 'GET' and path == '/api/litkg/knowledge-bases':
                 self.reply(service.local_get('/knowledge-bases?limit=500'))

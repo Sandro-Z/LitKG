@@ -33,7 +33,7 @@ def _report_overview(report):
     for key, value in report.items():
         if value is None or type(value) in (bool, int, float) or isinstance(value, str) and len(value) <= 256:
             result[key] = value
-        elif key in ('calibration', 'dimension_details', 'dimension_status', 'dimension_summary', 'dimensions', 'failure_summary', 'human', 'machine_scenarios', 'manual_summary', 'metrics', 'progress', 'protocol', 'scenarios', 'score_complete') and isinstance(value, dict):
+        elif key in ('llm_concurrency', 'calibration', 'dimension_details', 'dimension_status', 'dimension_summary', 'dimensions', 'failure_summary', 'human', 'machine_scenarios', 'manual_summary', 'metrics', 'progress', 'protocol', 'scenarios', 'score_complete') and isinstance(value, dict):
             if len(json.dumps(value, ensure_ascii=False)) <= 24000:
                 result[key] = value
     return result

@@ -357,8 +357,12 @@ class WorkflowTests(unittest.TestCase):
 
         client.ask = timeout
         report = evaluate(normalize(source), client)
-        self.assertEqual(3, len(calls))
-        self.assertEqual(3, report['progress']['requests'])
+        self.assertGreaterEqual(len(calls), 9)
+        self.assertLessEqual(len(calls), 12)
+        self.assertGreaterEqual(report['progress']['requests'], 3)
+        self.assertLessEqual(report['progress']['requests'], 6)
+        self.assertEqual(1, report['llm_concurrency']['current'])
+        self.assertGreater(report['llm_concurrency']['retries'], 0)
         self.assertEqual('LLM_REPEATED_TIMEOUT', report['failure_code'])
         self.assertEqual([], report['assessments'])
         self.assertFalse(report['complete'])
@@ -378,8 +382,10 @@ class WorkflowTests(unittest.TestCase):
         client.ask = record
         report = evaluate(normalize(source), client,
                         stop_reason=lambda: 'RUN_TIME_LIMIT' if calls else None)
-        self.assertEqual(1, len(calls))
-        self.assertEqual(1, report['progress']['requests'])
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertLessEqual(len(calls), 4)
+        self.assertGreaterEqual(report['progress']['requests'], len(calls))
+        self.assertLessEqual(report['progress']['requests'], 4)
         self.assertEqual('RUN_TIME_LIMIT', report['failure_code'])
         self.assertFalse(report['complete'])
 
@@ -629,8 +635,11 @@ class HTTPTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual('cancelled', run['status'])
         self.assertEqual('RUN_CANCELLED', run['error'])
-        self.assertEqual(1, len(calls))
-        self.assertEqual(1, run['report']['progress']['requests'])
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertLessEqual(len(calls), 4)
+        self.assertGreaterEqual(run['report']['progress']['requests'], len(calls))
+        self.assertLessEqual(run['report']['progress']['requests'], 4)
+        self.assertEqual(0, run['report']['llm_concurrency']['active'])
         self.assertFalse(run['report']['complete'])
 
     def test_graph_overview_and_report_pages_keep_bulk_data_off_polling(self):

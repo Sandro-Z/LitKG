@@ -1,5 +1,6 @@
 """Minimal OpenAI-compatible JSON transport; never expose provider error bodies."""
 import time
+import threading
 import http.client
 import json
 import os
@@ -205,6 +206,7 @@ class Client:
         else:
             self.key = os.environ.get('QC_LLM_API_KEY', '')
         self.enabled = bool(self.base and self.model and not self.configuration_error)
+        self._state_lock = threading.Lock()
         self.calls = 0
         self.usage = {}
         self._use_json_mode = True
@@ -247,7 +249,9 @@ class Client:
         headers = {'Content-Type': 'application/json'}
         if self.key:
             headers['Authorization'] = 'Bearer ' + self.key
-        if not self._use_json_mode:
+        with self._state_lock:
+            use_json_mode = self._use_json_mode
+        if not use_json_mode:
             del payload['response_format']
         try:
             try:
@@ -257,11 +261,13 @@ class Client:
                     raise
                 del payload['response_format']
                 result = self._request_json(payload, headers)
-                self._use_json_mode = False
-            self.calls += 1
-            for key, value in result.get('usage', {}).items():
-                if isinstance(value, int):
-                    self.usage[key] = self.usage.get(key, 0) + value
+                with self._state_lock:
+                    self._use_json_mode = False
+            with self._state_lock:
+                self.calls += 1
+                for key, value in result.get('usage', {}).items():
+                    if isinstance(value, int):
+                        self.usage[key] = self.usage.get(key, 0) + value
             choice = result['choices'][0]
             if choice.get('finish_reason') == 'length':
                 raise LLMError('LLM_TRUNCATED_RESPONSE')
