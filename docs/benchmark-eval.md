@@ -11,7 +11,7 @@
   ```bash
   docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
     < db/migrations/20261121_text_documents.sql
-  docker compose up -d --build --no-deps api worker
+  docker compose up -d --build --force-recreate --no-deps --timeout 330 api worker_parse worker_extract frontend
   ```
 
 - QC 服务已经启动（`docker compose -f docker-compose.qc.yml up -d --build`，默认地址 `http://127.0.0.1:8090`）。
@@ -151,8 +151,24 @@ id 模式的缺口来自 LitKG 无对应谓词的 `Cotreatment/Comparison/Drug_I
 
 ## 7. 外部系统如何复用
 
-1. 读取同一份 `data/benchmarks/documents.<bench>-<split>.json`，用外部系统（PubTator3、Neo4j LLM Graph Builder 等）在其中的 `blocks[].text` 上抽取。
-2. 产出 QC canonical 图谱：`nodes`（建议带 `xrefs`，例如 `MESH:D003924`、`NCBIGene:6331`）、`claims`（`document_id` 和 `source_refs` 指向原 `id/block_id`，quote 必须是 block 中的逐字片段）。`documents` 原样带入，不要修改，也不要再在 QC 导入时附加原文件，否则 `corpus_hash` 会变化。可参考独立项目 `kg-baselines/`。
+### 一条命令跑 PubTator3 与 Neo4j LLM Graph Builder 基线
+
+`baselines/`（包 `kgb`）与 `scripts/run_baselines.sh` 在同一语料上生成外部系统图谱，不需要额外仓库：
+
+```bash
+scripts/run_baselines.sh start --qc-graph <QC图谱ID> --llm-base-url http://<host>:<port>/v1 --llm-model <与LitKG相同的模型>
+```
+
+```bash
+scripts/run_baselines.sh status
+```
+
+脚本自动创建虚拟环境、安装依赖、克隆固定版本的 llm-graph-builder（v0.8.7）、用 Docker 启动专用 Neo4j 与构建器后端，并在后台依次运行 `pubtator3-native`、`pubtator3-llm`、`neo4j-builder-sametext`，最后执行校验和统计。再次执行 `start` 会断点续跑。详见 `baselines/README.md`。
+
+### 其他系统
+
+1. 读取同一份 `data/benchmarks/documents.<bench>-<split>.json`（或 QC 图谱的 `.graph.documents`），在 `blocks[].text` 上抽取。
+2. 产出 QC canonical 图谱：`nodes`（建议带 `xrefs`，例如 `MESH:D003924`、`NCBIGene:6331`）、`claims`（`document_id` 和 `source_refs` 指向原 `id/block_id`，quote 必须是 block 中的逐字片段）。`documents` 原样带入，不要修改，也不要在 QC 导入时再附加原文件，否则 `corpus_hash` 会变化。
 3. 在 QC“导入图谱 → 通用 JSON”中上传。
 4. 在“金标准评测”页选择同一金标准集和对应档案（`pubtator3` 或 `neo4j-builder`），并排比较。比较表中的“金标准一致”和“覆盖一致”都应为“是”。
 

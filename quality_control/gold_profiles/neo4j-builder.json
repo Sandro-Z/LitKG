@@ -1,7 +1,7 @@
 {
  "profile": "neo4j-builder",
  "version": "1.0.0",
- "description": "kg-baselines Neo4j LLM Graph Builder graphs (schema-guided with LitKG predicates). Nodes have no standard IDs; use mention mode.",
+ "description": "baselines/ Neo4j LLM Graph Builder graphs (schema-guided with LitKG predicates). Nodes have no standard IDs; use mention mode.",
  "entity_id_fields": [
   "xrefs"
  ],

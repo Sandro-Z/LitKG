@@ -1,0 +1,123 @@
+{
+ "version": "1.0.0",
+ "description": "PubTator3 relation types -> LitKG predicates. Only confirmed/needs_review rules are applied; TODO keeps the original predicate.",
+ "rules": {
+  "treat": {
+   "predicate": "TREATS",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact"
+  },
+  "cause": {
+   "predicate": "CAUSES",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact"
+  },
+  "prevent": {
+   "predicate": "PREVENTS",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact"
+  },
+  "inhibit": {
+   "predicate": "INHIBITS",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; LitKG INHIBITS requires object.process, which PubTator does not provide"
+  },
+  "stimulate": {
+   "predicate": "ACTIVATES",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; LitKG ACTIVATES requires object.process"
+  },
+  "interact": {
+   "predicate": "INTERACTS_WITH",
+   "review": "needs_review",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact"
+  },
+  "associate": {
+   "predicate": "ASSOCIATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact"
+  },
+  "positive_correlate": {
+   "predicate": "CORRELATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact",
+   "qualifiers": {
+    "association_direction": "positive"
+   }
+  },
+  "negative_correlate": {
+   "predicate": "CORRELATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact",
+   "qualifiers": {
+    "association_direction": "negative"
+   }
+  },
+  "cotreat": {
+   "predicate": null,
+   "review": "TODO",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; no LitKG predicate for co-treatment"
+  },
+  "convert": {
+   "predicate": "TRANSFORMS",
+   "review": "TODO",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; LitKG TRANSFORMS requires a product participant"
+  },
+  "compare": {
+   "predicate": null,
+   "review": "TODO",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; no LitKG predicate for comparison"
+  },
+  "drug_interact": {
+   "predicate": "INTERACTS_WITH",
+   "review": "TODO",
+   "source": "PubTator3 API page, \"Find Related Entities\": treat, cause, cotreat, convert, compare, interact, associate, positive_correlate, negative_correlate, prevent, inhibit, stimulate, drug_interact; drug-drug interaction semantics differ"
+  },
+  "Association": {
+   "predicate": "ASSOCIATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 biocjson export relations[].infons.type (observed: Association, Positive_Correlation, Negative_Correlation; BioRED label set)"
+  },
+  "Positive_Correlation": {
+   "predicate": "CORRELATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 biocjson export relations[].infons.type (observed: Association, Positive_Correlation, Negative_Correlation; BioRED label set)",
+   "qualifiers": {
+    "association_direction": "positive"
+   }
+  },
+  "Negative_Correlation": {
+   "predicate": "CORRELATED_WITH",
+   "review": "confirmed",
+   "source": "PubTator3 biocjson export relations[].infons.type (observed: Association, Positive_Correlation, Negative_Correlation; BioRED label set)",
+   "qualifiers": {
+    "association_direction": "negative"
+   }
+  },
+  "Bind": {
+   "predicate": "BINDS_TO",
+   "review": "needs_review",
+   "source": "BioRED label set (not observed in the probe export)"
+  },
+  "Cotreatment": {
+   "predicate": null,
+   "review": "TODO",
+   "source": "BioRED label set; no LitKG predicate"
+  },
+  "Drug_Interaction": {
+   "predicate": "INTERACTS_WITH",
+   "review": "TODO",
+   "source": "BioRED label set"
+  },
+  "Comparison": {
+   "predicate": null,
+   "review": "TODO",
+   "source": "BioRED label set; no LitKG predicate"
+  },
+  "Conversion": {
+   "predicate": "TRANSFORMS",
+   "review": "TODO",
+   "source": "BioRED label set; TRANSFORMS requires a product participant"
+  }
+ }
+}

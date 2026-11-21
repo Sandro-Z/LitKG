@@ -174,7 +174,7 @@ Factuality（需核对）：`negated=true` → `Negated`；`speculative=true` �
 
 ### 3.5 外部系统档案
 
-- `pubtator3.json`：节点 `xrefs` 为 PubTator 概念 ID；规则既覆盖 LitKG 谓词（kg-baselines 已映射到 policy 谓词），也覆盖 `qualifiers.original_predicate` 中的 PubTator 原始关系类型（`positive_correlate` 等，在 kg-baselines 中核实 API 后才能从 TODO 升级）。
+- `pubtator3.json`：节点 `xrefs` 为 PubTator 概念 ID；规则既覆盖 LitKG 谓词（baselines/kgb 已映射到 policy 谓词），也覆盖 `qualifiers.original_predicate` 中的 PubTator 原始关系类型（`positive_correlate` 等，在 baselines/docs/pubtator3_api_notes.md 中核实 API 后才能从 TODO 升级）。
 - `neo4j-builder.json`：节点无标准 ID，只能用 `mention` 模式；谓词规则同 LitKG。
 
 ## 4. 评测口径（摘要）
