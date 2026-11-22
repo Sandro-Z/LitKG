@@ -39,6 +39,12 @@ services:
       EMBEDDING_PROVIDER: sentence-transformer
       EMBEDDING_MODEL: all-MiniLM-L6-v2
       GCS_FILE_CACHE: "False"
+      # Upstream extracts only the first 10,000 tokens of a document for non-neo4j.com users
+      # (src/create_chunks.py); kgb.pipelines.neo4j_builder.BUILDER_ENV holds the same value.
+      MAX_TOKEN_CHUNK_SIZE: "100000000"
+      # Everything extraction needs is in the image: never try Hugging Face at run time.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     # Fewer workers than upstream (8x8) to keep memory bounded on a shared host.
     command: ["gunicorn", "score:app", "--workers", "2", "--threads", "4", "--worker-class",
               "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "1800"]

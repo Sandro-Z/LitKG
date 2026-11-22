@@ -105,6 +105,9 @@ finish_step() {
     kgb stats >/dev/null
   fi
   log "DONE. Graphs:"; ls -1 "$WORK"/out/graph.*.json 2>/dev/null || log "no graph produced"
+  if compgen -G "$WORK/out/failed.*.json" >/dev/null; then
+    log "INCOMPLETE: documents listed in $(ls -1 "$WORK"/out/failed.*.json | tr '\n' ' ')are missing; rerun the same command to retry them"
+  fi
   fix_owner
 }
 
@@ -153,6 +156,7 @@ cmd_status() {
   if running; then echo "status: running (pid $(cat "$PIDFILE"))"; else echo "status: not running"; fi
   [[ -s "$LOG" ]] && { echo "--- last log lines"; tail -n 6 "$LOG"; }
   ls -1 "$WORK"/out/graph.*.json 2>/dev/null | sed 's/^/graph: /' || true
+  ls -1 "$WORK"/out/failed.*.json 2>/dev/null | sed 's/^/INCOMPLETE, failed documents listed in: /' || true
 }
 
 cmd_stop() {

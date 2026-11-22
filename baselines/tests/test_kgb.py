@@ -324,6 +324,89 @@ class Neo4jBuilderTests(unittest.TestCase):
             self.assertEqual(len(builder2.claims), len(builder.claims))
 
 
+class Neo4jBuilderFailureTests(unittest.TestCase):
+    """One failing PDF must not end the run; a streak of failures must (systematic problem)."""
+
+    class Store:
+        def __init__(self, failing=()):
+            self.failing, self.current = set(failing), None
+
+        def query(self, cypher, **params):
+            if cypher == nb.Q_STATUS:
+                return [{'status': 'Failed' if params['f'] in self.failing else 'Completed'}]
+            if cypher == nb.Q_CHUNKS:
+                return [{'id': 'c1', 'text': ABSTRACT, 'position': 1}]
+            return []
+
+    class Client:
+        def __init__(self, raising=()):
+            self.raising, self.calls = set(raising), []
+
+        def upload(self, filename, data, model):
+            self.calls.append(('upload', filename))
+
+        def extract(self, filename, *a):
+            self.calls.append(('extract', filename))
+            if filename in self.raising:
+                raise nb.BuilderError(f'extract failed for {filename}: Failed To Process File')
+
+    CFG = {'dedicated_database': True, 'model': 'litkg_compat', 'max_schema_triples': 1000}
+
+    def docs(self, n):
+        out = []
+        for i in range(n):
+            doc = corpus()[0]
+            doc['id'] = f'd{i}'
+            out.append(doc)
+        return out
+
+    def test_failed_document_is_retried_listed_and_skipped(self):
+        docs = self.docs(3)
+        bad = nb.safe_filename('d1') + '.txt'
+        client, lines = self.Client(raising={bad}), []
+        builder, meta = nb.run(docs, POLICY, self.CFG, 'sametext', client, self.Store(), sleep=lambda s: None,
+                               log=lines.append)
+        self.assertEqual([c for c in client.calls if c[1] == bad].count(('extract', bad)), 2)   # 2 attempts
+        self.assertEqual([f['id'] for f in meta['failed_documents']], ['d1'])
+        self.assertIn('Failed To Process File', meta['failed_documents'][0]['error'])
+        self.assertEqual(meta['stats']['documents_failed'], 1)
+        self.assertEqual((meta['stats']['document_status_Completed'], meta['stats']['chunks']), (2, 2))
+        self.assertTrue(any('[2/3]' in line and 'attempt 2/2 failed' in line for line in lines))
+        self.assertTrue(any(line.startswith('[3/3]') and 'done' in line for line in lines))
+        # a document whose Neo4j status ends as Failed counts the same way
+        _, meta = nb.run(self.docs(2), POLICY, dict(self.CFG, extract_attempts=1), 'sametext', self.Client(),
+                         self.Store(failing={nb.safe_filename('d0') + '.txt'}), sleep=lambda s: None, log=lines.append)
+        self.assertEqual([f['id'] for f in meta['failed_documents']], ['d0'])
+
+    def test_failure_streak_stops_the_run(self):
+        names = {nb.safe_filename(f'd{i}') + '.txt' for i in range(5)}
+        client = self.Client(raising=names)
+        with self.assertRaisesRegex(nb.BuilderError, '3 documents in a row failed'):
+            nb.run(self.docs(5), POLICY, dict(self.CFG, extract_attempts=1), 'sametext', client, self.Store(),
+                   sleep=lambda s: None, log=lambda m: None)
+        self.assertEqual(len([c for c in client.calls if c[0] == 'extract']), 3)
+
+    def test_extract_error_points_to_the_builder_log(self):
+        class Response:
+            def json(self):
+                return {'status': 'Failed', 'message': 'Failed To Process File:x.pdf or LLM Unable To Parse Content '}
+
+        class FakeHttp:
+            def request(self, *a, **k):
+                return Response()
+
+        client = nb.BuilderClient({'backend_url': 'http://b', 'uri': 'bolt://x', 'user': 'neo4j', 'database': 'neo4j',
+                                   'token_chunk_size': 200, 'chunk_overlap': 20, 'chunks_to_combine': 1}, 'pw',
+                                  http=FakeHttp())
+        with self.assertRaisesRegex(nb.BuilderError, r'Parse Content \(the cause is in the builder log: .*docker-logs\)'):
+            client.extract('x.pdf', 'litkg_compat', '', '')
+
+    def test_builder_env_matches_compose_file(self):
+        compose = (Path(__file__).resolve().parents[1] / 'deploy' / 'docker-compose.builder.yml').read_text()
+        for key, value in nb.BUILDER_ENV.items():
+            self.assertIn(f'{key}: "{value}"', compose)
+
+
 class CorpusTests(unittest.TestCase):
     def test_pdfs_become_documents_with_litkg_policy(self):
         import importlib.util

@@ -23,6 +23,9 @@ BUILDER_REPO="https://github.com/neo4j-labs/llm-graph-builder"
 BUILDER_REF="v0.8.7"
 BUILDER_COMMIT="1ade47de63edb161e5ea37a277141643f3af3142"
 COMPOSE_FILE="$ROOT/baselines/deploy/docker-compose.builder.yml"
+MODEL_KEY=litkg_compat   # the builder reads LLM_MODEL_CONFIG_LITKG_COMPAT=model,url,key (generic OpenAI-compatible branch)
+GRAPH="$WORK/out/graph.neo4j-builder-pdfnative.json"
+FAILED="$WORK/out/failed.neo4j-builder-pdfnative.json"   # written while some PDFs still fail
 export KGB_SECRETS="$WORK/secrets" KGB_BUILDER_DIR="$BUILDER_DIR"
 export KGB_NEO4J_BOLT_PORT="${KGB_NEO4J_BOLT_PORT:-17687}" KGB_BUILDER_PORT="${KGB_BUILDER_PORT:-18000}"
 usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
@@ -44,7 +47,7 @@ uri = \"bolt://127.0.0.1:$KGB_NEO4J_BOLT_PORT\"
 backend_uri = \"bolt://neo4j:7687\"
 backend_url = \"http://127.0.0.1:$KGB_BUILDER_PORT\"
 password_file = \"$SECRETS/neo4j_password\"
-model = \"litkg_compat\"
+model = \"$MODEL_KEY\"
 model_name = \"$MODEL\"
 builder_ref = \"$BUILDER_REF\"
 builder_commit = \"$BUILDER_COMMIT\"
@@ -58,11 +61,16 @@ builder_secrets() {   # the builder reads model,url,key from one env value; writ
   base_url="${base_url/:\/\/localhost/://host.docker.internal}"
   base_url="${base_url/:\/\/127.0.0.1/://host.docker.internal}"
   grep -q ',' "$SECRETS/llm_api_key" && { log "the builder's env format cannot hold an API key containing commas"; return 1; }
+  local host
+  host="${base_url#*://}"; host="${host%%[/:]*}"
   (umask 077
    [[ -s "$SECRETS/neo4j_password" ]] || "$VENV/bin/python" -c 'import secrets;print(secrets.token_hex(16),end="")' > "$SECRETS/neo4j_password"
    printf 'NEO4J_AUTH=neo4j/%s\n' "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/neo4j.env"
-   printf 'LLM_MODEL_CONFIG_LITKG_COMPAT=%s,%s,%s\nNEO4J_USERNAME=neo4j\nNEO4J_PASSWORD=%s\n' \
-     "$model" "$base_url" "$(cat "$SECRETS/llm_api_key")" "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/builder-backend.env")
+   printf 'LLM_MODEL_CONFIG_%s=%s,%s,%s\nNEO4J_USERNAME=neo4j\nNEO4J_PASSWORD=%s\n' \
+     "${MODEL_KEY^^}" "$model" "$base_url" "$(cat "$SECRETS/llm_api_key")" "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/builder-backend.env"
+   # A proxy that Docker injects into containers (~/.docker/config.json) must not catch the LLM or Neo4j.
+   printf 'NO_PROXY=%s,neo4j,localhost,127.0.0.1,host.docker.internal\nno_proxy=%s,neo4j,localhost,127.0.0.1,host.docker.internal\n' \
+     "$host" "$host" >> "$SECRETS/builder-backend.env")
 }
 
 neo4j_ready() {
@@ -122,6 +130,13 @@ while i < len(lines):
             out.append('# kgb: embedding model supplied in ./local_model (copied in by "COPY . /code"); no download')
         else:
             out += ['# kgb: HF_ENDPOINT lets the download use a mirror; proxy build args apply too', 'ARG HF_ENDPOINT', text]
+        # The builder splits text with tiktoken ("gpt2"), which otherwise downloads its BPE files from
+        # openaipublic.blob.core.windows.net on first use, at extraction time and without the build proxy.
+        out += ['# kgb: cache tiktoken files in the image so extraction needs no internet access',
+                'ENV TIKTOKEN_CACHE_DIR=/opt/kgb/tiktoken',
+                'RUN python -c "import tiktoken; names = [n for n in (\'gpt2\', \'cl100k_base\', \'o200k_base\') '
+                'if n in tiktoken.list_encoding_names()]; [tiktoken.get_encoding(n) for n in names]; '
+                'print(\'kgb: cached tiktoken encodings\', names)"']
     elif text.startswith('RUN python -m nltk.downloader'):
         out.append(text + ' || echo "kgb: NLTK data not downloaded (only needed for chat evaluation / GCS sources)"')
     else:
@@ -174,7 +189,7 @@ start_builder() {
     compose restart neo4j
   fi
   log "building/starting Neo4j + builder backend (first build downloads several GB)"
-  compose up -d --build
+  compose up -d --build || { log "docker compose could not build or start the builder (see the output above)"; return 1; }
   local i problem restarted=0 since
   since="$(date -u +%FT%TZ)"
   for i in $(seq 1 120); do
@@ -194,22 +209,41 @@ start_builder() {
   log "builder not ready after 20 minutes; see: $0 docker-logs"; return 1
 }
 
+builder_selftest() {   # in the container: the code paths /extract uses, with their real error messages
+  local schema
+  schema="$(kgb builder-schema --litkg-root "$ROOT")" || { log "cannot compute the LitKG schema"; return 1; }
+  log "self-test inside the builder container (tokenizer, embedding model, Neo4j, one small LLM extraction)"
+  { printf 'SCHEMA_B64 = "%s"\nMODEL_KEY = "%s"\n' "$(printf '%s' "$schema" | base64 -w0)" "$MODEL_KEY"
+    cat "$ROOT/baselines/deploy/builder_selftest.py"; } | compose exec -T builder-backend python -
+}
+
+graph_complete() { [[ -s "$GRAPH" && ! -e "$FAILED" ]]; }
+
 before_background() {   # foreground: docker may need sudo, which can only prompt here
-  if [[ -s "$WORK/out/graph.neo4j-builder-pdfnative.json" && "$FORCE" != 1 ]]; then return 0; fi
+  if graph_complete && [[ "$FORCE" != 1 ]]; then return 0; fi
   pick_docker
   start_builder || die "the builder did not start; fix the error above and rerun the same command"
+  builder_selftest || die "the builder self-test failed (FAIL above); fix that and rerun the same command"
 }
 
 worker() {
   local force="$1"
   log "Neo4j LLM Graph Builder baseline started"
   corpus_step --no-pmid
-  if [[ -s "$WORK/out/graph.neo4j-builder-pdfnative.json" && "$force" != 1 ]]; then
+  if graph_complete && [[ "$force" != 1 ]]; then
     log "graph already generated (use --force to rebuild from checkpoints)"
   else
     builder_ready || { log "FAILED: Neo4j/builder not reachable; rerun the same command to restart them"; exit 1; }
+    [[ -e "$FAILED" ]] && log "retrying the PDFs that failed last time (finished PDFs come from checkpoints)"
     log "uploading PDFs and extracting (checkpointed per PDF)"
-    kgb run neo4j --variant pdfnative || log "FAILED (rerun the same command to resume)"
+    local status=0
+    kgb run neo4j --variant pdfnative || status=$?
+    if [[ "$status" == 3 ]]; then
+      log "INCOMPLETE: some PDFs failed (listed in $FAILED). Cause: $0 docker-logs | grep -A40 'File Failed in extraction'"
+      log "Rerun the same command to retry only those PDFs."
+    elif [[ "$status" != 0 ]]; then
+      log "FAILED (see the error above). Rerun the same command to resume; finished PDFs are checkpointed."
+    fi
   fi
   finish_step
 }

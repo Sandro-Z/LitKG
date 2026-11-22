@@ -58,3 +58,10 @@ MATCH (:Chunk)-[:HAS_ENTITY]->(e) RETURN labels(e), keys(e) LIMIT 5;
 3. Upload the document's same-text file from `out/text/` (written by `kgb prep`). Choose the LitKG-equivalent model and click *Generate Graph*.
 4. Wait for *Completed*, then export with the Cypher queries above. The scripted `kgb run neo4j` clears the database first, so do not use it to export a graph built by hand.
 5. Delete the document's graph before the next document.
+
+## Run-time behaviour that affects a baseline run
+
+- `src/create_chunks.py` splits text with LangChain's `TokenTextSplitter` (tiktoken `gpt2`). tiktoken downloads its BPE files from `openaipublic.blob.core.windows.net` on first use, so in a container without internet every `/extract` fails with the generic `Failed To Process File:… or LLM Unable To Parse Content ` (the exception goes through the generic `except Exception` branch of `score.py`; the trailing space distinguishes it from LLM errors). The generated `Dockerfile.kgb` caches `gpt2`, `cl100k_base` and `o200k_base` under `TIKTOKEN_CACHE_DIR=/opt/kgb/tiktoken` at build time.
+- The same file keeps only the first `MAX_TOKEN_CHUNK_SIZE / token_chunk_size` chunks (default 10000 / 200 = 50 chunks, ~10k tokens) for users whose e-mail does not end in `@neo4j.com`. The compose file sets `MAX_TOKEN_CHUNK_SIZE=100000000` so whole papers are extracted (`kgb.pipelines.neo4j_builder.BUILDER_ENV`, part of the checkpoint key).
+- `/extract` reports failures only as a generic message; the real traceback is logged by the backend (`logging.exception('File Failed in extraction: …')`). On failure the backend also deletes the uploaded file, so a retry uploads it again.
+- `LLMGraphTransformer` (langchain-neo4j 0.10.0) calls `with_structured_output(...)`, whose default for `ChatOpenAI` is `method="json_schema"`, i.e. the OpenAI `response_format` JSON-schema mode.

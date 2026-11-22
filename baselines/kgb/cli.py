@@ -1,6 +1,7 @@
 """kgb command line: prep, run, validate, stats."""
 import argparse
 import glob
+import json
 import platform
 import re
 import sys
@@ -137,6 +138,9 @@ def cmd_run(cfg, args):
             pdf_index = load_json(index_path) if index_path.is_file() else None
             builder, meta = nb.run(documents, policy, cfg['neo4j'], args.variant, client, store, cfg['paths']['pdfs'],
                                    cache_root=cfg['paths']['cache'], pdf_index=pdf_index)
+        except nb.BuilderError as exc:
+            print(f'error: {exc}', file=sys.stderr, flush=True)
+            return 2
         finally:
             store.close()
         model = cfg['neo4j'].get('model_name') or cfg['neo4j']['model']
@@ -150,6 +154,12 @@ def cmd_run(cfg, args):
                                f'additional_instructions and are not enforced (violations counted in stats)')
         if args.variant == 'no-schema':
             consistency.append('no schema guidance: labels/relationship types are free-form, mapped to Other/original')
+        consistency.append('whole documents extracted: the builder container runs with MAX_TOKEN_CHUNK_SIZE='
+                           f'{nb.BUILDER_ENV["MAX_TOKEN_CHUNK_SIZE"]} (upstream default 10000 keeps only the first '
+                           '10,000 tokens of each document for non-neo4j.com users)')
+        if meta.get('failed_documents'):
+            consistency.append(f'INCOMPLETE: {len(meta["failed_documents"])} document(s) failed in the builder and '
+                               'are missing from this graph (metadata.failed_documents)')
         system, variant = 'Neo4j LLM Graph Builder', f'neo4j-builder-{args.variant}'
         out_name = f'graph.neo4j-builder-{args.variant}.json'
         version = f'{cfg["neo4j"]["builder_ref"]} ({cfg["neo4j"]["builder_commit"]})'
@@ -166,6 +176,29 @@ def cmd_run(cfg, args):
                                         prompt_sha256=metadata['prompt_sha256'], mapping_sha256=mapping_sha))
     s = graph['metadata']['stats']
     print(f'{out}: {s["nodes"]} nodes, {s["claims"]} claims, anchored {s["anchored"]}, unanchored {s["unanchored"]}')
+    # Failed documents are listed next to the graph (not as graph.*.json): the scripts treat the
+    # graph as incomplete while this file exists and retry those documents on the next run.
+    failed_path = Path(cfg['paths']['out']) / f'failed.{variant}.json'
+    failed = metadata.get('failed_documents') or []
+    if failed:
+        save_json(failed_path, failed)
+        print(f'INCOMPLETE: {len(failed)} document(s) failed and are missing from the graph (listed in '
+              f'{failed_path}); rerun to retry them, finished documents come from checkpoints', flush=True)
+        return 3
+    failed_path.unlink(missing_ok=True)
+    return 0
+
+
+def cmd_builder_schema(cfg, args):
+    """Schema the Neo4j builder receives (JSON), for the in-container self-test of the scripts."""
+    from .corpus import litkg_modules
+    from .pipelines.neo4j_builder import schema
+    policy, _ = litkg_modules(args.litkg_root)
+    nodes, relationships, count, mode, instructions = schema(policy, 'schema', cfg['neo4j'].get('max_schema_triples', 1000))
+    triples = relationships.split(',') if relationships else []
+    print(json.dumps(dict(mode=mode, triples=count, nodes=nodes.split(',') if nodes else [],
+                          relationships=[triples[i:i + 3] for i in range(0, len(triples), 3)],
+                          instructions=instructions)))
     return 0
 
 
@@ -227,13 +260,16 @@ def main(argv=None):
     val.add_argument('files', nargs='+')
     val.add_argument('--qc-path', help='LitKG repository path for a read-only quality_control.models.normalize run')
     sub.add_parser('stats')
+    bschema = sub.add_parser('builder-schema', help='print the schema sent to the Neo4j builder (JSON)')
+    bschema.add_argument('--litkg-root', default=str(ROOT.parent))
     args = parser.parse_args(argv)
     if args.command == 'run':
         allowed = {'pubtator3': {'native', 'llm'}, 'neo4j': {'sametext', 'pdfnative', 'no-schema'}}[args.system]
         if args.variant not in allowed:
             parser.error(f'--variant must be one of {sorted(allowed)} for {args.system}')
     cfg = config_mod.load(args.config)
-    return {'corpus': cmd_corpus, 'prep': cmd_prep, 'run': cmd_run, 'validate': cmd_validate, 'stats': cmd_stats}[args.command](cfg, args)
+    return {'corpus': cmd_corpus, 'prep': cmd_prep, 'run': cmd_run, 'validate': cmd_validate, 'stats': cmd_stats,
+            'builder-schema': cmd_builder_schema}[args.command](cfg, args)
 
 
 if __name__ == '__main__':

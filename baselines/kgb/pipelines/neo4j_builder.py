@@ -14,7 +14,7 @@ from pathlib import Path
 from ..cache import Cache
 from ..common import digest, ontology, sha256_text, type_allowed
 from ..graph import GraphBuilder
-from ..http import Http
+from ..http import Http, HttpError
 from ..text_prep import build, sentences
 
 STRUCTURAL = ['HAS_ENTITY', 'PART_OF', 'FIRST_CHUNK', 'NEXT_CHUNK', 'SIMILAR', 'IN_COMMUNITY', 'PARENT_COMMUNITY',
@@ -30,6 +30,12 @@ Q_ENTITIES = ('MATCH (d:Document {fileName: $f})<-[:PART_OF]-(c:Chunk)-[:HAS_ENT
 Q_RELATIONS = ('MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids AND NOT type(r) IN $structural '
                'RETURN elementId(a) AS a, type(r) AS type, elementId(b) AS b')
 Q_RESET = 'MATCH (n) DETACH DELETE n'
+
+# Environment the builder container runs with (baselines/deploy/docker-compose.builder.yml; a test keeps
+# the two in sync). Upstream processes only the first MAX_TOKEN_CHUNK_SIZE tokens (10,000) of each
+# document for non-neo4j.com users (src/create_chunks.py); raised so whole papers are extracted.
+BUILDER_ENV = {'MAX_TOKEN_CHUNK_SIZE': '100000000'}
+LOG_HINT = 'the cause is in the builder log: scripts/baseline_neo4j_builder.sh docker-logs'
 
 
 class BuilderError(RuntimeError):
@@ -107,7 +113,7 @@ class BuilderClient:
         response = self.http.request('POST', f'{self.base}/extract', data=form, retry_status=set())
         body = response.json()
         if body.get('status') != 'Success':
-            raise BuilderError(f'extract failed for {filename}: {body.get("message")}')
+            raise BuilderError(f'extract failed for {filename}: {(body.get("message") or "").strip()} ({LOG_HINT})')
         return body.get('data') or {}
 
 
@@ -185,7 +191,24 @@ def convert_document(builder, doc, chunks, entities, relations, stats):
                       evidence_method='neo4j_builder_chunk_cosentence')
 
 
-def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time.sleep, cache_root=None, pdf_index=None):
+def wait_for_status(store, filename, cfg, sleep):
+    waited = 0
+    while True:
+        status = (store.query(Q_STATUS, f=filename) or [{}])[0]
+        if status.get('status') in {'Completed', 'Failed', 'Cancelled'}:
+            return status
+        if waited >= cfg.get('max_wait', 3600):
+            return {'status': 'Timeout'}
+        sleep(cfg.get('poll_interval', 10))
+        waited += cfg.get('poll_interval', 10)
+
+
+def _print(message):
+    print(message, flush=True)
+
+
+def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time.sleep, cache_root=None, pdf_index=None,
+        log=_print):
     if variant not in {'sametext', 'pdfnative', 'no-schema'}:
         raise BuilderError(f'unknown variant {variant}')
     if not cfg.get('dedicated_database'):
@@ -202,8 +225,12 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
     # at the first unfinished document without new LLM calls.
     checkpoints = Cache(cache_root, 'neo4j-builder') if cache_root else None
     settings = digest([variant, nodes, relationships, instructions, model, cfg.get('model_name'), cfg.get('token_chunk_size'),
-                       cfg.get('chunk_overlap'), cfg.get('chunks_to_combine'), cfg.get('builder_commit')])
-    for doc in documents:
+                       cfg.get('chunk_overlap'), cfg.get('chunks_to_combine'), cfg.get('builder_commit'), BUILDER_ENV])
+    attempts = max(1, int(cfg.get('extract_attempts', 2)))
+    max_consecutive = max(1, int(cfg.get('max_consecutive_failures', 3)))
+    failed, consecutive = [], 0
+    for number, doc in enumerate(documents, 1):
+        label = f'[{number}/{len(documents)}] {doc.get("source_filename") or doc["id"]}'
         name = safe_filename(doc['id'])
         key = sha256_text(f'{settings}\0{digest(doc)}')
         saved = checkpoints.get(key) if checkpoints else None
@@ -221,28 +248,39 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
             filename, data = f'{name}.pdf', pdf.read_bytes()
         else:
             filename, data = f'{name}.txt', build(doc).text.encode('utf-8')
-        store.query(Q_RESET)
-        client.upload(filename, data, model)
-        client.extract(filename, model, nodes, relationships, instructions)
-        waited = 0
-        while True:
-            status = (store.query(Q_STATUS, f=filename) or [{}])[0]
-            if status.get('status') in {'Completed', 'Failed', 'Cancelled'}:
+        started = time.monotonic()
+        for attempt in range(1, attempts + 1):
+            store.query(Q_RESET)
+            try:
+                client.upload(filename, data, model)
+                client.extract(filename, model, nodes, relationships, instructions)
+                status = wait_for_status(store, filename, cfg, sleep)
+                error = status.get('error') or f'document status {status.get("status")}'
+            except (BuilderError, HttpError) as exc:   # one PDF failing must not end the whole run
+                status, error = {'status': 'Failed'}, str(exc)
+            if status.get('status') == 'Completed':
                 break
-            if waited >= cfg.get('max_wait', 3600):
-                status = {'status': 'Timeout'}
-                break
-            sleep(cfg.get('poll_interval', 10))
-            waited += cfg.get('poll_interval', 10)
+            log(f'{label}: attempt {attempt}/{attempts} failed: {error}')
         stats[f'document_status_{status.get("status")}'] += 1
         if status.get('status') != 'Completed':
+            failed.append(dict(id=doc['id'], file=doc.get('source_filename'), error=error[:500]))
+            consecutive += 1
+            if consecutive >= max_consecutive:
+                store.query(Q_RESET)
+                raise BuilderError(f'{consecutive} documents in a row failed (last: {error}). This is not a problem '
+                                   f'of single PDFs but of the builder, Neo4j or the LLM; {LOG_HINT}. Finished '
+                                   f'documents are checkpointed: rerun the same command after fixing it.')
             continue
+        consecutive = 0
         chunks, entities, relations = export_document(store, filename)
         if checkpoints:
             checkpoints.put(key, dict(chunks=chunks, entities=entities, relations=relations))
         stats['chunks'] += len(chunks)
         convert_document(builder, doc, chunks, entities, relations, stats)
+        log(f'{label}: done in {time.monotonic() - started:.0f}s ({len(chunks)} chunks, {len(entities)} entity '
+            f'mentions, {len(relations)} relations)')
     store.query(Q_RESET)
+    stats['documents_failed'] = len(failed)
     # Domain/range is only guidance in nodes+instructions mode: count violations, keep the claims.
     _, _, parents = ontology(policy)
     predicates = ontology(policy)[0]
@@ -258,4 +296,5 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
     return builder, dict(stats=dict(stats), schema_mode=schema_mode, additional_instructions_sha256=
                          digest(instructions) if instructions else None,
                          schema_sha256=digest([nodes, relationships, instructions]), schema_triples=triple_count,
-                         input='original PDF' if variant == 'pdfnative' else 'kgb same-text .txt')
+                         input='original PDF' if variant == 'pdfnative' else 'kgb same-text .txt',
+                         builder_env=dict(BUILDER_ENV), failed_documents=failed)
