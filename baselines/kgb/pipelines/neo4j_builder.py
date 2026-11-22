@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from ..cache import Cache
-from ..common import digest, ontology, sha256_text
+from ..common import digest, ontology, sha256_text, type_allowed
 from ..graph import GraphBuilder
 from ..http import Http
 from ..text_prep import build, sentences
@@ -36,21 +36,40 @@ class BuilderError(RuntimeError):
     pass
 
 
+def predicate_instructions(policy):
+    """Policy predicates as plain text for the builder's additional_instructions field."""
+    predicates, _, _ = ontology(policy)
+    lines = ['Use ONLY these relationship types (exact names). Subject/object types in brackets; * means any type.']
+    for name, spec in predicates.items():
+        subjects = '|'.join(spec.get('subject_types') or ['*'])
+        objects = '|'.join(spec.get('object_types') or ['*'])
+        lines.append(f'{name} [{subjects} -> {objects}]: {spec.get("definition", "")}')
+    lines.append('If no listed type fits, do not create the relationship.')
+    return ' ; '.join(lines)
+
+
 def schema(policy, mode, max_triples):
-    """allowedNodes / allowedRelationship strings in the format parsed by llm.get_graph_from_llm."""
+    """Return (allowedNodes, allowedRelationship, triple_count, schema_mode, additional_instructions).
+
+    'triples': every (source, relationship, target) permitted by the policy's domain/range is
+    sent and enforced by the builder. LangChain's LLMGraphTransformer copies that whole list
+    into the tool schema of every request, so when it exceeds max_triples (LitKG's ontology
+    expands to ~12k triples, ~150k tokens per chunk) the 'nodes+instructions' mode is used:
+    node labels stay enforced via allowedNodes, while predicate names, definitions and
+    domain/range go into the builder's additional_instructions (guidance, not enforcement).
+    """
     predicates, node_types, _ = ontology(policy)
     if mode == 'no-schema':
-        return '', '', 0
+        return '', '', 0, 'none', ''
     nodes = [t for t in node_types if t != 'Other']
     triples = []
     for name, spec in predicates.items():
         subjects = nodes if '*' in (spec.get('subject_types') or ['*']) else [t for t in spec['subject_types'] if t in nodes]
         objects = nodes if '*' in (spec.get('object_types') or ['*']) else [t for t in spec['object_types'] if t in nodes]
         triples += [f'{s},{name},{o}' for s in subjects for o in objects]
-    if len(triples) > max_triples:
-        raise BuilderError(f'schema expands to {len(triples)} (source,relationship,target) triples, above '
-                           f'neo4j.max_schema_triples={max_triples}; raise the limit knowingly or restrict the policy')
-    return ','.join(nodes), ','.join(triples), len(triples)
+    if len(triples) <= max_triples:
+        return ','.join(nodes), ','.join(triples), len(triples), 'triples', ''
+    return ','.join(nodes), '', len(triples), 'nodes+instructions', predicate_instructions(policy)
 
 
 def safe_filename(doc_id):
@@ -79,9 +98,10 @@ class BuilderClient:
         if body.get('status') != 'Success':
             raise BuilderError(f'upload failed for {filename}: {body.get("message")}')
 
-    def extract(self, filename, model, nodes, relationships):
+    def extract(self, filename, model, nodes, relationships, additional_instructions=''):
         form = dict(self._credentials(), model=model, source_type='local file', file_name=filename,
                     allowedNodes=nodes, allowedRelationship=relationships,
+                    additional_instructions=additional_instructions,
                     token_chunk_size=str(self.cfg['token_chunk_size']), chunk_overlap=str(self.cfg['chunk_overlap']),
                     chunks_to_combine=str(self.cfg['chunks_to_combine']))
         response = self.http.request('POST', f'{self.base}/extract', data=form, retry_status=set())
@@ -174,14 +194,14 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
     model = cfg.get('model')
     if not model:
         raise BuilderError('neo4j.model (the LLM_MODEL_CONFIG_* key known to the backend) is required')
-    nodes, relationships, triple_count = schema(policy, 'no-schema' if variant == 'no-schema' else 'schema',
-                                                cfg.get('max_schema_triples', 3000))
+    nodes, relationships, triple_count, schema_mode, instructions = schema(
+        policy, 'no-schema' if variant == 'no-schema' else 'schema', cfg.get('max_schema_triples', 1000))
     builder = GraphBuilder('Neo4j LLM Graph Builder', 'nb', documents, policy)
     stats = Counter()
     # Per-document checkpoint: a finished export is reused, so an interrupted run resumes
     # at the first unfinished document without new LLM calls.
     checkpoints = Cache(cache_root, 'neo4j-builder') if cache_root else None
-    settings = digest([variant, nodes, relationships, model, cfg.get('model_name'), cfg.get('token_chunk_size'),
+    settings = digest([variant, nodes, relationships, instructions, model, cfg.get('model_name'), cfg.get('token_chunk_size'),
                        cfg.get('chunk_overlap'), cfg.get('chunks_to_combine'), cfg.get('builder_commit')])
     for doc in documents:
         name = safe_filename(doc['id'])
@@ -203,7 +223,7 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
             filename, data = f'{name}.txt', build(doc).text.encode('utf-8')
         store.query(Q_RESET)
         client.upload(filename, data, model)
-        client.extract(filename, model, nodes, relationships)
+        client.extract(filename, model, nodes, relationships, instructions)
         waited = 0
         while True:
             status = (store.query(Q_STATUS, f=filename) or [{}])[0]
@@ -223,6 +243,19 @@ def run(documents, policy, cfg, variant, client, store, pdf_dir=None, sleep=time
         stats['chunks'] += len(chunks)
         convert_document(builder, doc, chunks, entities, relations, stats)
     store.query(Q_RESET)
-    return builder, dict(stats=dict(stats), schema_mode='none' if variant == 'no-schema' else 'policy',
-                         schema_sha256=digest([nodes, relationships]), schema_triples=triple_count,
+    # Domain/range is only guidance in nodes+instructions mode: count violations, keep the claims.
+    _, _, parents = ontology(policy)
+    predicates = ontology(policy)[0]
+    for claim in builder.claims:
+        spec = predicates.get(claim['predicate'])
+        if spec is None:
+            continue
+        s_types = builder.nodes[claim['subject']['id']]['types']
+        o_types = builder.nodes[claim['object']['id']]['types']
+        if not (any(type_allowed(t, spec.get('subject_types') or ['*'], parents) for t in s_types) and
+                any(type_allowed(t, spec.get('object_types') or ['*'], parents) for t in o_types)):
+            stats['domain_range_violations'] += 1
+    return builder, dict(stats=dict(stats), schema_mode=schema_mode, additional_instructions_sha256=
+                         digest(instructions) if instructions else None,
+                         schema_sha256=digest([nodes, relationships, instructions]), schema_triples=triple_count,
                          input='original PDF' if variant == 'pdfnative' else 'kgb same-text .txt')

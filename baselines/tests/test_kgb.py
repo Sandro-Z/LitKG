@@ -240,13 +240,17 @@ class PubTatorTests(unittest.TestCase):
 
 
 class Neo4jBuilderTests(unittest.TestCase):
-    def test_schema_expansion_and_limit(self):
-        nodes, rels, n = nb.schema(POLICY, 'schema', 1000)
+    def test_schema_expansion_and_compact_fallback(self):
+        nodes, rels, n, mode, instructions = nb.schema(POLICY, 'schema', 1000)
         self.assertIn('Compound,TREATS,Disease', rels)
-        self.assertEqual(n, 6 * 6 * 2 + 1)
-        self.assertEqual(nb.schema(POLICY, 'no-schema', 10), ('', '', 0))
-        with self.assertRaises(nb.BuilderError):
-            nb.schema(POLICY, 'schema', 10)
+        self.assertEqual((n, mode, instructions), (6 * 6 * 2 + 1, 'triples', ''))
+        self.assertEqual(nb.schema(POLICY, 'no-schema', 10), ('', '', 0, 'none', ''))
+        nodes, rels, n, mode, instructions = nb.schema(POLICY, 'schema', 10)
+        self.assertEqual((rels, n, mode), ('', 73, 'nodes+instructions'))
+        self.assertEqual(nodes.split(','), ['Gene', 'Disease', 'Compound', 'Organism', 'Mutation', 'CellLine'])
+        self.assertIn('TREATS [Compound -> Disease]: treats', instructions)
+        self.assertIn('CORRELATED_WITH [* -> *]', instructions)
+        self.assertNotIn('{', instructions)   # the builder rewrites braces
 
     def test_run_exports_relations_with_cosentence_evidence(self):
         class Store:
@@ -276,9 +280,15 @@ class Neo4jBuilderTests(unittest.TestCase):
                 self.calls.append(('upload', a[0]))
 
             def extract(self, *a):
-                self.calls.append(('extract', a[0]))
+                self.calls.append(('extract', a[0], a))
 
         cfg = {'dedicated_database': True, 'model': 'litkg_compat', 'max_schema_triples': 1000}
+        compact = Client()
+        builder_c, meta_c = nb.run(corpus(), POLICY, dict(cfg, max_schema_triples=10), 'sametext', compact, Store(),
+                                   sleep=lambda s: None)
+        self.assertEqual(meta_c['schema_mode'], 'nodes+instructions')
+        self.assertIn('TREATS [Compound -> Disease]', compact.calls[1][2][4])
+        self.assertEqual(meta_c['stats'].get('domain_range_violations', 0), 0)
         with self.assertRaises(nb.BuilderError):
             nb.run(corpus(), POLICY, dict(cfg, dedicated_database=False), 'sametext', Client(), Store())
         store, client = Store(), Client()
@@ -347,6 +357,49 @@ class CorpusTests(unittest.TestCase):
         self.assertIn('TREATS', policy['ontology']['predicates'])
         self.assertIsNone(policy['scope'])
         self.assertEqual(id_map[1].split(',')[3], '10.1234/example.5')
+
+    def test_undecodable_page_is_skipped_not_the_whole_pdf(self):
+        import importlib.util
+        if importlib.util.find_spec('pypdf') is None:
+            self.skipTest('pypdf not installed')
+        import shutil
+        import sys
+        from unittest.mock import patch
+        import pypdf
+        from pypdf.errors import LimitReachedError
+        repo = Path(__file__).resolve().parents[2]
+        sys.path.insert(0, str(repo / 'tests'))
+        from pdf_fixtures import text_pdf
+        from kgb import corpus as corpus_mod
+        original = pypdf.PageObject.extract_text
+
+        def flaky(page, *args, **kwargs):
+            text = original(page, *args, **kwargs)
+            if 'second' in text:
+                raise LimitReachedError('Limit reached while decompressing.')
+            return text
+        with tempfile.TemporaryDirectory() as directory:
+            pdfs = Path(directory) / 'pdfs'
+            pdfs.mkdir()
+            with text_pdf(['first page text', 'second page text', 'third page text']) as path:
+                shutil.copy(path, pdfs / 'a.pdf')
+            with patch.object(pypdf.PageObject, 'extract_text', flaky):
+                stats = corpus_mod.build(pdfs, Path(directory) / 'corpus', repo, Path(directory) / 'cache',
+                                         resolve=False, log=lambda *a: None)
+            documents = json.loads((Path(directory) / 'corpus' / 'documents.json').read_text())
+        self.assertEqual((stats['documents'], stats['unreadable'], stats['pages_skipped']), (1, 0, 1))
+        self.assertEqual([b['id'] for b in documents[0]['blocks']], ['p1', 'p3'])
+
+    def test_pypdf_limits_are_relaxed(self):
+        import importlib.util
+        if importlib.util.find_spec('pypdf') is None:
+            self.skipTest('pypdf not installed')
+        import pypdf
+        from kgb.corpus import PYPDF_LIMIT_FACTOR, configure_pypdf
+        before = pypdf.get_configuration().zlib_maximum_output_length
+        configure_pypdf()
+        self.assertEqual(pypdf.get_configuration().zlib_maximum_output_length, before * PYPDF_LIMIT_FACTOR)
+        pypdf.overwrite_configuration(zlib_maximum_output_length=before)
 
 
 @unittest.skipUnless(os.environ.get('KGB_QC_PATH'), 'set KGB_QC_PATH to a LitKG checkout for the QC import dry run')

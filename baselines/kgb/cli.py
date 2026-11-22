@@ -143,6 +143,11 @@ def cmd_run(cfg, args):
         consistency = _consistency(cfg, cfg['neo4j'].get('model_name'), same_text=args.variant != 'pdfnative',
                                    note_model='temperature fixed to 0 by the builder (src/llm.py); max_tokens and '
                                               'response_format are not configurable through the builder API')
+        if meta.get('schema_mode') == 'nodes+instructions':
+            consistency.append(f'schema mode nodes+instructions: entity types enforced via allowedNodes; the '
+                               f'{meta.get("schema_triples")} domain/range triples were too many to send (the builder '
+                               f'repeats them in every request), so predicates and domain/range were given as '
+                               f'additional_instructions and are not enforced (violations counted in stats)')
         if args.variant == 'no-schema':
             consistency.append('no schema guidance: labels/relationship types are free-form, mapped to Other/original')
         system, variant = 'Neo4j LLM Graph Builder', f'neo4j-builder-{args.variant}'

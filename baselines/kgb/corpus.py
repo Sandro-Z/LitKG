@@ -31,20 +31,49 @@ def litkg_modules(repo_root):
     return policy, extract_document_doi
 
 
+PYPDF_LIMIT_FACTOR = 8   # pypdf's anti-decompression-bomb limits are tuned for untrusted input
+
+
+def configure_pypdf():
+    """Relax pypdf resource limits for the user's own PDFs and silence per-font warnings.
+
+    Integer limits (stream output sizes, element counts, work budgets) are multiplied by
+    PYPDF_LIMIT_FACTOR; journal PDFs with large embedded images otherwise raise
+    LimitReachedError. Font-encoding warnings are logged once per font by pypdf and are
+    not actionable here (fontTools is installed for CFF fonts).
+    """
+    import dataclasses
+    import logging
+    import pypdf
+    logging.getLogger('pypdf').setLevel(logging.ERROR)
+    current = pypdf.get_configuration()
+    overrides = {f.name: getattr(current, f.name) * PYPDF_LIMIT_FACTOR for f in dataclasses.fields(current)
+                 if type(getattr(current, f.name)) is int and getattr(current, f.name) > 0}
+    pypdf.overwrite_configuration(**overrides)
+
+
 def pdf_pages(path):
+    """Per-page text; a page that cannot be decoded is skipped and counted, not fatal."""
     from pypdf import PdfReader
     reader = PdfReader(str(path))
-    meta = reader.metadata or {}
+    try:
+        meta = reader.metadata or {}
+    except Exception:
+        meta = {}
     title = str(meta.get('/Title') or '').strip() or None
-    pages, raw = [], []
+    pages, raw, failed = [], [], []
     for number, page in enumerate(reader.pages, 1):
-        text = page.extract_text() or ''
+        try:
+            text = page.extract_text() or ''
+        except Exception as exc:
+            failed.append((number, type(exc).__name__))
+            continue
         raw.append(text)
         text = re.sub(r'(?<=\w)[-‐]\s*\n\s*(?=\w)', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
         if text:
             pages.append((number, text))
-    return title, pages, raw
+    return title, pages, raw, failed
 
 
 def resolve_pmid(http, cache, doi):
@@ -69,9 +98,10 @@ def build(pdf_dir, out_dir, repo_root, cache_root, resolve=True, log=print):
     if not files:
         raise SystemExit(f'no PDF files under {pdf_dir}')
     policy, extract_doi = litkg_modules(repo_root)
+    configure_pypdf()
     http, cache = Http(per_second=3), Cache(cache_root, 'pubmed-esearch')
     documents, index, id_rows, seen = [], {}, [], set()
-    stats = dict(pdfs=len(files), duplicates=0, unreadable=0, no_text=0, doi=0, pmid=0)
+    stats = dict(pdfs=len(files), duplicates=0, unreadable=0, no_text=0, pages_skipped=0, doi=0, pmid=0)
     for path in files:
         sha = sha256_file(path)
         if sha in seen:
@@ -79,11 +109,15 @@ def build(pdf_dir, out_dir, repo_root, cache_root, resolve=True, log=print):
             continue
         seen.add(sha)
         try:
-            title, pages, raw = pdf_pages(path)
+            title, pages, raw, failed = pdf_pages(path)
         except Exception as exc:  # corrupt or encrypted PDF: reported, not fatal
             stats['unreadable'] += 1
             log(f'unreadable PDF skipped: {path.name} ({type(exc).__name__})')
             continue
+        if failed:
+            stats['pages_skipped'] += len(failed)
+            log(f'{path.name}: {len(failed)} page(s) could not be decoded and were skipped '
+                f'({", ".join(f"p{n} {e}" for n, e in failed[:5])})')
         if not pages:
             stats['no_text'] += 1
             log(f'PDF without a text layer skipped (needs OCR): {path.name}')

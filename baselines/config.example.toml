@@ -45,4 +45,4 @@ token_chunk_size = 200
 chunk_overlap = 20
 chunks_to_combine = 1
 dedicated_database = false               # must be true: the database is cleared between documents
-max_schema_triples = 3000
+max_schema_triples = 1000                 # above this, schema falls back to node labels + predicate instructions

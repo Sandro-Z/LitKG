@@ -20,7 +20,7 @@ DEFAULTS = {
               'password_env': 'KGB_NEO4J_PASSWORD', 'backend_url': 'http://127.0.0.1:8000',
               'model': '', 'builder_ref': 'v0.8.7', 'builder_commit': '1ade47de63edb161e5ea37a277141643f3af3142',
               'token_chunk_size': 200, 'chunk_overlap': 20, 'chunks_to_combine': 1,
-              'dedicated_database': False, 'max_schema_triples': 3000, 'poll_interval': 10, 'max_wait': 3600},
+              'dedicated_database': False, 'max_schema_triples': 1000, 'poll_interval': 10, 'max_wait': 3600},
 }
 
 

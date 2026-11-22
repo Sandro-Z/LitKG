@@ -88,7 +88,9 @@ kgb() { (cd "$WORK" && PYTHONPATH="$ROOT/baselines" "$VENV/bin/python" -m kgb.cl
 
 corpus_step() {   # rebuild only when the PDF set changes
   local fingerprint
-  fingerprint="$(cd "$PDF_DIR" && find . -type f -iname '*.pdf' -printf '%p %s %T@\n' | sort | sha256sum | cut -d' ' -f1)"
+  # PDF set + extractor code/deps: a fix in text extraction re-extracts the corpus on the next run.
+  fingerprint="$( { (cd "$PDF_DIR" && find . -type f -iname '*.pdf' -printf '%p %s %T@\n' | sort); \
+                    cat "$ROOT/baselines/kgb/corpus.py" "$ROOT/baselines/requirements.txt"; } | sha256sum | cut -d' ' -f1)"
   if [[ -s "$WORK/corpus/documents.json" && "$(cat "$WORK/corpus/.fingerprint" 2>/dev/null)" == "$fingerprint" ]]; then
     log "corpus up to date"; return 0
   fi

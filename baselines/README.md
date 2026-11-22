@@ -10,7 +10,7 @@
 scripts/baseline_pubtator3.sh --pdfs <PDF目录> --llm-base-url http://<host>:<port>/v1 --llm-model <模型>
 ```
 
-- 用 pypdf 逐页提取文本，清理规则与 LitKG 的 `fallback_pdf_text` 一致。
+- 用 pypdf 逐页提取文本，清理规则与 LitKG 的 `fallback_pdf_text` 一致；安装了 fontTools，以便正确解码期刊 PDF 中常见的 CFF 字体。pypdf 防解压炸弹的资源上限放宽为默认值的 8 倍；个别无法解码的页会被跳过并计数（`pages_skipped`），不再导致整篇 PDF 被丢弃。修改提取逻辑后重跑，会自动重新提取语料。
 - 实体：调用 PubTator3 自由文本 NER（官方接口，限速 3 次/秒）。
 - 关系有两种来源：
   - **native**：从 PDF 中提取 DOI，经 NCBI E-utilities 解析为 PMID，再取 PubTator3 预计算的文档级关系。没有 DOI/PMID 的 PDF 只有实体，没有关系。
@@ -29,6 +29,7 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 把每个 PDF 原样上传给构建器，由构建器用自己的 PDF 解析和 LLM 抽取。schema 为 LitKG 的实体类型和谓词。每个 PDF 处理完都会存检查点。
 - 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
 - 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
+- **schema 模式**：如果 LitKG 本体按 domain/range 展开后的三元组不超过 `max_schema_triples`（默认 1000），就把全部三元组交给构建器强制约束。LitKG 本体实际会展开成 12,476 个三元组，而构建器（LangChain `LLMGraphTransformer`）会把三元组清单原样放进每次请求的工具 schema，约 15 万 token。此时自动改用 `nodes+instructions` 模式：实体类型仍通过 `allowedNodes` 强制约束；谓词名、定义和 domain/range 通过构建器自带的 `additional_instructions` 字段传入，约 1.1K token，只作指导不强制。违反 domain/range 的关系照常保留，并在 `stats.md` 中计数（`domain_range_violations`）。这一差异会写入图谱的 `metadata.consistency`。
 
 **无法访问 Hugging Face 时**：构建器的上游 Dockerfile 会在构建镜像时下载嵌入模型 `sentence-transformers/all-MiniLM-L6-v2`（约 90 MB）。这一步不能跳过，因为抽取接口 `/extract` 每次都会加载这个模型（`create_chunk_vector_index` 和 `create_chunk_embeddings` 无条件调用 `load_embedding_model`）。它只用于生成 chunk 向量，不影响抽取出的实体和关系。以下三种方式任选其一，选项会保存在工作目录中，之后重跑不必再写：
 
