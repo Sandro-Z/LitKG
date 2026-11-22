@@ -108,6 +108,9 @@ def llm_hint(exc, message):
     if isinstance(exc, Timeout):
         return (f'No answer from {LLM_URL} within the time limit: the server is overloaded, or packets from the\n'
                 'Docker network to it are dropped (firewall).')
+    if 'Missing credentials' in message:
+        return ('The builder got an empty API key, which its OpenAI client refuses. Update the repository and rerun:\n'
+                'the script then passes the placeholder key EMPTY to servers without authentication.')
     if 'Connection' in name or 'Connect' in message or 'Timeout' in name:
         return (f'The builder container cannot reach the LLM at {LLM_URL}. The LLM server must listen on an address\n'
                 'that Docker containers can reach (localhost/127.0.0.1 in --llm-base-url are rewritten to the\n'

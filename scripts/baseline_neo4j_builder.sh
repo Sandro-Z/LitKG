@@ -63,11 +63,15 @@ builder_secrets() {   # the builder reads model,url,key from one env value; writ
   grep -q ',' "$SECRETS/llm_api_key" && { log "the builder's env format cannot hold an API key containing commas"; return 1; }
   local host
   host="${base_url#*://}"; host="${host%%[/:]*}"
+  # The builder's OpenAI client (openai 2.x) refuses an empty key before sending any request; an LLM
+  # server without authentication (vLLM/SGLang/Ollama without --api-key) ignores whatever key it gets.
+  [[ -s "$SECRETS/llm_api_key" ]] || log "no LLM API key given: the builder gets the placeholder key EMPTY (fine for a server without authentication)"
   (umask 077
+   key="$(cat "$SECRETS/llm_api_key")"
    [[ -s "$SECRETS/neo4j_password" ]] || "$VENV/bin/python" -c 'import secrets;print(secrets.token_hex(16),end="")' > "$SECRETS/neo4j_password"
    printf 'NEO4J_AUTH=neo4j/%s\n' "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/neo4j.env"
    printf 'LLM_MODEL_CONFIG_%s=%s,%s,%s\nNEO4J_USERNAME=neo4j\nNEO4J_PASSWORD=%s\n' \
-     "${MODEL_KEY^^}" "$model" "$base_url" "$(cat "$SECRETS/llm_api_key")" "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/builder-backend.env"
+     "${MODEL_KEY^^}" "$model" "$base_url" "${key:-EMPTY}" "$(cat "$SECRETS/neo4j_password")" > "$SECRETS/builder-backend.env"
    # A proxy that Docker injects into containers (~/.docker/config.json) must not catch the LLM or Neo4j.
    printf 'NO_PROXY=%s,neo4j,localhost,127.0.0.1,host.docker.internal\nno_proxy=%s,neo4j,localhost,127.0.0.1,host.docker.internal\n' \
      "$host" "$host" >> "$SECRETS/builder-backend.env")
