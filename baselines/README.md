@@ -30,6 +30,26 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
 - 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
 
+**无法访问 Hugging Face 时**：构建器的上游 Dockerfile 会在构建镜像时下载嵌入模型 `sentence-transformers/all-MiniLM-L6-v2`（约 90 MB）。这一步不能跳过，因为抽取接口 `/extract` 每次都会加载这个模型（`create_chunk_vector_index` 和 `create_chunk_embeddings` 无条件调用 `load_embedding_model`）。它只用于生成 chunk 向量，不影响抽取出的实体和关系。以下三种方式任选其一，选项会保存在工作目录中，之后重跑不必再写：
+
+```bash
+scripts/baseline_neo4j_builder.sh --pdfs … --llm-base-url … --llm-model … --proxy http://<代理主机>:<端口>
+```
+
+```bash
+scripts/baseline_neo4j_builder.sh --pdfs … --llm-base-url … --llm-model … --hf-endpoint https://<HF镜像地址>
+```
+
+```bash
+scripts/baseline_neo4j_builder.sh --pdfs … --llm-base-url … --llm-model … --embedding-model-dir /path/to/all-MiniLM-L6-v2
+```
+
+- `--proxy` 只用于克隆构建器仓库和构建镜像；LLM 调用和运行期的容器都不走代理。代理地址保存在 `build_options.env`（权限 600），不会打印。
+- `--embedding-model-dir` 指向在能联网的机器上下载好的模型目录，需要包含 `config.json` 和 `*.safetensors`（或 `pytorch_model.bin`）。例如在有网的机器上执行 `huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 --local-dir all-MiniLM-L6-v2`，再拷贝到服务器。
+- 构建器使用的 Dockerfile 由脚本根据固定版本的上游 Dockerfile 生成（`Dockerfile.kgb`），只改了模型下载那一步。NLTK 数据下载改为失败也不中断构建，因为它只被聊天评估和 GCS 数据源使用。构建器的抽取代码没有任何修改。
+- 嵌入模型很小（2200 万参数）。容器内本来就没有 GPU，它始终在 CPU 上运行，每个 chunk 只需毫秒级时间，相比 LLM 调用可以忽略。
+
+
 ## 通用命令与选项
 
 Python：脚本会依次尝试 `$PYTHON`、`python3`、`python3.13`/`3.12`/`3.11`、`python`，使用第一个满足“≥ 3.11 且带 venv/ensurepip”的解释器。如需指定，例如用 conda 环境里的 Python：`PYTHON=$(which python) scripts/baseline_….sh …`。损坏的虚拟环境（没有 pip，或其实不是虚拟环境）会被自动重建。
