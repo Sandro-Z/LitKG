@@ -2,13 +2,14 @@
 # Neo4j LLM Graph Builder baseline: PDFs + one LLM API -> graph in LitKG QC canonical JSON.
 #
 #   scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url <http://host:port/v1> --llm-model <模型>
-#   scripts/baseline_neo4j_builder.sh status | logs | stop | down
+#   scripts/baseline_neo4j_builder.sh status | logs | stop | down | docker-logs
 #
 # Clones neo4j-labs/llm-graph-builder v0.8.7, starts it with a dedicated Neo4j (Docker), uploads
 # each PDF to the builder (its own PDF parser and LLM extraction, schema = LitKG entity types and
 # predicates), and exports data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json.
 # Runs in the background; rerun the same command to resume (finished PDFs are checkpointed).
-# Options: --name <语料名> --detach --force. "down" stops the Neo4j/builder containers.
+# Options: --name <语料名> --detach --force. "down" stops the Neo4j/builder containers;
+# "docker-logs" shows their logs. Needs >= KGB_MIN_FREE_GB (default 5) GB free for Docker's data.
 # No Hugging Face access? Add one of: --proxy http://host:port (image build only; LLM calls never use it),
 # --hf-endpoint https://<HF mirror>, or --embedding-model-dir <local all-MiniLM-L6-v2 copy>.
 # Needs Docker Compose. Run it as your normal user (not "sudo scripts/..."); it uses sudo for docker
@@ -24,7 +25,7 @@ BUILDER_COMMIT="1ade47de63edb161e5ea37a277141643f3af3142"
 COMPOSE_FILE="$ROOT/baselines/deploy/docker-compose.builder.yml"
 export KGB_SECRETS="$WORK/secrets" KGB_BUILDER_DIR="$BUILDER_DIR"
 export KGB_NEO4J_BOLT_PORT="${KGB_NEO4J_BOLT_PORT:-17687}" KGB_BUILDER_PORT="${KGB_BUILDER_PORT:-18000}"
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 source "$ROOT/baselines/lib.sh"
 DOCKER=(docker)
 pick_docker() {   # plain docker if this user may use it, otherwise sudo docker (asks in the foreground)
@@ -134,6 +135,25 @@ PY
 
 builder_ready() { neo4j_ready && curl -sf -o /dev/null "http://127.0.0.1:$KGB_BUILDER_PORT/docs"; }
 
+disk_preflight() {   # Docker's data root holds the builder image (several GB) and the Neo4j volume
+  local root avail
+  root="$("${DOCKER[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null)" || root=/var/lib/docker
+  avail="$(df -Pk "$root" 2>/dev/null | awk 'NR==2 {print int($4 / 1048576)}')"
+  [[ -n "$avail" ]] || return 0
+  log "free disk space for Docker ($root): ${avail} GB"
+  (( avail >= ${KGB_MIN_FREE_GB:-5} )) || { log "not enough free disk space for Docker ($root): ${avail} GB < ${KGB_MIN_FREE_GB:-5} GB.
+  Neo4j stops working when the disk fills up. Free space first, e.g. check: df -h $root ; sudo docker system df
+  (sudo docker builder prune / sudo docker image prune remove only build cache and dangling images)"; return 1; }
+}
+
+neo4j_problem() {   # $1 since: what Neo4j's own log shows that waiting will not fix
+  local recent
+  recent="$(compose logs --no-color --since "$1" neo4j 2>/dev/null | tail -n 2000)"
+  if grep -q 'No space left on device' <<<"$recent"; then echo disk
+  elif grep -q 'needs to be restarted' <<<"$recent"; then echo critical
+  fi
+}
+
 start_builder() {
   if [[ ! -d "$BUILDER_DIR/.git" ]]; then
     log "cloning $BUILDER_REPO@$BUILDER_REF"
@@ -146,14 +166,32 @@ start_builder() {
   make_dockerfile || return 1
   [[ -n "$KGB_BUILD_PROXY" ]] && log "image build uses the configured HTTP proxy"
   [[ -n "$KGB_HF_ENDPOINT" ]] && log "embedding model download uses HF_ENDPOINT=$KGB_HF_ENDPOINT"
+  disk_preflight || return 1
+  # A Neo4j left running by an earlier run may be stuck in a failed state (e.g. after the disk filled up):
+  # Neo4j then refuses every transaction until it is restarted.
+  if [[ -n "$(compose ps -q --status running neo4j 2>/dev/null)" ]] && ! neo4j_ready; then
+    log "the running Neo4j does not accept connections; restarting it"
+    compose restart neo4j
+  fi
   log "building/starting Neo4j + builder backend (first build downloads several GB)"
   compose up -d --build
-  local i
+  local i problem restarted=0 since
+  since="$(date -u +%FT%TZ)"
   for i in $(seq 1 120); do
     if builder_ready; then log "builder ready"; return 0; fi
+    problem="$(neo4j_problem "$since")"
+    if [[ "$problem" == disk ]]; then
+      log "Neo4j reports 'No space left on device'. Free disk space for Docker, then rerun the same command."
+      disk_preflight || true; return 1
+    elif [[ "$problem" == critical && "$restarted" == 0 ]]; then
+      log "Neo4j reports a critical error; restarting it once"
+      compose restart neo4j; restarted=1; since="$(date -u +%FT%TZ)"
+    elif [[ "$problem" == critical ]]; then
+      log "Neo4j keeps failing after a restart; see: $0 docker-logs"; return 1
+    fi
     sleep 10
   done
-  log "builder not ready after 20 minutes; see: docker compose -f $COMPOSE_FILE logs"; return 1
+  log "builder not ready after 20 minutes; see: $0 docker-logs"; return 1
 }
 
 before_background() {   # foreground: docker may need sudo, which can only prompt here
@@ -177,6 +215,7 @@ worker() {
 }
 
 if [[ "${1:-}" == down ]]; then pick_docker; compose down; exit 0; fi
+if [[ "${1:-}" == docker-logs ]]; then pick_docker; compose logs --no-color --tail "${2:-200}"; exit 0; fi
 # Build-only options (consumed here; saved for later reruns): --proxy, --hf-endpoint, --embedding-model-dir
 ARGS=(); OPT_PROXY=""; OPT_HF=""; OPT_MODEL=""
 while [[ $# -gt 0 ]]; do

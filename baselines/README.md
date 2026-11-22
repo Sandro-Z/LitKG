@@ -29,6 +29,8 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 把每个 PDF 原样上传给构建器，由构建器用自己的 PDF 解析和 LLM 抽取。schema 为 LitKG 的实体类型和谓词。每个 PDF 处理完都会存检查点。
 - 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
 - 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
+- `scripts/baseline_neo4j_builder.sh docker-logs` 查看 Neo4j 和构建器容器的日志（会自动带上所需的环境变量）。
+- **磁盘空间**：Docker 数据目录（通常是 `/var/lib/docker`，常在根分区）要放构建器镜像（数 GB）和 Neo4j 数据。启动前脚本会检查这里的剩余空间，少于 `KGB_MIN_FREE_GB`（默认 5 GB）就停止。磁盘写满时 Neo4j 会进入“需要重启”的故障状态，之后拒绝所有事务；脚本发现已在运行的 Neo4j 连不上时会先重启它，日志中出现 `No space left on device` 会立即报错退出，而不是空等 20 分钟。Neo4j 只保留最新一个事务日志文件，以减少占用。
 - **schema 模式**：如果 LitKG 本体按 domain/range 展开后的三元组不超过 `max_schema_triples`（默认 1000），就把全部三元组交给构建器强制约束。LitKG 本体实际会展开成 12,476 个三元组，而构建器（LangChain `LLMGraphTransformer`）会把三元组清单原样放进每次请求的工具 schema，约 15 万 token。此时自动改用 `nodes+instructions` 模式：实体类型仍通过 `allowedNodes` 强制约束；谓词名、定义和 domain/range 通过构建器自带的 `additional_instructions` 字段传入，约 1.1K token，只作指导不强制。违反 domain/range 的关系照常保留，并在 `stats.md` 中计数（`domain_range_violations`）。这一差异会写入图谱的 `metadata.consistency`。
 
 **无法访问 Hugging Face 时**：构建器的上游 Dockerfile 会在构建镜像时下载嵌入模型 `sentence-transformers/all-MiniLM-L6-v2`（约 90 MB）。这一步不能跳过，因为抽取接口 `/extract` 每次都会加载这个模型（`create_chunk_vector_index` 和 `create_chunk_embeddings` 无条件调用 `load_embedding_model`）。它只用于生成 chunk 向量，不影响抽取出的实体和关系。以下三种方式任选其一，选项会保存在工作目录中，之后重跑不必再写：

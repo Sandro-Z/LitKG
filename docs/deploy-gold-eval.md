@@ -114,7 +114,7 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 ```
 
 - 需要 Python ≥ 3.11 和外网：PubTator3 需要访问 NCBI；Neo4j 构建器需要访问 GitHub、Docker Hub 和 Hugging Face。
-- 第二个脚本需要 Docker Compose。构建器首次构建要下载数 GB，内存建议预留 6 GB 以上。它使用独立的 Compose 项目 `litkg-baselines`，端口只绑定 127.0.0.1（17687、18000），不影响 LitKG 和 QC。
+- 第二个脚本需要 Docker Compose。构建器首次构建要下载数 GB，Docker 数据目录所在分区至少留 5 GB 空闲（脚本会检查），内存建议预留 6 GB 以上。它使用独立的 Compose 项目 `litkg-baselines`，端口只绑定 127.0.0.1（17687、18000），不影响 LitKG 和 QC。
 - 无法访问 Hugging Face 时，给 Neo4j 脚本加 `--proxy`、`--hf-endpoint` 或 `--embedding-model-dir` 三者之一（构建镜像时需要一个约 90 MB 的嵌入模型）。
 - 详见 `baselines/README.md`。
 
