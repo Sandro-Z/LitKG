@@ -36,6 +36,14 @@ Q_RESET = 'MATCH (n) DETACH DELETE n'
 # document for non-neo4j.com users (src/create_chunks.py); raised so whole papers are extracted.
 BUILDER_ENV = {'MAX_TOKEN_CHUNK_SIZE': '100000000'}
 LOG_HINT = 'the cause is in the builder log: scripts/baseline_neo4j_builder.sh docker-logs'
+# Sent with every /extract, as the builder's own frontend does (EmbeddingConfigUtils.ts defaults). The
+# backend reads them from the request, not from its environment: processing_source() calls
+# load_embedding_model(provider, model), which fails on None ('NoneType' has no attribute 'lower') and
+# /extract then answers only "Failed To Process File ... or LLM Unable To Parse Content ".
+BUILDER_EMBEDDING = {'embedding_provider': 'sentence-transformer', 'embedding_model': 'all-MiniLM-L6-v2'}
+SMOKE_FILE = 'kgb-end-to-end-test.pdf'
+SMOKE_TEXT = ('Aspirin irreversibly inhibits cyclooxygenase-1 (COX-1) in human platelets. '
+              'Low-dose aspirin reduces the risk of myocardial infarction.')
 
 
 class BuilderError(RuntimeError):
@@ -109,7 +117,7 @@ class BuilderClient:
                     allowedNodes=nodes, allowedRelationship=relationships,
                     additional_instructions=additional_instructions,
                     token_chunk_size=str(self.cfg['token_chunk_size']), chunk_overlap=str(self.cfg['chunk_overlap']),
-                    chunks_to_combine=str(self.cfg['chunks_to_combine']))
+                    chunks_to_combine=str(self.cfg['chunks_to_combine']), **BUILDER_EMBEDDING)
         response = self.http.request('POST', f'{self.base}/extract', data=form, retry_status=set())
         body = response.json()
         if body.get('status') != 'Success':
@@ -201,6 +209,59 @@ def wait_for_status(store, filename, cfg, sleep):
             return {'status': 'Timeout'}
         sleep(cfg.get('poll_interval', 10))
         waited += cfg.get('poll_interval', 10)
+
+
+def minimal_pdf(text):
+    """A one-page PDF with `text` in a standard font (no dependencies), for the end-to-end test."""
+    escaped = text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    words, lines, line = escaped.split(), [], ''
+    for word in words:   # ~80 characters per line
+        if line and len(line) + len(word) > 80:
+            lines.append(line)
+            line = ''
+        line = f'{line} {word}'.strip()
+    lines.append(line)
+    stream = 'BT /F1 11 Tf 14 TL 50 780 Td ' + ' T* '.join(f'({l}) Tj' for l in lines) + ' ET'
+    objects = ['<< /Type /Catalog /Pages 2 0 R >>',
+               '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+               '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R '
+               '/Resources << /Font << /F1 5 0 R >> >> >>',
+               f'<< /Length {len(stream.encode("latin-1"))} >>\nstream\n{stream}\nendstream',
+               '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>']
+    out, offsets = bytearray(b'%PDF-1.4\n'), []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f'{number} 0 obj\n{body}\nendobj\n'.encode('latin-1')
+    xref = len(out)
+    out += f'xref\n0 {len(objects) + 1}\n0000000000 65535 f \n'.encode()
+    out += ''.join(f'{o:010d} 00000 n \n' for o in offsets).encode()
+    out += f'trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    return bytes(out)
+
+
+def smoke(policy, cfg, client, store, sleep=time.sleep):
+    """One small PDF through /upload and /extract with the run's schema: the path every PDF takes.
+
+    Returns (seconds, chunks, entity mentions, relations); raises BuilderError with the builder's message.
+    """
+    model = cfg.get('model')
+    if not cfg.get('dedicated_database') or not model:
+        raise BuilderError('neo4j.dedicated_database = true and neo4j.model are required')
+    nodes, relationships, _, _, instructions = schema(policy, 'schema', cfg.get('max_schema_triples', 1000))
+    started = time.monotonic()
+    store.query(Q_RESET)
+    try:
+        client.upload(SMOKE_FILE, minimal_pdf(SMOKE_TEXT), model)
+        client.extract(SMOKE_FILE, model, nodes, relationships, instructions)
+        status = wait_for_status(store, SMOKE_FILE, dict(cfg, max_wait=cfg.get('smoke_max_wait', 1800)), sleep)
+        if status.get('status') != 'Completed':
+            raise BuilderError(f'end-to-end test: {status.get("error") or "document status " + str(status.get("status"))}')
+        chunks, entities, relations = export_document(store, SMOKE_FILE)
+    finally:
+        store.query(Q_RESET)
+    if not chunks:
+        raise BuilderError('end-to-end test: the builder stored no text chunks for the test PDF')
+    return time.monotonic() - started, len(chunks), len(entities), len(relations)
 
 
 def _print(message):

@@ -28,10 +28,10 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 克隆固定版本 `neo4j-labs/llm-graph-builder` v0.8.7（commit `1ade47de…3142`），用 `deploy/docker-compose.builder.yml` 启动它的后端和一个专用 Neo4j 5.26 + APOC。端口只绑定 127.0.0.1：Neo4j 为 17687，后端为 18000。
 - 把每个 PDF 原样上传给构建器，由构建器用自己的 PDF 解析和 LLM 抽取。schema 为 LitKG 的实体类型和谓词。每个 PDF 处理完都会存检查点，日志逐篇显示进度（`[12/79] xxx.pdf: done in 95s …`）。
 - 构建器会处理每篇 PDF 的全文。上游默认只处理非 neo4j.com 用户每篇文档的前 10,000 token，脚本通过 `MAX_TOKEN_CHUNK_SIZE` 取消了这个限制，并写入图谱的 `metadata.consistency`。
-- **启动前自检**：后台任务开始前，脚本先在构建器容器里依次检查分词器（tiktoken）、嵌入模型、Neo4j、一次普通 LLM 请求，再用 LitKG schema 对一句测试文本做一次抽取，走的是构建器自己的代码路径。构建器的 API 出错时只返回笼统的 “Failed To Process File … or LLM Unable To Parse Content”，自检则会打印真实原因和处理建议（Key 会被打码）。任何一项失败，后台任务都不会启动。
+- **启动前自检**：后台任务开始前，脚本先在构建器容器里依次检查分词器（tiktoken）、嵌入模型、Neo4j、一次普通 LLM 请求，再用 LitKG schema 对一句测试文本做一次抽取，走的是构建器自己的代码路径。构建器的 API 出错时只返回笼统的 “Failed To Process File … or LLM Unable To Parse Content”，自检则会打印真实原因和处理建议（Key 会被打码）。自检通过后，再把一个只有两句话的小 PDF 完整走一遍构建器的 `/upload` 和 `/extract`（每篇 PDF 走的就是这条路径），用一两分钟确认整条链路可用。任何一项失败，后台任务都不会启动，并直接打印构建器日志里记录的真实报错（Key 和密码会被打码）。
 - **不需要 Key 的 LLM 服务**：提示输入 Key 时直接回车即可。构建器使用的 OpenAI 客户端（openai 2.x）不接受空 Key，会在发请求前就报 “Missing credentials”，所以脚本此时传给构建器占位 Key `EMPTY`；没有开启鉴权的服务（如未设 `--api-key` 的 vLLM/SGLang）会忽略它。
 - **运行时不联网**：构建器切块用 tiktoken，它第一次使用时会从 openaipublic.blob.core.windows.net 下载词表；嵌入模型也来自 Hugging Face。脚本在构建镜像时就把 tiktoken 词表缓存进镜像（会走 `--proxy`），运行时设置 `HF_HUB_OFFLINE=1`，抽取过程不再需要外网。
-- **单篇失败不影响整体**：单篇 PDF 抽取失败会重试一次；仍失败就跳过，记入 `out/failed.neo4j-builder-pdfnative.json` 和图谱的 `metadata.failed_documents`，其余 PDF 照常处理。此时图谱视为不完整，重跑同一条命令只会重试失败的那几篇。连续 3 篇失败说明是构建器、Neo4j 或 LLM 的问题而不是 PDF 本身，任务会停下。查看构建器记录的真实原因：`scripts/baseline_neo4j_builder.sh docker-logs | grep -A40 'File Failed in extraction'`。
+- **单篇失败不影响整体**：单篇 PDF 抽取失败会重试一次；仍失败就跳过，记入 `out/failed.neo4j-builder-pdfnative.json` 和图谱的 `metadata.failed_documents`，其余 PDF 照常处理。此时图谱视为不完整，重跑同一条命令只会重试失败的那几篇。连续 3 篇失败说明是构建器、Neo4j 或 LLM 的问题而不是 PDF 本身，任务会停下。出现失败时，后台任务会把构建器日志中第一处失败的报错写进运行日志（需要当前用户能直接用 docker，或 sudo 免密）；也可以手动查看：`scripts/baseline_neo4j_builder.sh docker-logs | grep -A40 'File Failed in extraction'`。
 - 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
 - 用完后执行 `scripts/baseline_neo4j_builder.sh down` 关闭容器。
 - `scripts/baseline_neo4j_builder.sh docker-logs` 查看 Neo4j 和构建器容器的日志（会自动带上所需的环境变量）。

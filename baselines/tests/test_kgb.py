@@ -401,6 +401,58 @@ class Neo4jBuilderFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(nb.BuilderError, r'Parse Content \(the cause is in the builder log: .*docker-logs\)'):
             client.extract('x.pdf', 'litkg_compat', '', '')
 
+    def test_extract_sends_the_fields_the_backend_reads(self):
+        sent = {}
+
+        class Response:
+            def json(self):
+                return {'status': 'Success', 'data': {}}
+
+        class FakeHttp:
+            def request(self, method, url, data=None, **k):
+                sent.update(data)
+                return Response()
+
+        client = nb.BuilderClient({'backend_url': 'http://b', 'uri': 'bolt://x', 'user': 'neo4j', 'database': 'neo4j',
+                                   'token_chunk_size': 200, 'chunk_overlap': 20, 'chunks_to_combine': 1}, 'pw',
+                                  http=FakeHttp())
+        client.extract('x.pdf', 'litkg_compat', 'Gene,Disease', '', 'Use ONLY ...')
+        # backend/src/main.py processing_source() passes these to load_embedding_model(); None fails the extraction
+        self.assertEqual((sent['embedding_provider'], sent['embedding_model']), ('sentence-transformer', 'all-MiniLM-L6-v2'))
+        for field in ('model', 'source_type', 'file_name', 'allowedNodes', 'allowedRelationship', 'token_chunk_size',
+                      'chunk_overlap', 'chunks_to_combine', 'additional_instructions', 'uri', 'userName', 'password',
+                      'database'):
+            self.assertIn(field, sent)
+
+    def test_end_to_end_smoke_test(self):
+        class Store(self.Store):
+            queries = []
+
+            def query(self, cypher, **params):
+                self.queries.append(cypher)
+                return super().query(cypher, **params)
+
+        client, store = self.Client(), Store()
+        seconds, chunks, entities, relations = nb.smoke(POLICY, self.CFG, client, store, sleep=lambda s: None)
+        self.assertEqual(chunks, 1)
+        self.assertEqual(client.calls, [('upload', nb.SMOKE_FILE), ('extract', nb.SMOKE_FILE)])
+        self.assertEqual((store.queries[0], store.queries[-1]), (nb.Q_RESET, nb.Q_RESET))   # leaves the database empty
+        Store.queries = []
+        with self.assertRaisesRegex(nb.BuilderError, 'Failed To Process File'):
+            nb.smoke(POLICY, self.CFG, self.Client(raising={nb.SMOKE_FILE}), Store(), sleep=lambda s: None)
+        self.assertEqual(Store.queries[-1], nb.Q_RESET)
+        with self.assertRaisesRegex(nb.BuilderError, 'end-to-end test'):
+            nb.smoke(POLICY, self.CFG, self.Client(), Store(failing={nb.SMOKE_FILE}), sleep=lambda s: None)
+
+    def test_smoke_pdf_is_readable(self):
+        import importlib.util
+        if importlib.util.find_spec('pypdf') is None:
+            self.skipTest('pypdf not installed')
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(nb.minimal_pdf(nb.SMOKE_TEXT + ' (x) a\\b')), strict=True)
+        self.assertEqual(' '.join(reader.pages[0].extract_text().split()), nb.SMOKE_TEXT + ' (x) a\\b')
+
     def test_builder_env_matches_compose_file(self):
         compose = (Path(__file__).resolve().parents[1] / 'deploy' / 'docker-compose.builder.yml').read_text()
         for key, value in nb.BUILDER_ENV.items():

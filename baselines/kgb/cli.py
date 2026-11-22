@@ -202,6 +202,29 @@ def cmd_builder_schema(cfg, args):
     return 0
 
 
+def cmd_builder_smoke(cfg, args):
+    """End-to-end test of the Neo4j builder: one small PDF through /upload and /extract."""
+    from .corpus import litkg_modules
+    from .http import HttpError
+    from .pipelines import neo4j_builder as nb
+    policy, _ = litkg_modules(args.litkg_root)
+    password = config_mod.secret(cfg['neo4j'], 'password_file', 'password_env')
+    client, store = nb.BuilderClient(cfg['neo4j'], password), nb.Neo4jStore(cfg['neo4j'], password)
+    try:
+        seconds, chunks, entities, relations = nb.smoke(policy, cfg['neo4j'], client, store)
+    except (nb.BuilderError, HttpError) as exc:
+        print(f'  FAIL  end-to-end test: {exc}', flush=True)
+        return 1
+    except Exception as exc:   # e.g. Neo4j unreachable: report it like the other checks, not as a traceback
+        print(f'  FAIL  end-to-end test: {type(exc).__name__}: {exc}', flush=True)
+        return 1
+    finally:
+        store.close()
+    print(f'  ok    end-to-end test: a 2-sentence PDF took {seconds:.0f}s ({chunks} chunk(s), {entities} entity '
+          f'mention(s), {relations} relation(s))', flush=True)
+    return 0
+
+
 def cmd_validate(cfg, args):
     from .validate import validate
     documents, policy = _inputs(cfg)
@@ -262,6 +285,8 @@ def main(argv=None):
     sub.add_parser('stats')
     bschema = sub.add_parser('builder-schema', help='print the schema sent to the Neo4j builder (JSON)')
     bschema.add_argument('--litkg-root', default=str(ROOT.parent))
+    smoke = sub.add_parser('builder-smoke', help='end-to-end test of the Neo4j builder with one small PDF')
+    smoke.add_argument('--litkg-root', default=str(ROOT.parent))
     args = parser.parse_args(argv)
     if args.command == 'run':
         allowed = {'pubtator3': {'native', 'llm'}, 'neo4j': {'sametext', 'pdfnative', 'no-schema'}}[args.system]
@@ -269,7 +294,7 @@ def main(argv=None):
             parser.error(f'--variant must be one of {sorted(allowed)} for {args.system}')
     cfg = config_mod.load(args.config)
     return {'corpus': cmd_corpus, 'prep': cmd_prep, 'run': cmd_run, 'validate': cmd_validate, 'stats': cmd_stats,
-            'builder-schema': cmd_builder_schema}[args.command](cfg, args)
+            'builder-schema': cmd_builder_schema, 'builder-smoke': cmd_builder_smoke}[args.command](cfg, args)
 
 
 if __name__ == '__main__':

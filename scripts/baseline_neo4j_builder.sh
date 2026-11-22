@@ -221,6 +221,51 @@ builder_selftest() {   # in the container: the code paths /extract uses, with th
     cat "$ROOT/baselines/deploy/builder_selftest.py"; } | compose exec -T builder-backend python -
 }
 
+redact() {   # hide the LLM key and the Neo4j password (also base64, as sent to the builder) in shown text
+  "$VENV/bin/python" -c '
+import base64, sys
+secrets = []
+for path in sys.argv[1:]:
+    try:
+        value = open(path).read().strip()
+    except OSError:
+        continue
+    if len(value) >= 4:
+        secrets += [value, base64.b64encode(value.encode()).decode()]
+for line in sys.stdin:
+    for secret in secrets:
+        line = line.replace(secret, "***")
+    sys.stdout.write(line)
+' "$SECRETS/llm_api_key" "$SECRETS/neo4j_password"
+}
+
+builder_traceback() {   # $1 since: the builder's own record of the first failed extraction (/extract hides it)
+  local recent
+  recent="$(compose logs --no-color --since "$1" builder-backend 2>/dev/null)" || return 1
+  if grep -q 'File Failed in extraction' <<<"$recent"; then
+    grep -m1 -A60 'File Failed in extraction' <<<"$recent" | redact
+  else
+    tail -n 30 <<<"$recent" | redact
+  fi
+}
+
+builder_smoke() {   # one small PDF through /upload and /extract: exactly the path every PDF takes
+  local since
+  since="$(date -u +%FT%TZ)"
+  log "end-to-end test: one 2-sentence PDF through the builder's /upload and /extract (a minute or two)"
+  kgb builder-smoke --litkg-root "$ROOT" && return 0
+  log "the builder's own error log for this test (its API only says 'Failed To Process File'):"
+  builder_traceback "$since" || log "(could not read it; see: $0 docker-logs)"
+  return 1
+}
+
+docker_noninteractive() {   # background worker: docker without a password prompt, when possible
+  if docker info >/dev/null 2>&1; then DOCKER=(docker)
+  elif command -v sudo >/dev/null && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n --preserve-env=KGB_SECRETS,KGB_BUILDER_DIR,KGB_NEO4J_BOLT_PORT,KGB_BUILDER_PORT,KGB_BUILD_PROXY,KGB_HF_ENDPOINT docker)
+  else return 1; fi
+}
+
 graph_complete() { [[ -s "$GRAPH" && ! -e "$FAILED" ]]; }
 
 before_background() {   # foreground: docker may need sudo, which can only prompt here
@@ -228,6 +273,7 @@ before_background() {   # foreground: docker may need sudo, which can only promp
   pick_docker
   start_builder || die "the builder did not start; fix the error above and rerun the same command"
   builder_selftest || die "the builder self-test failed (FAIL above); fix that and rerun the same command"
+  builder_smoke || die "the end-to-end test failed (the builder's error is shown above); fix that and rerun the same command"
 }
 
 worker() {
@@ -240,8 +286,13 @@ worker() {
     builder_ready || { log "FAILED: Neo4j/builder not reachable; rerun the same command to restart them"; exit 1; }
     [[ -e "$FAILED" ]] && log "retrying the PDFs that failed last time (finished PDFs come from checkpoints)"
     log "uploading PDFs and extracting (checkpointed per PDF)"
-    local status=0
+    local status=0 since
+    since="$(date -u +%FT%TZ)"
     kgb run neo4j --variant pdfnative || status=$?
+    if [[ "$status" != 0 ]] && docker_noninteractive; then
+      log "the builder's own error log for the first failed PDF (its API only says 'Failed To Process File'):"
+      builder_traceback "$since" || true
+    fi
     if [[ "$status" == 3 ]]; then
       log "INCOMPLETE: some PDFs failed (listed in $FAILED). Cause: $0 docker-logs | grep -A40 'File Failed in extraction'"
       log "Rerun the same command to retry only those PDFs."
