@@ -5,14 +5,17 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from quality_control.engine import evaluate as review
 from quality_control.gold import (evaluate, gold_id, norm_text, predicted_id_keys, spearman, list_profiles,
-                                  load_profile, validate_gold)
+                                  load_profile, resolve_profile, review_all, validate_gold)
 from quality_control.models import normalize
+from quality_control.scoring import apply_gold, combine_human
 from quality_control.server import Service, handler
 from quality_control.sources import attach_litkg_sources
 from quality_control.store import Store
@@ -351,47 +354,89 @@ class ApiTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
-    def test_two_systems_on_one_gold_set_with_calibration(self):
-        status, gold_set = self.call('/api/gold-sets', {'kind': 'biored', 'name': 'fixture', 'payload': biored_gold()})
-        self.assertEqual(status, 201)
-        status, again = self.call('/api/gold-sets', {'kind': 'biored', 'name': 'copy', 'payload': biored_gold()})
-        self.assertEqual((status, again['id'], again['created']), (200, gold_set['id'], False))
+    def wait(self, run_id):
+        for _ in range(500):
+            status, run = self.call(f'/api/runs/{run_id}')
+            if run['status'] not in {'queued', 'running'}:
+                return run
+            time.sleep(.02)
+        self.fail('review did not finish')
+
+    def test_every_review_runs_the_gold_standard_and_scores_include_it(self):
+        self.service.gold_dir.mkdir()
+        (self.service.gold_dir / 'gold.biored-fixture.json').write_text(json.dumps(biored_gold()))
         graph_a = self.store.add_graph(system_graph(), {})
         graph_b = self.store.add_graph(gold_derived_graph(biored_gold()), {})
-        run = self.store.start_run(graph_a, 'llm')
-        self.store.update_run(run, 'completed', {'assessments': [
+        llm_run = self.store.start_run(graph_a, 'llm')
+        self.store.update_run(llm_run, 'completed', {'assessments': [
             {'claim_id': 'c1', 'verdict': 'SUPPORTED'}, {'claim_id': 'c2', 'verdict': 'SUPPORTED'},
             {'claim_id': 'c3', 'verdict': 'UNSUPPORTED'}], 'candidates': [], 'matches': []})
         snapshot_before = self.store.graph(graph_a)
-        status, first = self.call(f'/api/graphs/{graph_a}/gold-evals',
-                                  {'gold_set_id': gold_set['id'], 'profile': 'litkg', 'modes': 'both', 'bootstrap': 100})
-        self.assertEqual(status, 201, first)
+        status, run = self.call(f'/api/graphs/{graph_a}/runs', {'mode': 'automatic'})
+        self.assertEqual(status, 202, run)
+        run = self.wait(run['id'])
         self.assertEqual(self.store.graph(graph_a), snapshot_before)
-        calibration = first['report']['results']['mention']['calibration']
+        report = run['report']
+        gold = report['gold']
+        self.assertEqual((gold['status'], gold['profile']['name'], gold['profile']['source']), ('applied', 'litkg', 'default'))
+        self.assertEqual(gold['calibration_run_id'], llm_run)   # a local rerun calibrates on the last LLM review
+        pooled = gold['pooled']
+        self.assertEqual((pooled['tp'], pooled['n_pred'], pooled['n_gold']), (2, 3, 3))
+        self.assertEqual((pooled['judged_claims'], pooled['total_claims'], pooled['aligned_graph_documents']), (3, 6, 2))
+        # No LLM evidence in a local run: both dimensions come from the gold standard alone.
+        self.assertIsNone(report['machine_dimensions']['correctness'])
+        self.assertEqual(report['dimensions']['correctness'], 66.67)
+        self.assertEqual(report['dimensions']['completeness'], 66.67)
+        self.assertEqual(report['dimension_details']['correctness']['gold_method'], 'gold_only')
+        self.assertIsNotNone(report['scenarios']['field_review']['score'])
+        entry = gold['sets'][0]
+        calibration = entry['calibration']['mention']
         self.assertEqual(calibration['confusion']['TP']['SUPPORTED'], 1)
         self.assertEqual(calibration['confusion']['TP']['UNSUPPORTED'], 1)
         self.assertEqual(calibration['confusion']['FP']['SUPPORTED'], 1)
         self.assertEqual(calibration['p_supported_given_tp'], {'value': 0.5, 'n': 2})
         self.assertEqual(calibration['p_supported_given_fp'], {'value': 1.0, 'n': 1})
-        self.assertEqual(calibration['spearman_correctness_vs_gold_precision']['n'], 2)
-        self.assertEqual(first['report']['qc_run_id'], run)
-        status, second = self.call(f'/api/graphs/{graph_b}/gold-evals',
-                                   {'gold_set_id': gold_set['id'], 'profile': 'pubtator3', 'modes': ['mention'], 'bootstrap': 0})
-        self.assertEqual(status, 201, second)
-        self.assertIsNone(second['report']['results']['mention']['calibration'])
-        status, listing = self.call(f'/api/gold-evals?gold_set_id={gold_set["id"]}')
-        self.assertEqual(len(listing['evals']), 2)
-        self.assertEqual(len({e['report']['gold_hash'] for e in listing['evals']}), 1)
-        status, errors = self.call(f'/api/gold-evals/{first["id"]}/errors')
+        self.assertEqual(set(entry['modes']), {'id', 'mention'})
+        status, stored = self.call(f'/api/gold-evals/{entry["gold_eval_id"]}')
+        self.assertEqual((stored['report']['trigger'], stored['report']['review_run_id'], stored['report']['qc_run_id']),
+                         ('local_review', run['id'], llm_run))
+        self.assertEqual(stored['report']['results']['mention']['calibration']['spearman_correctness_vs_gold_precision']['n'], 2)
+        status, errors = self.call(f'/api/gold-evals/{entry["gold_eval_id"]}/errors')
         self.assertEqual(errors['errors']['mention']['fp'][0]['claims'][0]['claim_id'], 'c2')
-        status, graph_list = self.call(f'/api/graphs/{graph_a}/gold-evals')
-        self.assertEqual([e['id'] for e in graph_list['evals']], [first['id']])
-        status, profiles = self.call('/api/gold-profiles')
-        self.assertIn('litkg', {p['name'] for p in profiles['profiles']})
+        status, run_b = self.call(f'/api/graphs/{graph_b}/runs', {'mode': 'automatic'})
+        run_b = self.wait(run_b['id'])
+        self.assertEqual((run_b['report']['gold']['pooled']['precision'], run_b['report']['gold']['pooled']['recall']), (1.0, 1.0))
+        self.assertIsNone(run_b['report']['gold']['sets'][0]['calibration']['mention'])
+        status, sets = self.call('/api/gold-sets')
+        self.assertEqual([g['name'] for g in sets['gold_sets']], ['biored-fixture'])   # imported once, by hash
+        status, listing = self.call(f'/api/gold-evals?gold_set_id={sets["gold_sets"][0]["id"]}')
+        self.assertEqual(len(listing['evals']), 2)
+        status, overview = self.call('/api/graphs?view=overview')
+        compact = {g['id']: g['latest_run']['report']['gold'] for g in overview['graphs']}
+        self.assertEqual(compact[graph_a]['pooled']['f1'], pooled['f1'])
+        self.assertNotIn('modes', compact[graph_a]['sets'][0])
+        status, config = self.call('/api/config')
+        self.assertEqual((config['gold_files'], config['gold_sets']), (1, 1))
+        status, body = self.call(f'/api/graphs/{graph_a}/gold-evals', {'gold_set_id': sets['gold_sets'][0]['id']})
+        self.assertEqual(status, 404)   # no separate gold run any more
         with self.store.connect() as db, self.assertRaises(sqlite3.DatabaseError):
             db.execute("UPDATE gold_sets SET name='changed'")
         status, _ = self.call(f'/api/graphs/{graph_a}/delete', {'confirm_graph_id': graph_a})
         self.assertEqual(status, 200)
+
+    def test_review_without_gold_or_with_broken_gold_files_keeps_working(self):
+        graph = self.store.add_graph(system_graph(), {})
+        status, run = self.call(f'/api/graphs/{graph}/runs', {'mode': 'automatic'})
+        run = self.wait(run['id'])
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['report']['gold']['status'], 'no_gold_sets')
+        self.assertIsNone(run['report']['gold_fusion'])
+        self.service.gold_dir.mkdir()
+        (self.service.gold_dir / 'gold.biored-broken.json').write_text('{not json')
+        status, run = self.call(f'/api/graphs/{graph}/runs', {'mode': 'automatic'})
+        run = self.wait(run['id'])
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['report']['gold']['file_problems'], [{'file': 'gold.biored-broken.json', 'code': 'GOLD_PAYLOAD_INVALID'}])
 
     def test_server_side_gold_files_are_listed_and_imported(self):
         status, body = self.call('/api/gold-files')
@@ -416,11 +461,180 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((status, body['error']), (400, 'GOLD_PAYLOAD_INVALID'))
 
     def test_invalid_requests(self):
-        graph = self.store.add_graph(system_graph(), {})
-        status, body = self.call(f'/api/graphs/{graph}/gold-evals', {'gold_set_id': 'missing'})
+        status, body = self.call('/api/gold-evals/' + '0' * 32)
         self.assertEqual(status, 404)
         status, body = self.call('/api/gold-sets', {'kind': 'biored', 'payload': {'schema': 'x'}})
         self.assertEqual((status, body['error']), (400, 'GOLD_PAYLOAD_INVALID'))
+
+
+def merged_graph():
+    """BioRED fixture documents plus the DiMB-RE fixture document in one graph."""
+    graph, other = system_graph(), dimbre_graph()
+    for key in ('nodes', 'claims', 'documents'):
+        graph[key] = graph[key] + other[key]
+    return graph
+
+
+def gold_sets(*items):
+    return [(f'id-{i}', gold['kind'], gold['name'], gold) for i, gold in enumerate(items)]
+
+
+class ReviewAllTests(unittest.TestCase):
+    def test_every_aligned_gold_set_is_evaluated_and_primary_metrics_are_pooled(self):
+        summary, evaluations = review_all(merged_graph(), gold_sets(biored_gold(), dimbre_gold()), bootstrap_rounds=50)
+        self.assertEqual(summary['status'], 'applied')
+        self.assertEqual([(s['name'], s['primary_mode'], s['primary_metric']) for s in summary['sets']],
+                         [('biored-fixture', 'mention', 'pair_type'), ('dimbre-fixture', 'relaxed', 'relation_type')])
+        self.assertEqual(set(summary['sets'][0]['modes']), {'id', 'mention'})
+        self.assertEqual(set(summary['sets'][1]['modes']), {'strict', 'relaxed'})
+        self.assertEqual([e[0] for e in evaluations], ['id-0', 'id-1'])
+        pooled = summary['pooled']
+        # BioRED mention pair+type 2/3/3 plus DiMB-RE relaxed relation type 2/3/2.
+        self.assertEqual((pooled['tp'], pooled['n_pred'], pooled['n_gold']), (4, 6, 5))
+        self.assertEqual((pooled['precision'], pooled['recall']), (4 / 6, 4 / 5))
+        self.assertEqual((pooled['judged_claims'], pooled['total_claims']), (6, 10))
+        self.assertEqual((pooled['aligned_graph_documents'], pooled['graph_documents']), (3, 4))
+        self.assertEqual(pooled['sets'], ['biored-fixture', 'dimbre-fixture'])
+
+    def test_unaligned_and_overlapping_gold_sets(self):
+        copy_ = biored_gold()
+        copy_['name'] = 'bc8-train'
+        copy_['meta'] = {'note': 'same documents, different file'}
+        summary, evaluations = review_all(system_graph(), gold_sets(biored_gold(), copy_, dimbre_gold()), bootstrap_rounds=0)
+        self.assertEqual([s['reason'] for s in summary['skipped']], ['no_aligned_documents'])
+        self.assertEqual(len(evaluations), 2)
+        # Equal coverage: name order decides, so bc8-train counts and biored-fixture is reported but not pooled.
+        self.assertEqual([(s['name'], s['pooled']) for s in summary['sets']], [('bc8-train', True), ('biored-fixture', False)])
+        self.assertIn('不重复计入', summary['sets'][1]['pool_note'])
+        self.assertEqual((summary['pooled']['tp'], summary['pooled']['n_pred'], summary['pooled']['n_gold']), (2, 3, 3))
+        none, _ = review_all(system_graph(), gold_sets(dimbre_gold()))
+        self.assertEqual((none['status'], none['pooled']), ('not_applicable', None))
+        empty, _ = review_all(system_graph(), [])
+        self.assertEqual(empty['status'], 'no_gold_sets')
+
+    def test_profile_follows_policy_then_producing_system(self):
+        graph = system_graph()
+        self.assertEqual(resolve_profile(graph), ('litkg', 'default'))
+        graph['metadata'] = {'source': 'litkg', 'knowledge_base_id': 3}
+        self.assertEqual(resolve_profile(graph), ('litkg', 'metadata.source'))
+        graph['metadata'] = {'system': 'PubTator3+LLM'}
+        self.assertEqual(resolve_profile(graph), ('pubtator3', 'metadata.system'))
+        graph['metadata'] = {'system': 'Neo4j LLM Graph Builder'}
+        self.assertEqual(resolve_profile(graph), ('neo4j-builder', 'metadata.system'))
+        graph['policy']['gold_profile'] = 'pubtator3'
+        self.assertEqual(resolve_profile(graph), ('pubtator3', 'policy.gold_profile'))
+        graph['policy']['gold_profile'] = 'missing-profile'
+        summary, evaluations = review_all(graph, gold_sets(biored_gold()))
+        self.assertEqual((summary['status'], summary['code'], evaluations), ('failed', 'GOLD_PROFILE_NOT_FOUND', []))
+
+
+class GoldScoringTests(unittest.TestCase):
+    def report(self, gold):
+        return dict(dimensions=dict(specialization=80, granularity=80, correctness=90, completeness=40, ontology=None,
+                                    coverage=None), gold=gold, complete=False, gate='INCOMPLETE')
+
+    def applied(self, precision=.5, recall=.8, claim_coverage=.5, document_coverage=1.0):
+        return dict(status='applied', pooled=dict(precision=precision, recall=recall, claim_coverage=claim_coverage,
+                                                  document_coverage=document_coverage))
+
+    def test_weights_scale_with_coverage_and_human_fusion_comes_after(self):
+        graph = system_graph()
+        report = apply_gold(self.report(self.applied()), graph)
+        self.assertEqual(report['machine_dimensions']['correctness'], 90)
+        self.assertEqual(report['dimensions']['correctness'], 80.0)    # 0.75 x 90 + 0.25 x 50
+        self.assertEqual(report['dimensions']['completeness'], 60.0)   # 0.5 x 40 + 0.5 x 80
+        self.assertEqual(report['gold_fusion']['correctness']['effective_weight'], .25)
+        again = apply_gold(copy.deepcopy(report), graph)
+        self.assertEqual(again['dimensions'], report['dimensions'])    # idempotent
+        state = dict(metrics=dict(score=0, decided=1, uncertain_votes=0, disagreements=0), rounds=[{'claim_ids': ['c1']}],
+                     consensus=[], reviews=[])
+        human = combine_human(report, state, graph)
+        self.assertEqual(human['dimensions']['correctness'], 56.0)     # 0.7 x 80 + 0.3 x 0
+        self.assertEqual(human['dimension_details']['correctness']['machine_score'], 90)
+        self.assertEqual(human['dimension_details']['correctness']['pre_human_score'], 80.0)
+        graph['policy']['gold_weight'] = 0
+        self.assertEqual(apply_gold(self.report(self.applied()), graph)['dimensions']['correctness'], 90)
+
+    def test_without_an_applicable_gold_set_scores_are_unchanged(self):
+        graph = system_graph()
+        for gold in (None, dict(status='not_applicable', pooled=None), dict(status='failed', code='GOLD_REVIEW_FAILED')):
+            report = apply_gold(self.report(gold), graph)
+            self.assertEqual(report['dimensions'], report['machine_dimensions'])
+            self.assertIsNone(report['gold_fusion'])
+        report = apply_gold(self.report(self.applied(precision=None)), graph)
+        self.assertEqual(report['dimensions']['correctness'], 90)
+        self.assertEqual(report['gold_fusion']['correctness']['method'], 'machine_only')
+
+    def test_engine_runs_the_gold_review_and_explains_the_fused_score(self):
+        graph = system_graph()
+        seen = []
+
+        def gold_review(report):
+            seen.append(report['stages'])
+            return review_all(graph, gold_sets(biored_gold()), qc_report=report, bootstrap_rounds=0)[0]
+        report = review(graph, None, gold_review=gold_review)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(report['gold']['status'], 'applied')
+        detail = report['dimension_details']['correctness']
+        self.assertEqual((detail['score'], detail['gold_method'], detail['machine_score']), (66.67, 'gold_only', None))
+        self.assertIn('金标准 precision', detail['reason'])
+        self.assertNotIn('无人工金标准；候选命中率不是全图召回率或 F1', report['limitations'])
+        self.assertEqual(report['machine_scenarios']['field_review']['score'],
+                         review(graph)['scenarios']['field_review']['score'])
+
+
+class LLMReviewGoldTests(unittest.TestCase):
+    @staticmethod
+    def wait(store, run_id):
+        for _ in range(500):
+            run = store.run(run_id)
+            if run['status'] not in {'queued', 'running'}:
+                return run
+            time.sleep(.02)
+        raise AssertionError('review did not finish')
+
+    def test_llm_review_calibrates_on_its_own_verdicts(self):
+        from quality_control.tests.test_quality import FakeLLM, fixture
+        text = 'Alpha treats Beta. Gamma binds Beta.'
+        gold = {'schema': 'litkg-gold/1', 'kind': 'biored', 'split': 'mini', 'name': 'biored-mini',
+                'documents': [dict(id='d1', external_id='d1', title='Alpha', text=text)],
+                'entities': [dict(doc_id='d1', start=0, end=5, text='Alpha', type='ChemicalEntity', ids=['D1']),
+                             dict(doc_id='d1', start=13, end=17, text='Beta', type='DiseaseOrPhenotypicFeature', ids=['D2']),
+                             dict(doc_id='d1', start=19, end=24, text='Gamma', type='GeneOrGeneProduct', ids=['7']),
+                             dict(doc_id='d1', start=31, end=35, text='Beta', type='DiseaseOrPhenotypicFeature', ids=['D2'])],
+                'relations': [dict(doc_id='d1', id1='D1', id2='D2', type='Negative_Correlation', novelty='No'),
+                              dict(doc_id='d1', id1='7', id2='D2', type='Bind', novelty='No')],
+                'sentences': [], 'labels': {}, 'meta': {}}
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'qc.sqlite3')
+            service = Service(store, FakeLLM)
+            service.gold_dir = Path(directory) / 'gold'
+            service.gold_dir.mkdir()
+            (service.gold_dir / 'gold.biored-mini.json').write_text(json.dumps(gold))
+            gid = store.add_graph(normalize(fixture()), {})
+            rid = service.submit(gid, 'llm')['id']
+            run = self.wait(store, rid)
+            # A local rerun afterwards keeps the LLM evidence scores in every view and re-evaluates the gold standard.
+            local = self.wait(store, service.submit(gid, 'automatic')['id'])
+            page = store.latest_run_page(gid, 0)['report']
+            overview = store.list_graph_overviews()[0]['latest_run']['report']
+            service.pool.shutdown(wait=True)
+        self.assertEqual(local['report']['gold']['sets'][0]['gold_eval_id'] != run['report']['gold']['sets'][0]['gold_eval_id'], True)
+        for view in (local['report'], page, overview):
+            self.assertEqual(view['machine_dimensions']['correctness'], 100)
+            self.assertEqual(view['dimensions']['completeness'], 75.0)
+            self.assertEqual(view['gold']['status'], 'applied')
+        self.assertEqual(local['report']['gold']['calibration_run_id'], rid)
+        self.assertEqual(run['status'], 'completed')
+        report = run['report']
+        self.assertEqual(report['gate'], 'PASS')   # the gate stays evidence-based
+        self.assertEqual(report['gold']['calibration_run_id'], rid)
+        calibration = report['gold']['sets'][0]['calibration']['mention']
+        self.assertEqual(calibration['confusion']['TP']['SUPPORTED'], 1)
+        self.assertEqual((report['gold']['pooled']['precision'], report['gold']['pooled']['recall']), (1.0, 0.5))
+        self.assertEqual(report['machine_dimensions']['completeness'], 100)
+        self.assertEqual(report['dimensions']['completeness'], 75.0)   # 0.5 x 100 + 0.5 x 50
+        self.assertEqual(report['dimensions']['correctness'], 100.0)
 
 
 class TextSourceAttachTests(unittest.TestCase):

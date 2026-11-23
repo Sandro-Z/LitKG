@@ -2,8 +2,12 @@
 
 System-neutral and read-only: it reads a normalized graph snapshot, an
 immutable gold set (from ``benchmarks/prepare.py``) and a JSON mapping
-profile, and returns a separate report.  It never writes to the graph and
-never changes the machine/human QC scores.
+profile, and returns a report.  It never writes to the graph.
+
+Every review run calls ``review_all`` with all stored gold sets; the pooled
+precision / recall it returns is folded into correctness / completeness by
+``scoring.apply_gold``.  Graphs whose documents align with no gold set are
+scored exactly as before.
 
 Standard library only.
 """
@@ -17,7 +21,7 @@ from pathlib import Path
 
 from .models import at, digest
 
-GOLD_EVAL_VERSION = 'qc-gold/1.0.0'
+GOLD_EVAL_VERSION = 'qc-gold/1.1.0'
 GOLD_SCHEMA = 'litkg-gold/1'
 KINDS = {'biored', 'dimbre'}
 MODES = {'id', 'mention'}
@@ -896,3 +900,135 @@ def evaluate(graph, gold, kind, profile_name, modes=('id', 'mention'), *, review
     report['qc_run_id'] = qc_run_id
     report['calibration_available'] = bool(qc_report)
     return report, errors
+
+
+# ------------------------------------------------- automatic review (all gold sets)
+
+# The metric that enters the six-dimension scores.  Mention alignment works for every system (names are
+# always present, identifiers are not), so systems are compared on the same footing; the id mode and the
+# strict level are still computed and reported.
+PRIMARY = {'biored': ('mention', 'pair_type'), 'dimbre': ('relaxed', 'relation_type')}
+SYSTEM_PROFILES = {'pubtator3': 'pubtator3', 'pubtator3+llm': 'pubtator3', 'neo4j llm graph builder': 'neo4j-builder',
+                   'litkg': 'litkg'}
+
+
+def resolve_profile(graph):
+    """Mapping profile for a graph: policy.gold_profile, else the producing system, else LitKG."""
+    requested = (graph.get('policy') or {}).get('gold_profile')
+    if isinstance(requested, str) and requested.strip():
+        return requested.strip(), 'policy.gold_profile'
+    metadata = graph.get('metadata') or {}
+    system = str(metadata.get('system') or '').strip().casefold()
+    if system in SYSTEM_PROFILES:
+        return SYSTEM_PROFILES[system], 'metadata.system'
+    if str(metadata.get('source') or '').strip().casefold() == 'litkg':
+        return 'litkg', 'metadata.source'
+    return 'litkg', 'default'
+
+
+def _calibration_summary(calibration):
+    if not calibration:
+        return None
+    keys = ('confusion', 'p_supported_given_tp', 'p_supported_given_fp',
+            'spearman_correctness_vs_gold_precision', 'spearman_completeness_vs_gold_recall')
+    return {key: calibration[key] for key in keys}
+
+
+def _headline(gold_set_id, name, report):
+    """Compact per-gold-set entry for the review report; full details stay in gold_evals."""
+    kind = report['kind']
+    mode, metric = PRIMARY[kind]
+    entry = dict(gold_set_id=gold_set_id, name=name, kind=kind, split=report.get('gold_split'),
+                 gold_hash=report['gold_hash'],
+                 alignment={k: report['alignment'][k] for k in ('graph_documents', 'gold_documents', 'aligned', 'coverage',
+                                                                'aligned_gold_documents_hash', 'by_method', 'conflict_count')},
+                 primary_mode=mode, primary_metric=metric, modes={}, calibration={})
+    if kind == 'biored':
+        for name_, result in report['results'].items():
+            m = result['metrics']
+            intervals = (m.get('bootstrap') or {}).get('intervals') or {}
+            entry['modes'][name_] = dict(pair=m['micro']['pair'], pair_type=m['micro']['pair_type'],
+                                         f1_ci=(intervals.get('pair_type') or {}).get('f1'),
+                                         endpoint_alignment=m['endpoint_alignment'],
+                                         judged_claims=result['claims'].get('endpoint_aligned', 0), claims=result['claims'])
+            entry['calibration'][name_] = _calibration_summary(result.get('calibration'))
+    else:
+        span = report['results']['span']
+        for level in ('strict', 'relaxed'):
+            m = span['metrics'][level]
+            entry['modes'][level] = dict(relation_type=m['relation_type'], relation_pair=m['relation_pair'],
+                                         factuality=dict(accuracy=m['factuality']['accuracy'], n=m['factuality']['n']),
+                                         location_coverage=span['metrics']['location_coverage'],
+                                         judged_claims=span['claims'].get('located', 0), claims=span['claims'])
+            entry['calibration'][level] = _calibration_summary((span.get('calibration') or {}).get(level))
+    primary = entry['modes'][mode]
+    entry['primary'] = primary[metric]
+    entry['judged_claims'] = primary['judged_claims']
+    return entry
+
+
+def review_all(graph, gold_sets, *, qc_report=None, qc_run_id=None, trigger='review', bootstrap_rounds=1000,
+               review_levels=DEFAULT_REVIEW_LEVELS):
+    """Evaluate a graph against every gold set its documents align with.
+
+    gold_sets: iterable of (gold_set_id, kind, name, payload).  Returns (summary, evaluations): the summary
+    goes into the review report, evaluations[i] = (gold_set_id, report, errors) belongs to summary['sets'][i]
+    and is stored in full.  Gold sets of one kind that share documents are pooled once (the one with more
+    aligned documents counts), so overlapping splits never count a document twice.
+    """
+    gold_sets = sorted(gold_sets, key=lambda s: (str(s[2]), str(s[0])))
+    profile_name, profile_source = resolve_profile(graph)
+    summary = dict(version=GOLD_EVAL_VERSION, trigger=trigger, profile=dict(name=profile_name, source=profile_source),
+                   review_levels=list(review_levels), primary={k: dict(mode=m, metric=x) for k, (m, x) in PRIMARY.items()},
+                   available_sets=len(gold_sets), sets=[], skipped=[], pooled=None,
+                   status='no_gold_sets' if not gold_sets else 'not_applicable')
+    if not gold_sets:
+        return summary, []
+    try:
+        _, profile_hash = load_profile(profile_name)
+    except ValueError as exc:
+        summary.update(status='failed', code=str(exc))
+        return summary, []
+    summary['profile']['hash'] = profile_hash
+    evaluations, gold_docs, graph_docs = [], [], []
+    for gold_set_id, kind, name, payload in gold_sets:
+        mapping, _ = align_documents(graph['documents'], payload.get('documents') or [])
+        if not mapping:
+            summary['skipped'].append(dict(gold_set_id=gold_set_id, name=name, kind=kind, reason='no_aligned_documents'))
+            continue
+        try:
+            report, errors = evaluate(graph, payload, kind, profile_name, ('id', 'mention'), review_levels=review_levels,
+                                      qc_report=qc_report, qc_run_id=qc_run_id, bootstrap_rounds=bootstrap_rounds,
+                                      gold_set=gold_set_id)
+        except ValueError as exc:
+            summary['skipped'].append(dict(gold_set_id=gold_set_id, name=name, kind=kind, reason=str(exc)))
+            continue
+        report['trigger'] = trigger
+        summary['sets'].append(_headline(gold_set_id, name, report))
+        evaluations.append((gold_set_id, report, errors))
+        gold_docs.append(set(mapping.values()))
+        graph_docs.append(set(mapping))
+    if not summary['sets']:
+        return summary, evaluations
+    used, counted_docs, totals = defaultdict(set), set(), Counter()
+    order = sorted(range(len(summary['sets'])), key=lambda i: (-summary['sets'][i]['alignment']['aligned'], summary['sets'][i]['name']))
+    for index in order:
+        entry = summary['sets'][index]
+        overlap = used[entry['kind']] & gold_docs[index]
+        if overlap:
+            entry.update(pooled=False, pool_note=f'与已计入评分的同类金标准集共有 {len(overlap)} 篇文献，不重复计入')
+            continue
+        entry['pooled'] = True
+        used[entry['kind']] |= gold_docs[index]
+        counted_docs |= graph_docs[index]
+        primary = entry['primary']
+        totals.update(tp=primary['tp'], n_pred=primary['n_pred'], n_gold=primary['n_gold'], judged=entry['judged_claims'])
+    claims, documents = len(graph['claims']), len(graph['documents'])
+    pooled = prf(totals['tp'], totals['n_pred'], totals['n_gold'])
+    judged = min(totals['judged'], claims)
+    pooled.update(sets=[summary['sets'][i]['name'] for i in order if summary['sets'][i]['pooled']],
+                  judged_claims=judged, total_claims=claims, claim_coverage=judged / claims if claims else 0.0,
+                  aligned_graph_documents=len(counted_docs), graph_documents=documents,
+                  document_coverage=len(counted_docs) / documents if documents else 0.0)
+    summary.update(status='applied', pooled=pooled)
+    return summary, evaluations

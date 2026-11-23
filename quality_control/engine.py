@@ -5,18 +5,23 @@ from collections import Counter
 from .models import VERSION, anchor, blocks, digest, finite, public_claim
 from .sources import review_blocks
 from .ontology import validate
-from .scoring import scenario_scores
+from .scoring import apply_gold, gold_reason, scenario_scores
 from .prompts import PROMPT_VERSION, EXTRACT, FIDELITY, MATCH, RUBRIC
 from .rubrics import measure
 from .scoring import SCORING_VERSION
 from .llm import LLMError
 from .adaptive import AdaptiveConcurrency, ReviewRequest, run_requests
 
+NO_GOLD_LIMITATION = '无人工金标准；候选命中率不是全图召回率或 F1'
+GOLD_LIMITATION = ('候选命中率不是全图召回率或 F1；金标准 P/R/F1 只覆盖与 BioRED / DiMB-RE 对齐的文献、'
+                   '可映射的谓词和端点可对齐的 claim')
 VERDICTS = {'SUPPORTED', 'PARTIALLY_SUPPORTED', 'CONTRADICTED', 'UNSUPPORTED', 'INSUFFICIENT_EVIDENCE', 'SOURCE_CONFLICT'}
 MATCHES = {'matched', 'misrepresented', 'missing', 'ambiguous', 'out_of_scope'}
 
 
-def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000, *, stop_reason=None):
+def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000, *, stop_reason=None, gold_review=None):
+    """Run the review.  gold_review(report) -> summary runs after the evidence stages (also when they were
+    stopped early), so calibration sees this run's verdicts; its pooled P/R enters the scores in finalize."""
     corpus = review_blocks(blocks(graph))
     nodes = {n['id']: n for n in graph['nodes']}
     formal = validate(graph)
@@ -25,7 +30,7 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
                   model=getattr(client, 'model', None), assessments=[], candidates=[], matches=[],
                   noun_phrases=[], predicate_mentions=[], negations=[], identity_issues=[],
                   document_coverage=[], errors=[], ontology=formal, stages={}, dimension_assessments=[],
-                  limitations=['无人工金标准；候选命中率不是全图召回率或 F1', '只审核已导入文本；图像、表格视觉和未提供附件未核验'])
+                  limitations=[NO_GOLD_LIMITATION, '只审核已导入文本；图像、表格视觉和未提供附件未核验'])
     if any(d.get("original_source_status") in {"missing", "unreadable", "too_large", "hash_mismatch"} for d in graph["documents"]):
         report["limitations"].append('部分 LitKG 原文件无法读取，相关评估使用已有分块并保留证据缺口。')
     llm = client is not None and client.enabled
@@ -429,6 +434,8 @@ def evaluate(graph, client=None, checkpoint=lambda report: None, max_chars=48000
         r.get(field) and r[field]['coverage'] == 1 for r in report['dimension_assessments'] for field in ('specialization', 'granularity')) else 'incomplete'
     report['stages']['matching'] = 'complete' if llm and len(report['matches']) == len(report['candidates']) and not any(m['status'] == 'ambiguous' for m in report['matches']) else 'incomplete'
     stopped()
+    if gold_review is not None:
+        report['gold'] = gold_review(report)
     finalize(graph, report, docs_complete, bool(scope))
     report['llm_calls'] = getattr(client, 'calls', 0)
     report['usage'] = getattr(client, 'usage', {})
@@ -485,8 +492,16 @@ def finalize(graph, report, docs_complete, scope_known):
               + report['ontology']['violations']
               + (match_counts['missing'] + match_counts['misrepresented'] if scope_known else 0))
     gate = 'FAIL' if blocker else ('NEEDS_REVISION' if errors else ('INCOMPLETE' if incomplete else 'PASS'))
-    report.update(dimensions=dims, gate=gate, complete=not incomplete,
-                  scenarios=scenario_scores(dims, not incomplete, blocker),
+    # Gold-standard precision / recall (if any gold set aligns) adjust correctness / completeness; the machine
+    # scores stay in machine_dimensions.  Completeness of the evidence review itself is not affected.
+    report['machine_dimensions'] = dims
+    apply_gold(report, graph)
+    final = report['dimensions']
+    if report.get('gold_fusion'):
+        report['limitations'] = [GOLD_LIMITATION if x == NO_GOLD_LIMITATION else x for x in report['limitations']]
+    report.update(gate=gate, complete=not incomplete,
+                  machine_scenarios=scenario_scores(dims, not incomplete, blocker),
+                  scenarios=scenario_scores(final, not incomplete, blocker),
                   metrics=dict(claim_count=count, reviewed=len(assessments), labels=dict(labels),
                                claim_coverage=len(assessments) / count if count else None,
                                undetermined_rate=unresolved / len(assessments) if assessments else None,
@@ -524,8 +539,13 @@ def finalize(graph, report, docs_complete, scope_known):
     details['ontology'] = dict(method='explicit_constraint_pass_rate', evaluated=report['ontology']['checks'],
                                reason='显式约束检测' if dims['ontology'] is not None else '未提供可执行的本体约束')
     for field, detail in details.items():
-        detail['score'] = dims[field]
-        detail['status'] = 'unavailable' if dims[field] is None else ('complete' if not incomplete else 'partial')
+        detail['score'] = final[field]
+        detail['status'] = 'unavailable' if final[field] is None else ('complete' if not incomplete else 'partial')
+        fusion = (report.get('gold_fusion') or {}).get(field)
+        if fusion and fusion['method'] != 'machine_only':
+            detail.update(machine_score=dims[field], gold_score=fusion['gold_score'], gold_metric=fusion['metric'],
+                          gold_coverage=fusion['coverage'], effective_gold_weight=fusion['effective_weight'],
+                          gold_method=fusion['method'], machine_reason=detail['reason'], reason=gold_reason(fusion))
     report['dimension_details'] = details
     report['scoring_version'] = SCORING_VERSION
     report['failure_summary'] = dict(Counter(e['code'] for e in report['errors']))

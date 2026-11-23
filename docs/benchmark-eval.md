@@ -2,7 +2,7 @@
 
 本手册给出从下载金标准到在 QC 中查看 P/R/F1 的完整命令。背景、标签全集和映射分类见 [benchmark-eval-plan.md](benchmark-eval-plan.md)。
 
-金标准评测与 QC 原有评分完全分离：结果存在 `gold_sets` / `gold_evals` 两张不可变表中，版本号为 `GOLD_EVAL_VERSION = qc-gold/1.0.0`，不改变 `machine_dimensions`、场景分、门禁或人工融合。
+金标准评测是 QC 评审的一部分：每次运行评审都会自动用服务器上的全部金标准评测与图谱文献对齐的部分，合并的 precision 计入正确性、recall 计入完整性，没有单独的页面或运行按钮。完整结果存在 `gold_sets` / `gold_evals` 两张不可变表中，版本号为 `GOLD_EVAL_VERSION = qc-gold/1.1.0`。证据评审本身的分数仍保存在 `machine_dimensions`；门禁不受金标准影响。融合公式见 `quality_control/README.md` 的“金标准评测”一节。
 
 ## 0. 前提
 
@@ -86,48 +86,44 @@ curl -s -X POST http://127.0.0.1:8090/api/import/litkg \
 
 导出中的文本文档带有 `external_id`（例如 `biored:15485686`）和 `source_kind: "text"`。QC 会识别 `{sha256}.litkg-text.json`，把原 block 附加为 `litkg_original` 块，并把该文献标记为 `complete`。这些文本就是完整原文，不是 PDF 渲染结果。
 
-## 5. （可选）QC 原文评审
+## 5. 运行 QC 评审（自动包含金标准评测）
 
-在“自动评审”页运行“原文 LLM 评审”。建议评审模型与抽取模型不同，以减少自评偏差。只有存在已完成的 LLM 评审时，金标准报告才会计算 QC 校准（混淆表、P(SUPPORTED|TP)、P(SUPPORTED|FP)、逐文档 Spearman）。
+在“自动评审”页选择图谱，点击“运行原文 LLM 评审”。评审在证据阶段结束后自动完成金标准评测，不需要另外操作：
 
-## 6. 运行金标准评测
+1. 服务器 `data/benchmarks/` 下的 `gold.*.json`（第 1 步生成，QC 容器只读挂载为 `/gold`）在评审时自动导入，相同内容按 hash 去重。服务器上没有的金标准文件可在“导入图谱”页上传。
+2. 图谱文献按 `external_id` → 标题 → `id` 与每个金标准集对齐；有对齐文献的金标准集都会评测，BioRED 计算 id 与 mention 两种模式，DiMB-RE 计算 strict 与 relaxed 两级，并用本次 LLM 判定计算 QC 校准（混淆表、P(SUPPORTED|TP)、P(SUPPORTED|FP)、逐文档 Spearman）。
+3. 映射档案自动选择：LitKG 导出用 `litkg`，PubTator3 基线用 `pubtator3`，Neo4j 构建器基线用 `neo4j-builder`（依据图谱 `metadata`）；需要指定时在快照 `policy.gold_profile` 中设置。
+4. 评审完成后，“自动评审”页的“金标准评测”卡片显示合并的 P / R / F1、每个金标准集每种模式的指标与校准，以及金标准对正确性、完整性的影响；点击一行查看分类型指标并下载 FP / FN 错误样本。“图谱比较”页的“金标准 P / R / F1”列并排比较多个图谱，并提示金标准或对齐文献是否一致。
 
-前端“金标准评测”页：
+建议评审模型与抽取模型不同，以减少自评偏差。不想调用模型时，“仅运行本地约束检测”同样会执行金标准评测（校准使用最近一次已完成的 LLM 评审）。金标准评测是本地计算，不向模型发送金标准；BioRED test 上两种模式加 1000 次 bootstrap 约 0.2 秒，BioRED train 约 0.7 秒。
 
-1. 在“服务器上的金标准文件”中选择 `gold.biored-test.json` 或 `gold.dimbre-test.json`，点击“从服务器导入”。这些文件就是第 1 步在服务器 `data/benchmarks/` 下生成的，QC 容器以只读方式挂载为 `/gold`，不需要下载再上传。“或从本机上传”仅作备用。导入后不可修改，相同内容按 hash 去重。
-2. 选择图谱、金标准集、映射档案（`litkg` / `pubtator3` / `neo4j-builder`）、对齐模式，以及是否包含“需核对”规则。
-3. 点击“运行金标准评测”。比较表列出同一金标准集上的所有评测，并显示金标准 hash 与对齐文档集合是否一致。点击一行可查看分类型指标；“下载 FP / FN 错误样本”导出 claim、证据 quote 和对应金标准。
+## 6. 查看结果与 API
 
-等价 API：
+评测只随评审运行（`POST /api/graphs/<graph_id>/runs`，`mode` 为 `llm` 或 `automatic`），结果在评审报告的 `gold`、`gold_fusion`、`dimension_details` 中：
 
 ```bash
-curl -s http://127.0.0.1:8090/api/gold-files
+curl -s -X POST http://127.0.0.1:8090/api/graphs/<graph_id>/runs -H 'Content-Type: application/json' -d '{"mode":"automatic"}'
 ```
 
 ```bash
-curl -s -X POST http://127.0.0.1:8090/api/gold-sets -H 'Content-Type: application/json' -d '{"server_file":"gold.biored-test.json"}'
+curl -s http://127.0.0.1:8090/api/runs/<run_id> | python3 -c 'import json,sys; r=json.load(sys.stdin)["report"]; print(r["gold"]["status"], r["gold"].get("pooled"), r["gold_fusion"])'
+```
+
+完整的金标准报告和错误样本按 `gold_eval_id`（在 `report.gold.sets[]` 中）读取：
+
+```bash
+curl -s http://127.0.0.1:8090/api/gold-evals/<gold_eval_id>
 ```
 
 ```bash
-curl -s -X POST http://127.0.0.1:8090/api/graphs/<graph_id>/gold-evals -H 'Content-Type: application/json' \
-  -d '{"gold_set_id":"<gold_set_id>","profile":"litkg","modes":"both","review_levels":["confirmed","needs_review"],"bootstrap":1000}'
+curl -s http://127.0.0.1:8090/api/gold-evals/<gold_eval_id>/errors
 ```
 
-```bash
-curl -s http://127.0.0.1:8090/api/graphs/<graph_id>/gold-evals
-```
-
-```bash
-curl -s http://127.0.0.1:8090/api/gold-evals/<eval_id>/errors
-```
-
-其他接口：`GET /api/gold-sets`、`GET /api/gold-profiles`、`GET /api/gold-evals?gold_set_id=…`、`GET /api/gold-evals/<eval_id>`。
-
-评测是同步计算，只读图谱快照。本机实测：BioRED test 上 id 与 mention 两种模式加 1000 次 bootstrap 约 0.2 秒；BioRED train 约 0.7 秒。
+其他接口：`GET /api/gold-files`、`GET/POST /api/gold-sets`、`GET /api/gold-profiles`、`GET /api/graphs/<graph_id>/gold-evals`、`GET /api/gold-evals?gold_set_id=…`。
 
 ### 报告内容
 
-- `version`、`snapshot_hash`、`corpus_hash`、`policy_hash`、`gold_hash`、`profile.hash`、`review_levels`、`modes`。
+- `version`、`snapshot_hash`、`corpus_hash`、`policy_hash`、`gold_hash`、`profile.hash`、`review_levels`、`modes`、`trigger`（`llm_review` / `local_review`）、`review_run_id`（触发它的评审）、`qc_run_id`（校准所用的 LLM 评审）。
 - `alignment`：文献对齐按 `external_id` → 规范化标题 → `id` 的顺序进行；报告覆盖率、未对齐数量、各对齐方式的计数，以及 `aligned_gold_documents_hash`（用于判断不同图谱的覆盖范围是否一致）。
 - BioRED（按模式 `id` / `mention`）：文档级无序 ID 对；micro P/R/F1 分为仅关系对和关系对加类型两档，并给出各关系类型、各实体对类别、按文档 macro 平均（附 n），以及固定种子 `20261121` 的 1000 次文档级 bootstrap 95% CI。否定或推测 claim 先排除，`claims.negated_excluded` / `speculative_excluded` 记录排除数。端点对齐报告 `resolved/total`、`ambiguous`、`unresolved`、`no_identifier`。
 - DiMB-RE（`span` 下分 `strict` / `relaxed`）：claim 先按 `source_refs` 的块偏移（LitKG 文本 chunk 的 `source_offset`）或 quote 定位到金标准句子；端点 strict 要求规范化文本相等，relaxed 要求字符区间重叠；报告关系类型与关系对两档 P/R/F1、各类型指标、已匹配关系的 factuality 准确率（附 n 和混淆表）及句子定位率。双向类型（`INTERACTS_WITH`、`ASSOCIATED_WITH`、`POS/NEG_ASSOCIATED_WITH`）允许主客体互换。
@@ -170,8 +166,8 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 
 1. 读取同一份 `data/benchmarks/documents.<bench>-<split>.json`（或 QC 图谱的 `.graph.documents`），在 `blocks[].text` 上抽取。
 2. 产出 QC canonical 图谱：`nodes`（建议带 `xrefs`，例如 `MESH:D003924`、`NCBIGene:6331`）、`claims`（`document_id` 和 `source_refs` 指向原 `id/block_id`，quote 必须是 block 中的逐字片段）。`documents` 原样带入，不要修改，也不要在 QC 导入时再附加原文件，否则 `corpus_hash` 会变化。
-3. 在 QC“导入图谱 → 通用 JSON”中上传。
-4. 在“金标准评测”页选择同一金标准集和对应档案（`pubtator3` 或 `neo4j-builder`），并排比较。比较表中的“金标准一致”和“覆盖一致”都应为“是”。
+3. 在 QC“导入图谱 → 通用 JSON”中上传。基线脚本生成的图谱带有 `metadata.system`，评审会自动使用对应档案；其他系统可在快照 `policy.gold_profile` 中指定。
+4. 对每个图谱运行评审，在“图谱比较”页勾选这些图谱并排比较；比较条件中应显示“金标准与对齐文献一致”。
 
 ## 8. 已知限制
 
@@ -180,4 +176,5 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - **DiMB-RE 文本重建**：token 以单个空格拼接（如 `APG - 157`、`curcumin ' s`），与原排版不同；抽取系统看到的是重建文本。JSONL 不含标准化 ID，因此 DiMB-RE 只做 span 级匹配。约 12%（test 48/539）的关系跨句，评测窗口取相关句子的并集。
 - **novelty 未评测**；BioRED 的 `Cotreatment/Drug_Interaction/Comparison/Conversion` 在 LitKG 档案中没有对应谓词，只计入召回分母。
 - **BC8 测试集**没有公开关系标注，不能作为金标准。
-- 映射档案中的 `needs_review` 规则默认参与评测；如需只用确定规则，取消勾选“包含需核对”。TODO 规则始终不参与，命中数在 `rule_hits` 中报告。
+- 映射档案中的 `needs_review` 规则参与评测，TODO 规则不参与，命中数在 `rule_hits` 中报告。
+- 计入评分的主指标固定为 BioRED mention 模式和 DiMB-RE relaxed 级别，因为每个系统都有实体名称，不一定有标准 ID；id 模式和 strict 级别照常计算和展示，但不计分。

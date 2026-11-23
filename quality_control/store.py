@@ -26,6 +26,18 @@ def _require_graph(db, graph_id):
         raise KeyError('GRAPH_NOT_FOUND')
 
 
+def _gold_overview(gold):
+    """What the comparison page needs from a review's gold summary, whatever the number of gold sets."""
+    keep = ('name', 'kind', 'gold_hash', 'primary_mode', 'primary_metric', 'primary', 'pooled', 'judged_claims')
+    return dict(status=gold.get('status'), version=gold.get('version'), profile=gold.get('profile'),
+                pooled=gold.get('pooled'), code=gold.get('code'),
+                sets=[dict({k: s.get(k) for k in keep},
+                           aligned=(s.get('alignment') or {}).get('aligned'),
+                           gold_documents=(s.get('alignment') or {}).get('gold_documents'),
+                           aligned_gold_documents_hash=(s.get('alignment') or {}).get('aligned_gold_documents_hash'))
+                      for s in gold.get('sets') or []])
+
+
 def _report_overview(report):
     if not isinstance(report, dict):
         return None
@@ -33,7 +45,9 @@ def _report_overview(report):
     for key, value in report.items():
         if value is None or type(value) in (bool, int, float) or isinstance(value, str) and len(value) <= 256:
             result[key] = value
-        elif key in ('llm_concurrency', 'calibration', 'dimension_details', 'dimension_status', 'dimension_summary', 'dimensions', 'failure_summary', 'human', 'machine_scenarios', 'manual_summary', 'metrics', 'progress', 'protocol', 'scenarios', 'score_complete') and isinstance(value, dict):
+        elif key == 'gold' and isinstance(value, dict):
+            result[key] = _gold_overview(value)
+        elif key in ('llm_concurrency', 'calibration', 'dimension_details', 'dimension_status', 'dimension_summary', 'dimensions', 'failure_summary', 'gold_fusion', 'human', 'machine_dimensions', 'machine_scenarios', 'manual_summary', 'metrics', 'progress', 'protocol', 'scenarios', 'score_complete') and isinstance(value, dict):
             if len(json.dumps(value, ensure_ascii=False)) <= 24000:
                 result[key] = value
     return result
@@ -181,7 +195,7 @@ class Store:
                               (graph_id,)).fetchone()
             claim = json.loads(row['claim'])
             nodes = json.loads(row['nodes']) if row['nodes'] else []
-            if last and last['mode'] != 'ontology':
+            if last and last['mode'] != 'automatic':
                 report = json.loads(last['report']) if last['report'] else None
             else:
                 latest = self.latest_run(graph_id)
@@ -254,7 +268,8 @@ class Store:
             graph['review_revision'] = row['review_revision']
             graph['round_count'] = row['round_count']
             latest = {key: row['run_' + key] for key in ('id', 'graph_id', 'status', 'mode', 'error', 'created_at', 'updated_at', 'cancel_requested')} if row['run_id'] else None
-            if row['review_revision'] or (latest and latest['mode'] == 'ontology'):
+            # A local rerun ('automatic') is shown merged with the last LLM evidence report (Store.run).
+            if row['review_revision'] or (latest and latest['mode'] == 'automatic'):
                 latest = self._graph_report_page(graph['id'], row['run_id'], row['run_updated_at'],
                                                  row['review_revision'], row['round_count'], row['run_cancel_requested'], 0)
                 if latest:
@@ -285,7 +300,7 @@ class Store:
             if row is None:
                 raise KeyError('RUN_NOT_FOUND')
             result = dict(row)
-            if result['mode'] != 'ontology':
+            if result['mode'] != 'automatic':
                 result.pop('report_overview', None)
                 result['report'] = _report_page(json.loads(result['report']), offset) if result['report'] else None
                 return result
@@ -351,6 +366,9 @@ class Store:
                     evidence_report = json.loads(prior['report'])
                     if 'dimensions' in evidence_report:
                         evidence_report['ontology'] = report['ontology']
+                        if isinstance(report.get('gold'), dict):
+                            # The local rerun evaluated the gold sets again (calibrated on this LLM report).
+                            evidence_report['gold'] = report['gold']
                         evidence_report['evidence_run_id'] = prior['id']
                         evidence_report['ontology_run_id'] = rid
                         report = evidence_report
@@ -447,7 +465,7 @@ class Store:
                        (gid, cid, reviewer.strip(), verdict, note, now(), state['sample']['id']))
         return self.sample_state(gid, state['sample']['id'])
 
-    # ---- gold-standard evaluation (separate from machine/human QC scores)
+    # ---- gold-standard evaluation (run inside every review; results feed correctness / completeness)
 
     def add_gold_set(self, kind, name, payload):
         from .gold import validate_gold
@@ -471,6 +489,12 @@ class Store:
         with self.connect() as db:
             rows = db.execute('SELECT id,kind,name,gold_hash,summary,created_at FROM gold_sets ORDER BY created_at DESC').fetchall()
         return [dict(row, summary=json.loads(row['summary'])) for row in rows]
+
+    def gold_sets_for_review(self):
+        """Every stored gold set as (id, kind, name, payload), for the automatic review."""
+        with self.connect() as db:
+            rows = db.execute('SELECT id,kind,name,payload FROM gold_sets ORDER BY name,id').fetchall()
+        return [(row['id'], row['kind'], row['name'], json.loads(row['payload'])) for row in rows]
 
     def gold_set(self, gold_set_id):
         with self.connect() as db:

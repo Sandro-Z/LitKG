@@ -94,7 +94,8 @@ docker compose up -d --build --no-deps api
 3. **独立重抽取**：仅给模型原文块和 scope，不给图谱/置信度，提取原子候选、名词短语、谓词和否定表述。逐条验证引用后冻结候选集及哈希。
 4. **保真与量表**：逐 claim 对照原文，使用六类判定。默认提供全部关联文献；长文超预算时先取锚点、词项命中及邻块并披露检索范围，不能据部分检索判 `UNSUPPORTED`。没有证据或标签前提不满足时降为 `INSUFFICIENT_EVIDENCE`。领域专门化和粒度可独立补评：缺失有效标量时，使用 `RUBRIC` 提示词补充带证据的子项量表；缺失子项保留未定。数字字符串和单个完整 JSON 代码块兼容解析，证据仅在已发送原文中精确或仅空白差异唯一匹配时恢复锚点，不接受改写或多义引用。
 5. **反向匹配**：冻结候选与图谱分批匹配，保存 `matched / misrepresented / missing / ambiguous / out_of_scope`。只有全部批次明确排除对应表示才可判 missing；已有但表达错误只记 misrepresented，避免重复算漏抽。分批无表示和无法消歧是不同状态。
-6. **汇总**：计算多维分、场景适用性、支持率和覆盖；错误/未审/未知范围单列。逐块/逐 claim/逐候选保存进度，异常退出保留部分结果。
+6. **金标准评测**：用服务器上的全部 BioRED / DiMB-RE 金标准评测与图谱文献对齐的部分，合并的 precision / recall 计入正确性与完整性（见下文“金标准评测”）；没有对齐文献时跳过，不影响评分。
+7. **汇总**：计算多维分、场景适用性、支持率和覆盖；错误/未审/未知范围单列。逐块/逐 claim/逐候选保存进度，异常退出保留部分结果。
 
 `SUPPORTED/PARTIALLY_SUPPORTED` 必须有 supports；`CONTRADICTED` 必须有 contradicts；`SOURCE_CONFLICT` 需要至少两个来源及两种证据角色；`UNSUPPORTED` 必须完整读取相关来源，不能以未检出代替反证。无来源不产生通过评分。
 
@@ -110,6 +111,8 @@ docker compose up -d --build --no-deps api
 | 粒度 | 原子表达、必要限定、极性/模态、数值/单位细节各25%；原文未报告数字时不因没有数字扣分 |
 | 本体合规 | `100 × (1 − 失败约束次数 / 实际执行约束次数)`；不含独立悬空引用检查；无本体约束为空 |
 | 覆盖代理 | 可用的名词短语表示、候选关系保留、否定候选保留、关系密度代理的均值；仅作线索 |
+
+以上是证据评审本身的分数（报告中的 `machine_dimensions`）。图谱文献与金标准对齐时，正确性和完整性再融合金标准 precision / recall，见“金标准评测”一节。
 
 关系密度代理为 `100 × min(r, 1/r)`，r 是去重图谱声明数 / 去重重抽取候选数；只有来源完整且范围明确时计算。重复事实的原文证据合并到候选，避免重复提高分母。实体合并/拆分仅保存有来源证据的疑点，不自动合并或删除实体。
 
@@ -148,7 +151,24 @@ API、比较页面及导出在读取时按最新人工记录重新计算，不�
 
 ## 金标准评测（BioRED / DiMB-RE）
 
-“金标准评测”页和 `/api/gold-*` 接口在人工标注金标准上计算真实的 Precision / Recall / F1，并在已有 LLM 评审时计算 QC 校准。结果存放在独立的不可变表 `gold_sets` / `gold_evals` 中，版本号为 `GOLD_EVAL_VERSION`，不改变上述机器评分、门禁和人工融合。映射档案见 `gold_profiles/*.json`，每条规则都带 `review` 状态，`TODO` 规则不参与评测。完整流程见 `docs/benchmark-eval.md`。
+金标准评测是评审的一部分，没有单独的页面或按钮。每次运行评审（“运行原文 LLM 评审”或“仅运行本地约束检测”），在证据阶段结束后、汇总评分前自动执行：
+
+1. 导入服务器金标准目录（`QC_GOLD_DIR`，Compose 中只读挂载 `QC_GOLD_HOST_DIR`，默认 `./data/benchmarks`）里新的 `gold.<bench>-<split>.json`，按内容 hash 去重、不可修改。“导入图谱”页也可以上传服务器上没有的金标准文件。
+2. 对所有已导入的金标准集，按 `external_id` → 规范化标题 → `id` 对齐图谱文献；没有对齐文献的金标准集跳过。
+3. 对有对齐文献的金标准集计算全部指标：BioRED 的 id / mention 两种实体对齐 × 关系对 / 关系对+类型（含 macro 平均和 1000 次 bootstrap 95% 区间），DiMB-RE 的 strict / relaxed × 关系类型 / 关系对（含 factuality），以及与本次 LLM 判定的 QC 校准。本地约束检测没有 LLM 判定，校准使用最近一次已完成的 LLM 评审。完整结果和 FP / FN 样本存入不可变表 `gold_evals`，报告中保存摘要和 `gold_eval_id`。
+4. 映射档案（`gold_profiles/*.json`）依次按快照 `policy.gold_profile`、来源系统（`metadata.system` 为 PubTator3 / Neo4j LLM Graph Builder，或 LitKG 导出）确定，默认 `litkg`。档案中 `TODO` 规则不参与，`needs_review` 规则参与。
+
+**计入评分**：只用一个系统无关的主指标，BioRED 取 mention 模式“关系对+类型”，DiMB-RE 取 relaxed “关系类型”，跨金标准集合并 tp / pred / gold；同类金标准集文献重叠时只计覆盖文献多的一个，避免重复计数。
+
+- 正确性 = (1 − w) × 机器正确性 + w × 100 × precision，w = 金标准权重 × 可由金标准判定的 claim 数 / 全部 claim 数。
+- 完整性 = (1 − w) × 机器完整性 + w × 100 × recall，w = 金标准权重 × 金标准覆盖的图谱文献数 / 全部文献数。
+- 金标准权重默认 0.5，可在快照 `policy.gold_weight` 中设为 0–1；设为 0 即不计入。机器维度缺失时直接采用金标准值（`gold_only`），并保持“暂定”。
+- 人工抽样随后在金标准融合后的正确性上融合，公式不变。
+- 其他四个维度、门禁和评审完整性不受金标准影响。图谱文献与任何金标准都对不上时，评分与没有金标准时完全相同。
+
+报告新增 `gold`（摘要、合并指标、各金标准集各模式指标与校准）和 `gold_fusion`（每个维度的机器分、金标准分、有效权重和方法）；`machine_dimensions` 仍是证据评审本身的分数，`dimension_details` 写明融合公式。“自动评审”页显示金标准卡片，点击一行可查看分类型指标、排除计数、校准混淆表并下载错误样本；“图谱比较”页显示合并的 P / R / F1，并检查各图谱使用的金标准与对齐文献是否一致。版本号 `GOLD_EVAL_VERSION = qc-gold/1.1.0`，评分版本 `qc-scoring/2.1.0`。
+
+金标准 FP 不一定是原文不支持的错误，也可能是金标准没有标注的关系；mention 对齐只做规范化字面匹配，召回存在对齐上限。这些限制对所有系统相同。完整流程见 `docs/benchmark-eval.md`。
 
 ## 空分数诊断与旧报告
 
@@ -159,6 +179,8 @@ API、比较页面及导出在读取时按最新人工记录重新计算，不�
 ## API 与验证
 
 主要接口：`GET /api/graphs`、`POST /api/graphs`、`POST /api/import/litkg`、`POST /api/graphs/{id}/runs`、`GET /api/runs/{id}`、`POST /api/graphs/{id}/sample`、`GET/POST /api/graphs/{id}/rounds`、`GET /api/graphs/{id}/claims/{claim_id}`、`POST /api/graphs/{id}/reviews`、`GET /api/graphs/{id}/export`。
+
+金标准：`GET /api/gold-files`、`GET/POST /api/gold-sets`（上传或 `{"server_file": ...}`）、`GET /api/gold-profiles`、`GET /api/graphs/{id}/gold-evals`、`GET /api/gold-evals?gold_set_id=…`、`GET /api/gold-evals/{id}`、`GET /api/gold-evals/{id}/errors`。评测本身只随评审运行，没有单独的运行接口。
 
 ```bash
 python3 -m unittest discover -s quality_control/tests -v

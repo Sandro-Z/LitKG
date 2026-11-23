@@ -54,7 +54,7 @@ async function guarded(fn){try{await fn();}catch(e){notice(e.message,true);}}
 function on(id,fn){$(id).addEventListener('click',()=>guarded(fn));}
 function score(v){return v===null||v===undefined?'—':Number(v).toFixed(1);}
 function badge(text,kind=''){return `<span class="badge ${kind}">${esc(text)}</span>`;}
-function switchTab(tab){activeTab=tab;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('hidden',x.id!==tab));document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x.dataset.tab===tab));if(tab==='audit')guarded(renderAudit);if(tab==='human')guarded(renderSample);if(tab==='gold')guarded(loadGold);}
+function switchTab(tab){activeTab=tab;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('hidden',x.id!==tab));document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x.dataset.tab===tab));if(tab==='audit')guarded(renderAudit);if(tab==='human')guarded(renderSample);if(tab==='import')guarded(renderGoldSources);}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 function currentGraph(selector){return graphs.find(g=>g.id===$(selector).value);}
 function displayClaim(c){const value=x=>x?.label??x?.value??x?.text??x?.id??'?';return `${value(c.subject)} — ${c.predicate} → ${value(c.object)}`;}
@@ -97,12 +97,12 @@ function renderCompare(){
     button.onclick = () => guarded(() => deleteGraph(button.dataset.deleteGraph, button));
   });
   const chosen=graphs.filter(g=>selected.has(g.id));renderRadar(chosen);
-  $('#scoretable').innerHTML=`<table><thead><tr><th>图谱</th><th>综合评分</th><th>机器综合分</th><th>人工分 / 有效权重</th><th>已测权重</th>${Object.values(labels).map(l=>`<th>${l}</th>`).join('')}<th>适用性</th></tr></thead><tbody>${chosen.map(g=>{
+  $('#scoretable').innerHTML=`<table><thead><tr><th>图谱</th><th>综合评分</th><th>机器综合分</th><th>金标准 P / R / F1</th><th>人工分 / 有效权重</th><th>已测权重</th>${Object.values(labels).map(l=>`<th>${l}</th>`).join('')}<th>适用性</th></tr></thead><tbody>${chosen.map(g=>{
     const r=g.latest_run?.report,c=r?.scenarios?.[scenario],h=r?.human;
-    return `<tr><td>${esc(g.name)}</td><td>${score(c?.score??c?.provisional)} ${c&&c.status!=='complete'?badge('暂定','warning'):''}</td><td>${score(r?.machine_scenarios?.[scenario]?.score??r?.machine_scenarios?.[scenario]?.provisional)}</td><td>${score(h?.metrics?.score)} / ${h?(100*h.effective_weight).toFixed(1)+'%':'—'}</td><td>${c?(100*c.measured_weight).toFixed(0)+'%':'—'}</td>${Object.keys(labels).map(k=>`<td title="${esc(r?.dimension_details?.[k]?.reason||'尚未评估')}">${score(r?.dimensions?.[k])}</td>`).join('')}<td>${badge(c?.suitability||'待验证',c?.suitability==='适用'?'':c?.suitability==='不适用'?'danger':'warning')}</td></tr>`;
+    return `<tr><td>${esc(g.name)}</td><td>${score(c?.score??c?.provisional)} ${c&&c.status!=='complete'?badge('暂定','warning'):''}</td><td>${score(r?.machine_scenarios?.[scenario]?.score??r?.machine_scenarios?.[scenario]?.provisional)}</td><td title="${esc(goldTitle(r?.gold))}">${goldCell(r?.gold)}</td><td>${score(h?.metrics?.score)} / ${h?(100*h.effective_weight).toFixed(1)+'%':'—'}</td><td>${c?(100*c.measured_weight).toFixed(0)+'%':'—'}</td>${Object.keys(labels).map(k=>`<td title="${esc(r?.dimension_details?.[k]?.reason||'尚未评估')}">${score(r?.dimensions?.[k])}</td>`).join('')}<td>${badge(c?.suitability||'待验证',c?.suitability==='适用'?'':c?.suitability==='不适用'?'danger':'warning')}</td></tr>`;
   }).join('')}</tbody></table>`;
   const runs=chosen.map(g=>g.latest_run?.report).filter(Boolean),same=field=>new Set(runs.map(r=>r[field])).size<=1;
-  $('#comparability').textContent=chosen.length<2?'选择多个图谱，可比较相同语料上的不同抽取系统。':`语料一致：${same('corpus_hash')?'是':'否，结果不宜直接排名'}；范围/本体一致：${same('policy_hash')?'是':'否'}；模型一致：${same('model')?'是':'否'}；评分版本一致：${same('scoring_version')?'是':'否'}；提示词版本一致：${same('prompt_version')?'是':'否'}；已完成证据评分：${runs.filter(r=>r.score_complete).length}/${chosen.length}。暂定分保留已测范围，不能视为完整全图评测。`;
+  $('#comparability').textContent=chosen.length<2?'选择多个图谱，可比较相同语料上的不同抽取系统。':`语料一致：${same('corpus_hash')?'是':'否，结果不宜直接排名'}；范围/本体一致：${same('policy_hash')?'是':'否'}；模型一致：${same('model')?'是':'否'}；评分版本一致：${same('scoring_version')?'是':'否'}；提示词版本一致：${same('prompt_version')?'是':'否'}；已完成证据评分：${runs.filter(r=>r.score_complete).length}/${chosen.length}；${goldComparability(runs)}暂定分保留已测范围，不能视为完整全图评测。`;
 }
 function renderRadar(chosen){const dims=Object.keys(labels),cx=230,cy=200,r=135;const point=(i,v)=>[cx+Math.sin(i*Math.PI/3)*r*v/100,cy-Math.cos(i*Math.PI/3)*r*v/100];const pts=v=>dims.map((_,i)=>point(i,v).join(',')).join(' ');let svg=`<svg viewBox="0 0 460 400" role="img" aria-label="多图谱六维质量雷达图">${[20,40,60,80,100].map(v=>`<polygon points="${pts(v)}" fill="none" stroke="#dfe9e6"/>`).join('')}${dims.map((k,i)=>{const [x,y]=point(i,124),[ex,ey]=point(i,100);return `<line x1="${cx}" y1="${cy}" x2="${ex}" y2="${ey}" stroke="#e5eeeb"/><text x="${x}" y="${y+4}" text-anchor="middle" font-size="12" fill="#647c80">${labels[k]}</text>`;}).join('')}`;chosen.forEach((g,j)=>{const d=g.latest_run?.report?.dimensions;if(!d)return;const color=colors[j%colors.length];if(dims.every(k=>d[k]!==null&&d[k]!==undefined))svg+=`<polygon points="${dims.map((k,i)=>point(i,d[k]).join(',')).join(' ')}" fill="${color}" fill-opacity=".09" stroke="${color}" stroke-width="2"/>`;else dims.forEach((k,i)=>{const next=(i+1)%6;if(d[k]!=null&&d[dims[next]]!=null){const a=point(i,d[k]),b=point(next,d[dims[next]]);svg+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${color}" stroke-width="2" stroke-dasharray="5 4"/>`;}});dims.forEach((k,i)=>{if(d[k]!=null){const [x,y]=point(i,d[k]);svg+=`<circle cx="${x}" cy="${y}" r="4" fill="${color}"><title>${esc(g.name)} · ${labels[k]} ${score(d[k])}</title></circle>`;}});});svg+='</svg>';$('#radar').innerHTML=svg;$('#legend').innerHTML=chosen.map((g,i)=>`<span><span class="dot color-${i%colors.length}"></span>${esc(g.name)}</span>`).join('');}
 async function readDocuments() {
@@ -164,7 +164,7 @@ async function renderAudit(){
   $('#cancel-run').disabled = !run?.id || !!run.cancel_requested || !['queued', 'running'].includes(run.status);
   $('#run-llm').disabled=!config.llm_configured||['queued','running'].includes(run?.status);
   $('#run-auto').disabled=['queued','running'].includes(run?.status);
-  $('#llm-note').textContent=config.llm_configured?`模型：${config.model}；评分量表缺项时会单独补评。`:'尚未配置 LLM：可进行本体检测与人工评审。';
+  $('#llm-note').textContent=(config.llm_configured?`模型：${config.model}；评分量表缺项时会单独补评。`:'尚未配置 LLM：可进行本体检测与人工评审。')+(config.gold_directory_configured||config.gold_sets?` 金标准：服务器文件 ${config.gold_files} 个、已导入 ${config.gold_sets} 个，评审时自动评测对齐的文献。`:' 未配置金标准目录（QC_GOLD_DIR），评审不含金标准评测。');
   const errorEvents = r?.errors ?? [];
   const invalidVerdicts = new Set(errorEvents.filter(e => e.code === "INVALID_ASSESSMENT" && e.claim_id != null).map(e => String(e.claim_id)));
   for (const id of r?.preview?.failed_claim_ids ?? []) invalidVerdicts.add(id);
@@ -184,6 +184,7 @@ async function renderAudit(){
     const d=r?.dimension_details?.[k],v=r?.dimensions?.[k];
     return `<div class="dimension-card"><h3>${label}</h3><div class="score">${score(v)}</div>${badge(v==null?'缺少评分依据':d?.status==='complete'?'已评分':'范围内暂定分',v==null?'warning':'')}<p>${esc(d?.reason||'运行原文LLM评审后提供该维度的分数和依据。')}</p>${d?.coverage!=null?`<small>评估覆盖 ${(100*d.coverage).toFixed(1)}% · ${d.evaluated??0}/${d.total??'—'}</small>`:''}<details><summary>计分依据</summary><pre>${esc(JSON.stringify(d||{},null,2))}</pre></details></div>`;
   }).join('');
+  renderGoldSummary(r);
   $('#findings').innerHTML=r?`<div class="scroll"><table><thead><tr><th>Claim / 对象</th><th>判定</th><th>领域 / 粒度</th><th>理由</th></tr></thead><tbody>${(r.assessments||[]).map(a=>`<tr><td>${esc(a.claim_id)}</td><td>${isFailedVerdict(a) ? badge("未完成评估", 'warn') : badge(verdicts[a.verdict]||a.verdict,a.verdict==='SUPPORTED'?'':'warning')}</td><td>${score(a.specialization)} / ${score(a.granularity)}</td><td class="wrap">${esc(isFailedVerdict(a) ? "未获得通过校验的判定" : a.rationale)}<details><summary>证据及量表</summary><pre>${esc(JSON.stringify({evidence:a.evidence,rubric:(r.dimension_assessments||[]).find(v=>v.claim_id===a.claim_id)},null,2))}</pre></details></td></tr>`).join('')}${(r.ontology?.findings||[]).map(f=>`<tr><td>${esc(f.target)}</td><td>${badge(f.rule,'danger')}</td><td>—</td><td class="wrap">${esc(f.message)}</td></tr>`).join('')}</tbody></table></div>`:'';
   $('#omissions').innerHTML=r?`<pre>${esc(JSON.stringify(r.proxies||{},null,2))}</pre><div class="scroll"><table><thead><tr><th>候选</th><th>匹配</th><th>理由</th></tr></thead><tbody>${(r.matches||[]).map(m=>{const c=r.candidates.find(c=>c.id===m.candidate_id);return `<tr><td class="wrap">${esc(c?`${c.subject} — ${c.predicate} → ${c.object}`:m.candidate_id)}<details><summary>来源证据</summary><pre>${esc(JSON.stringify(c?.evidence||[],null,2))}</pre></details></td><td>${esc(m.status)}</td><td class="wrap">${esc(m.rationale)}</td></tr>`;}).join('')}</tbody></table></div><details><summary>实体合并 / 拆分疑点与文献覆盖</summary><pre>${esc(JSON.stringify({identity_issues:r.identity_issues,coverage:r.document_coverage},null,2))}</pre></details>`:'';
   document.querySelectorAll('[data-report-offset]').forEach(button => {
@@ -249,45 +250,53 @@ guarded(async()=>{config=await api('/api/config');$('#connection').textContent=c
 $('#review-round').onchange=()=>{const g=currentGraph('#human-graph');if(g)roundByGraph[g.id]=$('#review-round').value;activeClaim=null;$('#claim-detail').innerHTML='';guarded(renderSample);};
 $('#reviewer').value=localStorage.getItem('qc.reviewer')||'';$('#reviewer').onchange=()=>{localStorage.setItem('qc.reviewer',$('#reviewer').value);const g=currentGraph('#human-graph');if(g&&activeClaim)guarded(()=>showClaim(g.id,activeClaim));};
 
-// ---- Gold-standard evaluation (separate store; never alters QC scores)
-let goldSets=[],goldProfiles=[],goldEvals=[];
+// ---- Gold-standard evaluation: runs inside every review; shown with the review and in the comparison
 const pct=v=>v===null||v===undefined?'—':(100*v).toFixed(1);
 const prfCell=m=>m?`${pct(m.precision)} / ${pct(m.recall)} / ${pct(m.f1)} <span class="muted">(tp ${m.tp}, pred ${m.n_pred}, gold ${m.n_gold})</span>`:'—';
 const ciCell=c=>c&&c.low!==null&&c.low!==undefined?`[${pct(c.low)}, ${pct(c.high)}]`:'—';
-const yes=(ok)=>ok?badge('是'):badge('否','warn');
-Object.assign(importErrors,{GOLD_PAYLOAD_INVALID:'金标准文件格式无效，或与所选类型不符。',GOLD_KIND_INVALID:'金标准类型须为 BioRED 或 DiMB-RE。',GOLD_ENTITY_OFFSET_INVALID:'金标准实体偏移与文本不一致。',GOLD_DUPLICATE_DOCUMENT:'金标准包含重复文献 ID。',GOLD_SET_NOT_FOUND:'未找到金标准集。',GOLD_SET_REQUIRED:'请选择金标准集。',GOLD_PROFILE_NOT_FOUND:'未找到映射档案。',GOLD_PROFILE_BENCHMARK_MISSING:'该档案没有此金标准的映射。',GOLD_MODE_INVALID:'对齐模式无效。',GOLD_REVIEW_LEVELS_INVALID:'映射审核级别无效。',GOLD_KIND_MISMATCH:'金标准类型不一致。',GOLD_FILE_INVALID:'金标准文件名无效。',GOLD_FILE_NOT_FOUND:'服务器上找不到该金标准文件。',GOLD_FILE_TOO_LARGE:'金标准文件过大。'});
-async function loadGold(){const [s,p,f]=await Promise.all([api('/api/gold-sets'),api('/api/gold-profiles'),api('/api/gold-files')]);goldSets=s.gold_sets;goldProfiles=p.profiles;
-  const imported=new Set(goldSets.map(g=>g.name));
-  $('#gold-server-file').innerHTML=f.files.length?f.files.map(x=>`<option value="${esc(x.file)}">${esc(x.file)} · ${esc(x.kind)} · ${(x.bytes/1048576).toFixed(1)} MiB${imported.has(x.benchmark+'-'+x.split)?' · 已导入':''}</option>`).join(''):`<option value="">${f.directory_configured?'服务器目录中没有 gold.*.json，请先运行 benchmarks/prepare.py':'未配置服务器金标准目录（QC_GOLD_DIR）'}</option>`;
-  const keep=$('#gold-set').value,keepP=$('#gold-profile').value;
-  $('#gold-set').innerHTML=goldSets.map(g=>`<option value="${esc(g.id)}">${esc(g.name)} · ${esc(g.kind)} · ${g.summary.documents} 篇</option>`).join('');
-  if(goldSets.some(g=>g.id===keep))$('#gold-set').value=keep;
-  $('#gold-profile').innerHTML=goldProfiles.map(x=>`<option value="${esc(x.name)}">${esc(x.name)} v${esc(x.version)}</option>`).join('');
-  if(goldProfiles.some(x=>x.name===keepP))$('#gold-profile').value=keepP;
-  $('#gold-sets').innerHTML=goldSets.length?goldSets.map(g=>`${esc(g.name)}：${esc(g.kind)} · ${g.summary.documents} 篇 / ${g.summary.relations} 条关系 · hash ${esc(g.gold_hash.slice(0,12))}`).join('<br>'):'尚未导入金标准集';
-  goldProfileNote();await renderGoldCompare();}
-function goldProfileNote(){const x=goldProfiles.find(p=>p.name===$('#gold-profile').value);$('#gold-profile-note').textContent=x?`${x.description||''} 档案 hash ${x.hash.slice(0,12)}；TODO 规则 ${x.todo.length} 条（不参与评测）。`:'';}
-function goldRows(e){const r=e.report,rows=[];for(const [mode,res] of Object.entries(r.results||{})){if(mode==='span'){for(const level of ['strict','relaxed'])rows.push({e,mode:level,res,m:res.metrics[level]});}else rows.push({e,mode,res,m:res.metrics});}return rows;}
-async function renderGoldCompare(){const id=$('#gold-set').value;if(!id){$('#gold-compare').innerHTML='<p class="muted">请先导入金标准集。</p>';return;}
-  goldEvals=(await api(`/api/gold-evals?gold_set_id=${encodeURIComponent(id)}`)).evals;
-  if(!goldEvals.length){$('#gold-compare').innerHTML='<p class="muted">该金标准集尚无评测。</p>';return;}
-  const ref=goldEvals[goldEvals.length-1].report,kind=ref.kind;
-  const head=kind==='biored'?'<th>关系对 P / R / F1</th><th>关系对+类型 P / R / F1</th><th>F1 95% CI（对+类型）</th><th>端点对齐率</th><th>歧义端点</th>':'<th>关系类型 P / R / F1</th><th>关系对 P / R / F1</th><th>factuality 准确率 (n)</th><th>句子定位率</th>';
-  const body=goldEvals.flatMap(goldRows).map(({e,mode,res,m},i)=>{const r=e.report,a=r.alignment;
-    const same=r.gold_hash===ref.gold_hash,cover=a.aligned_gold_documents_hash===ref.alignment.aligned_gold_documents_hash;
-    const metrics=kind==='biored'?`<td>${prfCell(m.micro.pair)}</td><td>${prfCell(m.micro.pair_type)}</td><td>${ciCell(m.bootstrap?.intervals?.pair_type?.f1)}</td><td>${pct(m.endpoint_alignment.coverage)}% <span class="muted">(${m.endpoint_alignment.resolved}/${m.endpoint_alignment.total})</span></td><td>${m.endpoint_alignment.ambiguous}</td>`
-      :`<td>${prfCell(m.relation_type)}</td><td>${prfCell(m.relation_pair)}</td><td>${pct(m.factuality.accuracy)} (${m.factuality.n})</td><td>${pct(res.metrics.location_coverage.coverage)}% <span class="muted">(${res.metrics.location_coverage.located}/${res.metrics.location_coverage.considered})</span></td>`;
-    return `<tr data-gold-eval="${esc(e.id)}" data-gold-mode="${esc(mode)}" class="clickable"><td>${esc(e.graph_name)}</td><td>${esc(r.profile.name)}</td><td>${esc(mode)}</td><td>${yes(same)}</td><td>${a.aligned}/${a.gold_documents} ${yes(cover)}</td>${metrics}<td class="muted">${esc(e.created_at.slice(0,19))}</td></tr>`;}).join('');
-  $('#gold-compare').innerHTML=`<table><thead><tr><th>图谱</th><th>档案</th><th>模式</th><th>金标准一致</th><th>对齐文档 / 覆盖一致</th>${head}<th>时间</th></tr></thead><tbody>${body}</tbody></table><p class="muted">P / R / F1 以百分比表示；括号内为分子分母。参照行：最早一次评测（金标准 hash ${esc(ref.gold_hash.slice(0,12))}）。</p>`;
-  document.querySelectorAll('[data-gold-eval]').forEach(tr=>tr.onclick=()=>guarded(()=>showGoldEval(tr.dataset.goldEval,tr.dataset.goldMode)));}
+const goldStatus={applied:'已计入评分',not_applicable:'没有对齐的文献',no_gold_sets:'没有金标准',failed:'金标准评测失败'};
+const profileSource={'policy.gold_profile':'快照策略指定','metadata.system':'按来源系统','metadata.source':'按来源系统',default:'默认'};
+Object.assign(importErrors,{GOLD_PAYLOAD_INVALID:'金标准文件格式无效，或与所选类型不符。',GOLD_KIND_INVALID:'金标准类型须为 BioRED 或 DiMB-RE。',GOLD_ENTITY_OFFSET_INVALID:'金标准实体偏移与文本不一致。',GOLD_DUPLICATE_DOCUMENT:'金标准包含重复文献 ID。',GOLD_PROFILE_NOT_FOUND:'快照策略 gold_profile 指定的映射档案不存在。',GOLD_PROFILE_INVALID:'快照策略 gold_profile 不是有效的档案名。',GOLD_PROFILE_BENCHMARK_MISSING:'映射档案没有此金标准的映射。',GOLD_FILE_INVALID:'金标准文件名无效。',GOLD_FILE_NOT_FOUND:'服务器上找不到该金标准文件。',GOLD_FILE_TOO_LARGE:'金标准文件过大。',GOLD_FILE_UNREADABLE:'无法读取金标准文件。',GOLD_REVIEW_FAILED:'金标准评测出错'});
+function goldCell(g){if(!g)return '—';if(g.status!=='applied')return `<span class="muted">${esc(goldStatus[g.status]||g.status)}</span>`;const p=g.pooled;return `${pct(p.precision)} / ${pct(p.recall)} / ${pct(p.f1)}`;}
+function goldTitle(g){if(!g)return '该报告没有金标准评测；重新运行评审后提供';if(g.status!=='applied')return goldStatus[g.status]||g.status;const p=g.pooled;return `${p.sets.join('、')} · tp ${p.tp} / pred ${p.n_pred} / gold ${p.n_gold} · 可判定 claim ${p.judged_claims}/${p.total_claims} · 覆盖文献 ${p.aligned_graph_documents}/${p.graph_documents}`;}
+function goldComparability(runs){const applied=runs.filter(r=>r.gold?.status==='applied');if(!applied.length)return '';
+  const key=r=>JSON.stringify((r.gold.sets||[]).filter(s=>s.pooled).map(s=>[s.gold_hash,s.aligned_gold_documents_hash]).sort());
+  const profiles=new Set(applied.map(r=>r.gold.profile?.name));
+  return `金标准评测 ${applied.length}/${runs.length} 个图谱，金标准与对齐文献${applied.length===runs.length&&new Set(applied.map(key)).size===1?'一致':'不一致，P / R / F1 不宜直接比较'}（映射档案：${[...profiles].map(esc).join('、')}）；`;}
+function goldModeRows(set){const rows=Object.entries(set.modes||{}).map(([mode,m])=>{const primary=mode===set.primary_mode?' '+badge('计分'):'';const cal=set.calibration?.[mode];
+    const calText=cal?`${pct(cal.p_supported_given_tp.value)}% (n=${cal.p_supported_given_tp.n}) / ${pct(cal.p_supported_given_fp.value)}% (n=${cal.p_supported_given_fp.n})`:'—';
+    const cells=set.kind==='biored'?`<td>${prfCell(m.pair)}</td><td>${prfCell(m.pair_type)}</td><td>${ciCell(m.f1_ci)}</td><td>${pct(m.endpoint_alignment.coverage)}% <span class="muted">(${m.endpoint_alignment.resolved}/${m.endpoint_alignment.total}，歧义 ${m.endpoint_alignment.ambiguous})</span></td>`
+      :`<td>${prfCell(m.relation_pair)}</td><td>${prfCell(m.relation_type)}</td><td>factuality ${pct(m.factuality.accuracy)} (n=${m.factuality.n})</td><td>${pct(m.location_coverage.coverage)}% <span class="muted">(${m.location_coverage.located}/${m.location_coverage.considered})</span></td>`;
+    return `<tr data-gold-eval="${esc(set.gold_eval_id||'')}" data-gold-mode="${esc(mode)}" class="clickable"><td>${esc(set.name)}${set.pooled===false?' '+badge('未重复计入','warning'):''}</td><td>${esc(mode)}${primary}</td>${cells}<td>${calText}</td></tr>`;});
+  return rows.join('');}
+function renderGoldSummary(r){
+  const g=r?.gold;$('#gold-detail').innerHTML='';
+  if(!r){$('#gold-summary').innerHTML='<p class="muted">尚未运行评审。</p>';return;}
+  if(!g){$('#gold-summary').innerHTML='<p class="muted">该报告生成于金标准自动评测之前。重新运行评审即可补上；“仅运行本地约束检测”也会执行金标准评测，并且不调用模型。</p>';return;}
+  let html=`<p>${badge(goldStatus[g.status]||g.status,g.status==='applied'?'':'warning')} ${g.profile?badge('映射档案 '+g.profile.name+' · '+(profileSource[g.profile.source]||g.profile.source)):''} ${badge(g.version||'')}</p>`;
+  if(g.status==='no_gold_sets')html+='<p class="muted">服务器金标准目录中没有 gold.*.json（用 benchmarks/prepare.py 生成），也没有上传的金标准集。六维评分未受影响。</p>';
+  if(g.status==='not_applicable')html+=`<p class="muted">已检查 ${g.available_sets} 个金标准集；图谱文献与其中任何一个都对不上（按 external_id → 标题 → id 对齐）。六维评分未受影响。</p>`;
+  if(g.status==='failed')html+=`<p class="muted">${esc(importError(g.code))}。六维评分未受影响。</p>`;
+  if(g.pooled){const p=g.pooled,f=r.gold_fusion||{};
+    html+=`<div class="stats"><div><span class="score">${pct(p.precision)}</span><small>金标准 precision</small></div><div><span class="score">${pct(p.recall)}</span><small>金标准 recall</small></div><div><span class="score">${pct(p.f1)}</span><small>F1 · tp ${p.tp} / pred ${p.n_pred} / gold ${p.n_gold}</small></div></div>`;
+    html+=`<p class="muted">计入评分：${p.sets.map(esc).join('、')}（BioRED 取 mention 模式“关系对+类型”，DiMB-RE 取 relaxed“关系类型”）。能由金标准判定的 claim ${p.judged_claims}/${p.total_claims}（${pct(p.claim_coverage)}%），金标准覆盖的图谱文献 ${p.aligned_graph_documents}/${p.graph_documents}（${pct(p.document_coverage)}%）。</p>`;
+    html+=['correctness','completeness'].map(k=>{const x=f[k];if(!x)return '';const text=x.method==='machine_only'?'金标准没有可用值，保持机器评分':x.method==='gold_only'?`机器评审未给出该维度，暂用金标准 ${score(x.gold_score)}`:`机器 ${score(x.machine_score)} → ${score(x.score)}（金标准 ${score(x.gold_score)}，有效权重 ${(100*x.effective_weight).toFixed(1)}%）`;return `<p>${labels[k]}：${text}</p>`;}).join('');}
+  if(g.sets?.length){const biored=g.sets.filter(s=>s.kind==='biored'),dimbre=g.sets.filter(s=>s.kind==='dimbre');
+    if(biored.length)html+=`<h3>BioRED</h3><div class="scroll"><table><thead><tr><th>金标准集</th><th>对齐模式</th><th>关系对 P / R / F1</th><th>关系对+类型 P / R / F1</th><th>F1 95% CI</th><th>端点对齐率</th><th>P(支持|TP) / P(支持|FP)</th></tr></thead><tbody>${biored.map(goldModeRows).join('')}</tbody></table></div>`;
+    if(dimbre.length)html+=`<h3>DiMB-RE</h3><div class="scroll"><table><thead><tr><th>金标准集</th><th>匹配级别</th><th>关系对 P / R / F1</th><th>关系类型 P / R / F1</th><th>factuality</th><th>句子定位率</th><th>P(支持|TP) / P(支持|FP)</th></tr></thead><tbody>${dimbre.map(goldModeRows).join('')}</tbody></table></div>`;
+    html+=`<p class="muted">对齐文献：${g.sets.map(s=>`${esc(s.name)} ${s.alignment.aligned}/${s.alignment.gold_documents}`).join('；')}。${g.sets.filter(s=>s.pooled===false).map(s=>esc(s.name)+'：'+esc(s.pool_note)).join('；')} 点击一行查看分类型指标、排除计数、校准混淆表与错误样本。</p>`;}
+  const notes=[...(g.skipped||[]).filter(x=>x.reason!=='no_aligned_documents').map(x=>`${esc(x.name)}：${esc(importError(x.reason))}`),...(g.file_problems||[]).map(x=>`${esc(x.file)}：${esc(importError(x.code))}`)];
+  if(notes.length)html+=`<p class="muted">未参与：${notes.join('；')}</p>`;
+  $('#gold-summary').innerHTML=html;
+  $('#gold-summary').querySelectorAll('[data-gold-eval]').forEach(tr=>tr.onclick=()=>{if(tr.dataset.goldEval)guarded(()=>showGoldEval(tr.dataset.goldEval,tr.dataset.goldMode));});}
 function prfTable(title,rows){return `<h3>${esc(title)}</h3><table><thead><tr><th>标签</th><th>P</th><th>R</th><th>F1</th><th>tp</th><th>pred</th><th>gold</th></tr></thead><tbody>${Object.entries(rows||{}).map(([k,m])=>`<tr><td>${esc(k)}</td><td>${pct(m.precision)}</td><td>${pct(m.recall)}</td><td>${pct(m.f1)}</td><td>${m.tp}</td><td>${m.n_pred}</td><td>${m.n_gold}</td></tr>`).join('')}</tbody></table>`;}
 function countsTable(title,obj){return `<h3>${esc(title)}</h3><table><tbody>${Object.entries(obj||{}).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(typeof v==='object'?JSON.stringify(v):v)}</td></tr>`).join('')}</tbody></table>`;}
-function calibrationView(c){if(!c)return '<p class="muted">该图谱没有已完成的原文 LLM 评审，未计算 QC 校准。</p>';const cols=Object.keys(c.confusion.TP);
+function calibrationView(c){if(!c)return '<p class="muted">没有可用的原文 LLM 判定，未计算 QC 校准。</p>';const cols=Object.keys(c.confusion.TP);
   const sp=x=>x.rho===null?`— (n=${x.n})`:`${x.rho.toFixed(3)} (n=${x.n})`;
   return `<h3>QC 校准</h3><table><thead><tr><th>金标准</th>${cols.map(v=>`<th>${esc(verdicts[v]||v)}</th>`).join('')}</tr></thead><tbody>${['TP','FP'].map(row=>`<tr><td>${row}</td>${cols.map(v=>`<td>${c.confusion[row][v]}</td>`).join('')}</tr>`).join('')}</tbody></table><p>P(SUPPORTED|TP) = ${pct(c.p_supported_given_tp.value)}% (n=${c.p_supported_given_tp.n})；P(SUPPORTED|FP) = ${pct(c.p_supported_given_fp.value)}% (n=${c.p_supported_given_fp.n})</p><p>逐文档 Spearman：QC 正确性 vs 金标准 precision ${sp(c.spearman_correctness_vs_gold_precision)}；QC 完整性 vs 金标准 recall ${sp(c.spearman_completeness_vs_gold_recall)}</p><p class="muted">${esc(c.note)}</p>`;}
 async function showGoldEval(id,mode){const v=await api(`/api/gold-evals/${id}`),r=v.report;const span=r.results.span,res=span||r.results[mode];
   const m=span?span.metrics[mode]:res.metrics,cal=span?span.calibration?.[mode]:res.calibration;
-  let html=`<p>${badge(r.version)} ${badge('档案 '+r.profile.name+' · '+r.profile.hash.slice(0,10))} ${badge('金标准 '+r.gold_hash.slice(0,10))} ${badge('快照 '+String(r.snapshot_hash).slice(0,10))} ${badge('审核级别 '+r.review_levels.join('+'))}</p>`;
+  let html=`<h3>${esc(r.gold_name)} · ${esc(mode)}</h3><p>${badge(r.version)} ${badge('档案 '+r.profile.name+' · '+r.profile.hash.slice(0,10))} ${badge('金标准 '+r.gold_hash.slice(0,10))} ${badge('快照 '+String(r.snapshot_hash).slice(0,10))} ${badge('审核级别 '+r.review_levels.join('+'))}</p>`;
   html+=countsTable('文献对齐',{...r.alignment,conflicts:undefined});
   html+=countsTable('claim 计数与排除',res.claims);
   if(span){html+=prfTable('按关系类型（'+mode+'）',m.per_type)+countsTable('句子定位',span.location);}
@@ -297,13 +306,10 @@ async function showGoldEval(id,mode){const v=await api(`/api/gold-evals/${id}`),
   html+=`<p><button id="gold-errors">下载 FP / FN 错误样本</button></p><ul class="muted">${r.limitations.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`;
   $('#gold-detail').innerHTML=html;
   $('#gold-errors').onclick=()=>guarded(async()=>{const e=await api(`/api/gold-evals/${id}/errors`);const blob=new Blob([JSON.stringify(e,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`gold-errors-${id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});}
-on('#gold-import-server',async()=>{const file=$('#gold-server-file').value;if(!file)throw Error('服务器上没有可导入的金标准文件');
-  notice('正在从服务器导入金标准集…');const v=await api('/api/gold-sets',{server_file:file,name:$('#gold-name').value||undefined});
-  notice(v.created?`已导入 ${file}（hash ${v.gold_hash.slice(0,12)}）`:`${file} 内容与已导入的金标准集相同，未重复导入`);await loadGold();$('#gold-set').value=v.id;await renderGoldCompare();});
+async function renderGoldSources(){const [f,s]=await Promise.all([api('/api/gold-files'),api('/api/gold-sets')]);
+  const files=f.files.length?f.files.map(x=>`${esc(x.file)}（${esc(x.kind)}，${(x.bytes/1048576).toFixed(1)} MiB）`).join('、'):(f.directory_configured?'目录中还没有 gold.*.json，请先在服务器上运行 benchmarks/prepare.py':'未配置服务器金标准目录（QC_GOLD_DIR）');
+  const sets=s.gold_sets.length?s.gold_sets.map(g=>`${esc(g.name)}（${esc(g.kind)}，${g.summary.documents} 篇 / ${g.summary.relations} 条关系）`).join('、'):'尚无（首次评审时自动导入服务器文件）';
+  $('#gold-sources').innerHTML=`<p>服务器文件：${files}</p><p>已导入的金标准集：${sets}</p>`;}
 on('#gold-import',async()=>{const file=$('#gold-file').files[0];if(!file)throw Error('请选择 gold.*.json 文件');const payload=JSON.parse(await file.text());
   const v=await api('/api/gold-sets',{kind:$('#gold-kind').value,name:$('#gold-name').value||file.name.replace(/\.json$/,''),payload});
-  notice(v.created?`已导入金标准集（hash ${v.gold_hash.slice(0,12)}）`:'相同内容的金标准集已存在，未重复导入');await loadGold();$('#gold-set').value=v.id;await renderGoldCompare();});
-on('#gold-run',async()=>{const g=currentGraph('#gold-graph');if(!g)throw Error('请先选择图谱');const levels=$('#gold-needs-review').checked?['confirmed','needs_review']:['confirmed'];
-  notice('正在计算金标准指标…');const v=await api(`/api/graphs/${g.id}/gold-evals`,{gold_set_id:$('#gold-set').value,profile:$('#gold-profile').value,modes:$('#gold-mode').value,review_levels:levels});
-  notice('金标准评测完成');await renderGoldCompare();const mode=v.report.results.span?'relaxed':Object.keys(v.report.results)[0];await showGoldEval(v.id,mode);});
-$('#gold-set').onchange=()=>guarded(renderGoldCompare);$('#gold-profile').onchange=goldProfileNote;
+  notice(v.created?`已导入金标准集（hash ${v.gold_hash.slice(0,12)}），下次评审起自动使用`:'相同内容的金标准集已存在，未重复导入');await renderGoldSources();});

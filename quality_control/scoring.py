@@ -3,8 +3,11 @@ import math
 from copy import deepcopy
 from .models import SCENARIOS, DIMENSIONS, digest
 
-SCORING_VERSION = 'qc-scoring/2.0.0'
+SCORING_VERSION = 'qc-scoring/2.1.0'
 HUMAN_VALUES = {'supported': 100, 'partial': 50, 'incorrect': 0}
+GOLD_WEIGHT = .5
+# dimension -> (pooled gold metric, coverage that scales its weight)
+GOLD_FIELDS = (('correctness', 'precision', 'claim_coverage'), ('completeness', 'recall', 'document_coverage'))
 
 
 def scenario_scores(dimensions, complete=False, blocker=False):
@@ -26,6 +29,60 @@ def scenario_scores(dimensions, complete=False, blocker=False):
                            unmet=unmet, missing=missing, thresholds={k: {1: 50, 2: 65, 3: 80}[v]
                            for k, v in zip(DIMENSIONS, primary)})
     return result
+
+
+def _weight(graph, key, default):
+    requested = (graph.get('policy') or {}).get(key, default)
+    if not isinstance(requested, (int, float)) or isinstance(requested, bool) or not 0 <= requested <= 1:
+        return default
+    return requested
+
+
+def apply_gold(report, graph):
+    """Fold the pooled gold-standard precision / recall into correctness / completeness.
+
+    Idempotent and read-time safe: starts from machine_dimensions (the evidence review's own scores), which
+    are never changed.  Effective weight = policy.gold_weight (default 0.5) x coverage: the share of graph
+    claims the gold standard could judge (precision) or of graph documents it annotates (recall).  Without an
+    applicable gold set every dimension stays exactly the machine value.
+    """
+    machine = deepcopy(report.get('machine_dimensions') or report.get('dimensions') or {})
+    report['machine_dimensions'] = machine
+    dims = deepcopy(machine)
+    gold = report.get('gold') if isinstance(report.get('gold'), dict) else {}
+    pooled = gold.get('pooled') if gold.get('status') == 'applied' else None
+    requested = _weight(graph, 'gold_weight', GOLD_WEIGHT)
+    fusion = {}
+    if pooled:
+        for field, metric, coverage_key in GOLD_FIELDS:
+            value, coverage = pooled.get(metric), pooled.get(coverage_key) or 0
+            gold_score = round(100 * value, 2) if value is not None else None
+            machine_value = machine.get(field)
+            weight = requested * coverage if gold_score is not None else 0
+            if gold_score is None or weight == 0:
+                method, final, weight = 'machine_only', machine_value, 0
+            elif machine_value is None:
+                method, final = 'gold_only', gold_score
+            else:
+                method, final = 'weighted_machine_and_gold', round((1 - weight) * machine_value + weight * gold_score, 2)
+            dims[field] = final
+            fusion[field] = dict(metric=metric, gold_score=gold_score, machine_score=machine_value, coverage=coverage,
+                                 requested_weight=requested, effective_weight=round(weight, 6), method=method, score=final)
+    report['dimensions'] = dims
+    report['gold_fusion'] = fusion or None
+    return report
+
+
+def gold_reason(fusion):
+    """One-line explanation of a gold-fused dimension (None when gold did not change it)."""
+    if not fusion or fusion['method'] == 'machine_only':
+        return None
+    name = '金标准 precision' if fusion['metric'] == 'precision' else '金标准 recall'
+    if fusion['method'] == 'gold_only':
+        return f'机器评审未给出该维度，采用{name} {fusion["gold_score"]}（覆盖 {100 * fusion["coverage"]:.1f}%）；不能视为全图已验证'
+    w = fusion['effective_weight']
+    return (f'机器 {fusion["machine_score"]} × {1 - w:.4f} + {name} {fusion["gold_score"]} × {w:.4f}'
+            f'（金标准权重 {fusion["requested_weight"]} × 覆盖 {100 * fusion["coverage"]:.1f}%）')
 
 
 def wilson(supported, n):
@@ -79,20 +136,20 @@ def human_metrics(reviews, total):
 
 
 def combine_human(report, state, graph):
-    """Read-time score projection: raw machine runs and human audit history stay intact."""
+    """Read-time score projection: raw machine runs and human audit history stay intact.
+
+    Order: machine evidence scores -> gold-standard fusion (apply_gold) -> human sample fusion on correctness.
+    """
     result = deepcopy(report)
-    machine = deepcopy(result.get('machine_dimensions', result.get('dimensions', {})))
-    result['machine_dimensions'] = machine
-    result['dimensions'] = deepcopy(machine)
+    apply_gold(result, graph)
+    machine = result['machine_dimensions']
     metrics = state['metrics']
     sampled = len({cid for r in state.get('rounds', []) for cid in r['claim_ids']})
     decided = metrics['decided']
-    requested = graph['policy'].get('human_weight', .30)
-    if not isinstance(requested, (int, float)) or isinstance(requested, bool) or not 0 <= requested <= 1:
-        requested = .30
+    requested = _weight(graph, 'human_weight', .30)
     completion = min(1, decided / sampled) if sampled else 0
     weight = requested * completion if metrics['score'] is not None else 0
-    machine_value = machine.get('correctness')
+    machine_value = result['dimensions'].get('correctness')   # after the gold-standard fusion
     human_value = metrics['score']
     if human_value is None or requested == 0:
         method, final = 'machine_only', machine_value
@@ -112,7 +169,7 @@ def combine_human(report, state, graph):
     if method == 'human_sample_only' or metrics['uncertain_votes'] or metrics['disagreements']:
         complete = False
     blocker = result.get('gate') == 'FAIL'
-    result['machine_scenarios'] = result.get('scenarios', {})
+    result['machine_scenarios'] = scenario_scores(machine, result.get('complete', False), blocker)
     result['scenarios'] = scenario_scores(result['dimensions'], complete, blocker)
     result['human_adjusted'] = method != 'machine_only'
     result['machine_complete'] = result.get('complete', False)
@@ -120,11 +177,15 @@ def combine_human(report, state, graph):
     result['score_complete'] = complete
     if human_value is not None:
         details = result.setdefault('dimension_details', {}).setdefault('correctness', {})
-        details.update(score=final, machine_score=machine_value, human_score=human_value,
+        gold_fused = (result.get('gold_fusion') or {}).get('correctness', {}).get('method', 'machine_only') != 'machine_only'
+        base = '机器+金标准正确性' if gold_fused else '机器正确性'
+        details.update(score=final, machine_score=machine.get('correctness'), human_score=human_value,
                        effective_human_weight=round(weight, 6), method=method,
                        status='complete' if complete else 'partial')
+        if gold_fused:
+            details['pre_human_score'] = machine_value
         if method == 'weighted_machine_and_human':
-            details['reason'] = f'机器正确性 {machine_value} × {1-weight:.4f} + 人工多人汇总 {human_value} × {weight:.4f}；历史改判不重复加票'
+            details['reason'] = f'{base} {machine_value} × {1-weight:.4f} + 人工多人汇总 {human_value} × {weight:.4f}；历史改判不重复加票'
         elif method == 'human_sample_only':
             details['reason'] = '仅人工样本的多人等权评分；缺少机器证据评分，不能视为全图已验证'
         if any(c['score'] is not None and c['score'] < 100 for c in state['consensus']) and not blocker:

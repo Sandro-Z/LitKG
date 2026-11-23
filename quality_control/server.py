@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .engine import evaluate
 from .adaptive import configured_max_concurrency
-from .gold import DEFAULT_REVIEW_LEVELS, GOLD_EVAL_VERSION, evaluate as evaluate_gold, list_profiles
+from .gold import GOLD_EVAL_VERSION, list_profiles, review_all
 from .llm import Client, NoRedirect
 from .models import normalize, blocks, anchor, digest, public_claim, SCENARIOS, VERSION
 from .sources import attach_litkg_sources, attach_uploaded_sources
@@ -35,6 +35,7 @@ class Service:
         self.litkg_base = os.environ.get('QC_LITKG_URL', 'http://host.docker.internal:8080').rstrip('/')
         # Gold files produced on the server by benchmarks/prepare.py (mounted read-only in Docker).
         self.gold_dir = Path(os.environ.get('QC_GOLD_DIR', str(Path(__file__).resolve().parents[1] / 'data' / 'benchmarks')))
+        self.gold_file_cache = {}   # (file, size, mtime_ns) -> gold_set_id, so unchanged files are read once
         self.store.recover()
 
     def gold_files(self):
@@ -89,25 +90,46 @@ class Service:
         except (ValueError, UnicodeError):
             raise ValueError("LITKG_UPSTREAM_INVALID_JSON") from None
 
-    def gold_eval(self, gid, body):
-        """Run a gold-standard evaluation synchronously; the snapshot is only read."""
-        graph = self.store.graph(gid)
-        gold_set_id = body.get('gold_set_id')
-        if not isinstance(gold_set_id, str):
-            raise ValueError('GOLD_SET_REQUIRED')
-        kind, gold = self.store.gold_set(gold_set_id)
-        modes = body.get('modes', ['id', 'mention'])
-        if isinstance(modes, str):
-            modes = ['id', 'mention'] if modes == 'both' else [modes]
-        levels = body.get('review_levels', list(DEFAULT_REVIEW_LEVELS))
-        if not isinstance(modes, list) or not isinstance(levels, list):
-            raise ValueError('GOLD_REQUEST_INVALID')
-        qc_run_id, qc_report = self.store.latest_llm_report(gid)
-        report, errors = evaluate_gold(graph, gold, kind, body.get('profile', 'litkg'), modes,
-                                       review_levels=levels, qc_report=qc_report, qc_run_id=qc_run_id,
-                                       bootstrap_rounds=body.get('bootstrap', 1000), gold_set=gold_set_id)
-        eid = self.store.add_gold_eval(gid, gold_set_id, report, errors)
-        return dict(id=eid, graph_id=gid, report=report)
+    def sync_gold_files(self):
+        """Import every gold.<bench>-<split>.json in the server's gold directory (deduplicated by content hash).
+
+        Returns a list of {file, code} for files that could not be imported; they are reported, never fatal.
+        """
+        problems = []
+        for item in self.gold_files():
+            path = self.gold_dir / item['file']
+            try:
+                stat = path.stat()
+                key = (item['file'], stat.st_size, stat.st_mtime_ns)
+                if key in self.gold_file_cache:
+                    continue
+                payload = self.read_gold_file(item['file'])
+                kind = payload.get('kind') if isinstance(payload, dict) else None
+                self.gold_file_cache[key] = self.store.add_gold_set(kind, None, payload)['id']
+            except (OSError, ValueError) as exc:
+                problems.append(dict(file=item['file'], code=str(exc) if isinstance(exc, ValueError) else 'GOLD_FILE_UNREADABLE'))
+        return problems
+
+    def gold_review(self, gid, graph, report, rid, trigger):
+        """Gold-standard part of a review: all gold sets, all modes; full results go to gold_evals."""
+        try:
+            problems = self.sync_gold_files()
+            qc_report, qc_run_id = report, rid
+            if not report.get('assessments'):
+                # A local rerun calibrates against the latest completed LLM review, if any.
+                qc_run_id, qc_report = self.store.latest_llm_report(gid)
+            summary, evaluations = review_all(graph, self.store.gold_sets_for_review(), qc_report=qc_report,
+                                              qc_run_id=qc_run_id, trigger=trigger)
+            for entry, (gold_set_id, gold_report, errors) in zip(summary['sets'], evaluations):
+                gold_report['review_run_id'] = rid
+                entry['gold_eval_id'] = self.store.add_gold_eval(gid, gold_set_id, gold_report, errors)
+            summary['file_problems'] = problems
+            summary['calibration_run_id'] = qc_run_id
+            return summary
+        except Exception:
+            # Gold data and graph content never go into logs; the review itself goes on.
+            logging.getLogger(__name__).warning('gold-standard review failed')
+            return dict(version=GOLD_EVAL_VERSION, status='failed', code='GOLD_REVIEW_FAILED')
 
     def submit(self, gid, mode):
         if mode not in {'automatic', 'llm'}:
@@ -140,7 +162,10 @@ class Service:
                         self.store.update_run(rid, 'running', report)
                         last_checkpoint = now
 
-                result = evaluate(graph, client, checkpoint, max_chars=int(os.environ.get('QC_CONTEXT_CHARS', '48000')), stop_reason=stop_reason)
+                trigger = 'llm_review' if mode == 'llm' else 'local_review'
+                result = evaluate(graph, client, checkpoint, max_chars=int(os.environ.get('QC_CONTEXT_CHARS', '48000')),
+                                  stop_reason=stop_reason,
+                                  gold_review=lambda report: self.gold_review(gid, graph, report, rid, trigger))
                 failure = result.get('failure_code')
                 self.store.update_run(rid, 'failed' if failure else 'completed', result, error=failure)
             except Exception:
@@ -218,7 +243,9 @@ def handler(service):
             elif method == 'GET' and path == '/api/config':
                 client = service.client_factory()
                 self.reply(dict(version=VERSION, llm_configured=client.enabled, model=client.model,
-                                llm_max_concurrency=configured_max_concurrency(),
+                                llm_max_concurrency=configured_max_concurrency(), gold_version=GOLD_EVAL_VERSION,
+                                gold_files=len(service.gold_files()), gold_sets=len(service.store.list_gold_sets()),
+                                gold_directory_configured=service.gold_dir.is_dir(),
                                 scenarios={k: {'name': v[0], 'levels': v[1]} for k, v in SCENARIOS.items()}))
             elif method == 'GET' and path == '/api/litkg/knowledge-bases':
                 self.reply(service.local_get('/knowledge-bases?limit=500'))
@@ -324,8 +351,6 @@ def handler(service):
                 elif method == 'GET' and action == 'export':
                     graph = service.store.graph(gid)
                     self.reply(dict(graph=graph, run=service.store.latest_run(gid), human=service.store.sample_state(gid)))
-                elif method == 'POST' and action == 'gold-evals' and len(pieces) == 4:
-                    self.reply(service.gold_eval(gid, self.body()), 201)
                 elif method == 'GET' and action == 'gold-evals' and len(pieces) == 4:
                     self.reply({'evals': service.store.list_gold_evals(graph_id=gid)})
                 elif method == 'POST' and action == 'runs':
