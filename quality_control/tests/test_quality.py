@@ -225,23 +225,31 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('LLM_HTTP_503', [e['code'] for e in r['errors']])
 
     def test_consecutive_bad_requests_stop_review(self):
-        source = fixture()
-        block = source['documents'][0]['blocks'][0]
-        source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(6)]
-        client = FakeLLM()
-        calls = []
+        # The third consecutive HTTP 400 stops admission. Serially that is exactly three calls; with
+        # four in flight, calls admitted before the third rejection still reach the provider and are
+        # discarded (CONCURRENCY.md), so up to maximum - 1 = 3 more, never one per remaining block.
+        for maximum, most in ((1, 3), (4, 6)):
+            with self.subTest(maximum=maximum), patch.dict(os.environ, {'QC_LLM_MAX_CONCURRENCY': str(maximum)}):
+                source = fixture()
+                block = source['documents'][0]['blocks'][0]
+                source['documents'][0]['blocks'] = [dict(block, id=f'b{i}') for i in range(9)]
+                client = FakeLLM()
+                calls = []
 
-        def reject(prompt, data):
-            calls.append(data)
-            raise LLMError('LLM_HTTP_400')
+                def reject(prompt, data):
+                    calls.append(data)
+                    raise LLMError('LLM_HTTP_400')
 
-        client.ask = reject
-        report = evaluate(normalize(source), client)
-        self.assertEqual(3, len(calls))
-        self.assertEqual('LLM_REPEATED_HTTP_400', report['failure_code'])
-        self.assertEqual([], report['assessments'])
-        self.assertEqual(3, len(report['document_coverage']))
-        self.assertFalse(report['complete'])
+                client.ask = reject
+                report = evaluate(normalize(source), client)
+                self.assertGreaterEqual(len(calls), 3)
+                self.assertLessEqual(len(calls), most)
+                self.assertLessEqual(report['progress']['requests'], most)
+                self.assertEqual(3, [e['code'] for e in report['errors']].count('LLM_HTTP_400'))
+                self.assertEqual('LLM_REPEATED_HTTP_400', report['failure_code'])
+                self.assertEqual([], report['assessments'])
+                self.assertEqual(3, len(report['document_coverage']))
+                self.assertFalse(report['complete'])
 
     def test_claim_request_failure_skips_rubric_and_verdict(self):
         client = FakeLLM()

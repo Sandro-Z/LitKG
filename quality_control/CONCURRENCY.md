@@ -18,6 +18,14 @@ Each transiently failed request gets at most two retries, delayed by 1 then 2
 seconds. Permanent HTTP errors and output truncation continue through the
 existing error and text-splitting paths.
 
+Three consecutive final results with the same HTTP 400, timeout, or transport
+error code, counted in completion order, stop the review with
+`LLM_REPEATED_HTTP_400`, `LLM_REPEATED_TIMEOUT`, or `LLM_REPEATED_TRANSPORT_ERROR`.
+The stop ends admission and retries at once. Calls admitted before it (at most
+one fewer than the ceiling) still drain, and their results are discarded. So with
+the default ceiling of 4, up to three calls beyond the three counted failures can
+reach the provider; with `QC_LLM_MAX_CONCURRENCY=1` none do.
+
 After at least 8 successes from requests admitted since the latest adjustment
 and a 20-second recovery interval, the scheduler probes one additional slot,
 up to the configured ceiling (1 → 2 → 3 → 4). A new transient failure reduces the
