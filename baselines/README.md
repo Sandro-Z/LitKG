@@ -30,6 +30,9 @@ scripts/baseline_neo4j_builder.sh --pdfs <PDF目录> --llm-base-url http://<host
 - 构建器会处理每篇 PDF 的全文。上游默认只处理非 neo4j.com 用户每篇文档的前 10,000 token，脚本通过 `MAX_TOKEN_CHUNK_SIZE` 取消了这个限制，并写入图谱的 `metadata.consistency`。
 - **启动前自检**：后台任务开始前，脚本先在构建器容器里依次检查分词器（tiktoken）、嵌入模型、Neo4j、一次普通 LLM 请求，再用 LitKG schema 对一句测试文本做一次抽取，走的是构建器自己的代码路径。构建器的 API 出错时只返回笼统的 “Failed To Process File … or LLM Unable To Parse Content”，自检则会打印真实原因和处理建议（Key 会被打码）。自检通过后，再把一个只有两句话的小 PDF 完整走一遍构建器的 `/upload` 和 `/extract`（每篇 PDF 走的就是这条路径），用一两分钟确认整条链路可用。任何一项失败，后台任务都不会启动，并直接打印构建器日志里记录的真实报错（Key 和密码会被打码）。
 - **不需要 Key 的 LLM 服务**：提示输入 Key 时直接回车即可。构建器使用的 OpenAI 客户端（openai 2.x）不接受空 Key，会在发请求前就报 “Missing credentials”，所以脚本此时传给构建器占位 Key `EMPTY`；没有开启鉴权的服务（如未设 `--api-key` 的 vLLM/SGLang）会忽略它。
+- **LLM 请求参数与 LitKG 一致**：构建器为 OpenAI 兼容接口创建 `ChatOpenAI` 时，只给了模型、地址、Key 和 `temperature=0`，既不限制输出长度，也不关闭思考。推理模型因此可能一直生成到上下文用完，耗时极长（实测一篇 PDF 用了 4 小时）；一旦某个 chunk 的回答以 `finish_reason=length` 截断，OpenAI 客户端会抛出 `LengthFinishReasonError`，整篇 PDF 失败，而 `temperature=0` 下重试会以同样方式失败。脚本在构建镜像前给构建器的 `src/llm.py` 打一个小补丁（`deploy/patch_builder.py`），让它使用 LitKG 对同一模型的设置（`app/app/llm.py`）：关闭思考（`chat_template_kwargs.enable_thinking=false`）、最多 8192 个输出 token、每次请求 300 秒超时。取值在 `deploy/docker-compose.builder.yml` 的 `KGB_LLM_*` 中，并写入图谱的 `metadata.consistency`。自检会显示这些设置，并确认 LLM 服务确实执行了输出上限。如果服务不接受 `chat_template_kwargs`（例如 OpenAI 官方接口），把 `KGB_LLM_EXTRA_BODY` 改成 `null`。
+- **同一时间只能有一个运行**：每次运行在处理每篇 PDF 前都会清空构建器专用的 Neo4j，两个运行同时进行会互相删掉对方的数据（表现为 `HTTP 500` 和成串的失败）。现在运行和端到端测试都会持有一个锁（`cache/neo4j-builder.lock`），已有运行时新的会直接报错退出；`status` 会提示遗留的运行，`stop` 会把它一起停掉。
+- **保留构建器日志**：重新启动容器会丢掉构建器自己的日志。脚本在启动前把上一次的日志（Key 和密码已打码）保存到 `logs/builder-backend.<时间>.log.gz`（保留最近 5 份），并打印摘要：完成了几篇、每篇用时、失败原因按出现次数排列。
 - **运行时不联网**：构建器切块用 tiktoken，它第一次使用时会从 openaipublic.blob.core.windows.net 下载词表；嵌入模型也来自 Hugging Face。脚本在构建镜像时就把 tiktoken 词表缓存进镜像（会走 `--proxy`），运行时设置 `HF_HUB_OFFLINE=1`，抽取过程不再需要外网。
 - **单篇失败不影响整体**：单篇 PDF 抽取失败会重试一次；仍失败就跳过，记入 `out/failed.neo4j-builder-pdfnative.json` 和图谱的 `metadata.failed_documents`，其余 PDF 照常处理。此时图谱视为不完整，重跑同一条命令只会重试失败的那几篇。连续 3 篇失败说明是构建器、Neo4j 或 LLM 的问题而不是 PDF 本身，任务会停下。出现失败时，后台任务会把构建器日志中第一处失败的报错写进运行日志（需要当前用户能直接用 docker，或 sudo 免密）；也可以手动查看：`scripts/baseline_neo4j_builder.sh docker-logs | grep -A40 'File Failed in extraction'`。
 - 输出：`data/baselines/neo4j-builder/out/graph.neo4j-builder-pdfnative.json`。
@@ -54,7 +57,7 @@ scripts/baseline_neo4j_builder.sh --pdfs … --llm-base-url … --llm-model … 
 
 - `--proxy` 只用于克隆构建器仓库和构建镜像；LLM 调用和运行期的容器都不走代理。代理地址保存在 `build_options.env`（权限 600），不会打印。
 - `--embedding-model-dir` 指向在能联网的机器上下载好的模型目录，需要包含 `config.json` 和 `*.safetensors`（或 `pytorch_model.bin`）。例如在有网的机器上执行 `huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 --local-dir all-MiniLM-L6-v2`，再拷贝到服务器。
-- 构建器使用的 Dockerfile 由脚本根据固定版本的上游 Dockerfile 生成（`Dockerfile.kgb`），只改了模型下载那一步。NLTK 数据下载改为失败也不中断构建，因为它只被聊天评估和 GCS 数据源使用。构建器的抽取代码没有任何修改。
+- 构建器使用的 Dockerfile 由脚本根据固定版本的上游 Dockerfile 生成（`Dockerfile.kgb`），只改了模型下载那一步。NLTK 数据下载改为失败也不中断构建，因为它只被聊天评估和 GCS 数据源使用。构建器的抽取代码没有修改；除上面的 LLM 请求参数外，构建器的行为与上游一致。
 - 嵌入模型很小（2200 万参数）。容器内本来就没有 GPU，它始终在 CPU 上运行，每个 chunk 只需毫秒级时间，相比 LLM 调用可以忽略。
 
 

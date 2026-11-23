@@ -38,12 +38,19 @@ def redact(text):
     return text
 
 
+class Warning_(Exception):
+    """A check found something worth knowing that does not stop the run."""
+
+
 def check(name, func, hint, seconds):
     global failures
     signal.alarm(seconds)
     try:
         detail = func()
         print(f'  ok    {name}' + (f': {detail}' if detail else ''), flush=True)
+        return True
+    except Warning_ as exc:
+        print(f'  warn  {name}: {redact(str(exc))}', flush=True)
         return True
     except BaseException as exc:   # noqa: BLE001 (report anything, including Timeout)
         failures += 1
@@ -84,8 +91,25 @@ def neo4j():
 def llm_plain():
     from src.llm import get_llm
     llm, name, _ = get_llm(MODEL_KEY)  # noqa: F821
+    if getattr(llm, 'max_tokens', None) is None:
+        raise RuntimeError('this builder image lacks the LLM request settings (baselines/deploy/patch_builder.py)')
     reply = llm.invoke('Reply with the single word OK.')
-    return f'{name} at {LLM_URL} answered {" ".join(str(reply.content).split())[:40]!r}'
+    return (f'{name} at {LLM_URL} answered {" ".join(str(reply.content).split())[:40]!r} '
+            f'(max_tokens {llm.max_tokens}, timeout {llm.request_timeout:.0f}s, extra_body {json.dumps(llm.extra_body)})')
+
+
+def llm_limit():
+    # A reasoning model may generate until its context is full; then finish_reason=length fails the whole
+    # PDF, after a very long time. The builder now asks for max_tokens; check that the server applies it.
+    from src.llm import get_llm
+    llm, _, _ = get_llm(MODEL_KEY)  # noqa: F821
+    reply = llm.bind(max_tokens=16).invoke('Count from 1 to 300, numbers separated by spaces.')
+    used = (reply.usage_metadata or {}).get('output_tokens')
+    reason = reply.response_metadata.get('finish_reason')
+    if reason != 'length' or (used is not None and used > 32):
+        raise Warning_(f'the server ignored a 16-token limit (finish_reason={reason}, {used} output tokens): '
+                       'answers are not bounded, so a runaway answer can take very long before that PDF fails')
+    return f'a 16-token limit is applied by the server ({used} output tokens, finish_reason=length)'
 
 
 def llm_graph():
@@ -134,6 +158,7 @@ check('embedding model', embedding,
       '--embedding-model-dir.', 300)
 check('neo4j', neo4j, 'Neo4j is not usable from the builder; see: scripts/baseline_neo4j_builder.sh docker-logs', 60)
 if check('LLM request', llm_plain, llm_hint, 600):
+    check('LLM output limit', llm_limit, llm_hint, 300)
     check('LLM graph extraction (builder code path)', llm_graph,
           lambda exc, message: llm_hint(exc, message) if 'Connect' in message else
           'The builder asks for structured output (OpenAI response_format json_schema via LangChain); the LLM\n'

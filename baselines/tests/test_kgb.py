@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -456,7 +457,49 @@ class Neo4jBuilderFailureTests(unittest.TestCase):
     def test_builder_env_matches_compose_file(self):
         compose = (Path(__file__).resolve().parents[1] / 'deploy' / 'docker-compose.builder.yml').read_text()
         for key, value in nb.BUILDER_ENV.items():
-            self.assertIn(f'{key}: "{value}"', compose)
+            self.assertTrue(f'{key}: "{value}"' in compose or f"{key}: '{value}'" in compose, key)
+        self.assertEqual(json.loads(nb.BUILDER_ENV['KGB_LLM_EXTRA_BODY']),
+                         {'chat_template_kwargs': {'enable_thinking': False}})   # as LitKG's app/app/llm.py
+
+    def test_patch_gives_the_openai_compatible_branch_litkg_settings(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy'))
+        from patch_builder import GENERIC_BRANCH, IMPORT, patch
+        upstream = (IMPORT[0] + 'def get_llm(env_value, callback_manager=None):\n    try:\n        if False:\n'
+                    '            pass\n        else:\n' + GENERIC_BRANCH[0] + '    except Exception as e:\n'
+                    '        raise\n    return llm\n')
+        patched = patch(upstream)
+        compile(patched, 'llm.py', 'exec')
+        for key in ('KGB_LLM_MAX_TOKENS', 'KGB_LLM_TIMEOUT', 'KGB_LLM_EXTRA_BODY'):
+            self.assertIn(f'_kgb_os.environ.get("{key}"', patched)
+            self.assertIn(key, nb.BUILDER_ENV)
+        for argument in ('max_tokens=', 'timeout=', 'extra_body='):
+            self.assertIn(argument, patched)
+        with self.assertRaisesRegex(ValueError, 'differs from the pinned release'):
+            patch(patched)   # applied exactly once (the script restores the file from git first)
+
+    def test_database_lock_admits_one_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / nb.LOCK_FILE
+            with nb.database_lock(path):
+                self.assertEqual(path.read_text(), str(os.getpid()))
+                with self.assertRaisesRegex(nb.BuilderError, rf'another run \(pid {os.getpid()}\)'):
+                    with nb.database_lock(path):
+                        pass
+            with nb.database_lock(path):   # released when the holder ends
+                pass
+
+    def test_builder_log_summary_groups_causes(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy'))
+        from builder_log_summary import report, summarise
+        lines = ['b-1 | ERROR - File Failed in extraction: Graph transformation failed: Could not parse response '
+                 f'content as the length limit was reached - CompletionUsage(completion_tokens={n})' for n in (1, 2)]
+        lines += ['b-1 | INFO - extraction completed in 600.0 seconds for file name a.pdf',
+                  'b-1 | INFO - extraction completed in 5.0 seconds for file name kgb-end-to-end-test.pdf']
+        causes, durations = summarise(lines)
+        self.assertEqual(dict(causes), {'Graph transformation failed: Could not parse response content as the length '
+                                        'limit was reached': 2})
+        self.assertEqual(durations, [600.0])
+        self.assertIn('2 x Graph transformation failed', report('f', causes, durations))
 
 
 class CorpusTests(unittest.TestCase):

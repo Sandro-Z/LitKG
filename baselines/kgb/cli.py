@@ -136,8 +136,9 @@ def cmd_run(cfg, args):
         try:
             index_path = Path(cfg['paths']['corpus']).parent / 'pdf_index.json'
             pdf_index = load_json(index_path) if index_path.is_file() else None
-            builder, meta = nb.run(documents, policy, cfg['neo4j'], args.variant, client, store, cfg['paths']['pdfs'],
-                                   cache_root=cfg['paths']['cache'], pdf_index=pdf_index)
+            with nb.database_lock(Path(cfg['paths']['cache']) / nb.LOCK_FILE):
+                builder, meta = nb.run(documents, policy, cfg['neo4j'], args.variant, client, store,
+                                       cfg['paths']['pdfs'], cache_root=cfg['paths']['cache'], pdf_index=pdf_index)
         except nb.BuilderError as exc:
             print(f'error: {exc}', file=sys.stderr, flush=True)
             return 2
@@ -157,6 +158,10 @@ def cmd_run(cfg, args):
         consistency.append('whole documents extracted: the builder container runs with MAX_TOKEN_CHUNK_SIZE='
                            f'{nb.BUILDER_ENV["MAX_TOKEN_CHUNK_SIZE"]} (upstream default 10000 keeps only the first '
                            '10,000 tokens of each document for non-neo4j.com users)')
+        consistency.append('LLM request settings as in LitKG (app/app/llm.py), added to the builder\'s '
+                           f'OpenAI-compatible ChatOpenAI: max_tokens={nb.BUILDER_ENV["KGB_LLM_MAX_TOKENS"]}, timeout '
+                           f'{nb.BUILDER_ENV["KGB_LLM_TIMEOUT"]} s, extra_body={nb.BUILDER_ENV["KGB_LLM_EXTRA_BODY"]} '
+                           '(upstream sets none of them)')
         if meta.get('failed_documents'):
             consistency.append(f'INCOMPLETE: {len(meta["failed_documents"])} document(s) failed in the builder and '
                                'are missing from this graph (metadata.failed_documents)')
@@ -211,7 +216,8 @@ def cmd_builder_smoke(cfg, args):
     password = config_mod.secret(cfg['neo4j'], 'password_file', 'password_env')
     client, store = nb.BuilderClient(cfg['neo4j'], password), nb.Neo4jStore(cfg['neo4j'], password)
     try:
-        seconds, chunks, entities, relations = nb.smoke(policy, cfg['neo4j'], client, store)
+        with nb.database_lock(Path(cfg['paths']['cache']) / nb.LOCK_FILE):
+            seconds, chunks, entities, relations = nb.smoke(policy, cfg['neo4j'], client, store)
     except (nb.BuilderError, HttpError) as exc:
         print(f'  FAIL  end-to-end test: {exc}', flush=True)
         return 1

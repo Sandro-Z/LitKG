@@ -180,6 +180,10 @@ start_builder() {
     HTTPS_PROXY="${KGB_BUILD_PROXY:-${HTTPS_PROXY:-}}" git clone -q --depth 1 --branch "$BUILDER_REF" "$BUILDER_REPO" "$BUILDER_DIR"
   fi
   [[ "$(git -C "$BUILDER_DIR" rev-parse HEAD)" == "$BUILDER_COMMIT" ]] || { log "builder checkout is not the pinned commit"; return 1; }
+  # LitKG's LLM request settings for the builder's OpenAI-compatible branch (baselines/deploy/patch_builder.py)
+  git -C "$BUILDER_DIR" checkout -q -- backend/src/llm.py \
+    && "$VENV/bin/python" "$ROOT/baselines/deploy/patch_builder.py" "$BUILDER_DIR/backend/src/llm.py" \
+    || { log "cannot apply the LLM request settings to the builder"; return 1; }
   builder_secrets
   load_build_options
   make_dockerfile || return 1
@@ -192,6 +196,7 @@ start_builder() {
     log "the running Neo4j does not accept connections; restarting it"
     compose restart neo4j
   fi
+  save_builder_log
   log "building/starting Neo4j + builder backend (first build downloads several GB)"
   compose up -d --build || { log "docker compose could not build or start the builder (see the output above)"; return 1; }
   local i problem restarted=0 since
@@ -247,6 +252,17 @@ builder_traceback() {   # $1 since: the builder's own record of the first failed
   else
     tail -n 30 <<<"$recent" | redact
   fi
+}
+
+save_builder_log() {   # recreating the container discards the builder's log: keep it and summarise failures
+  [[ -n "$(compose ps -q builder-backend 2>/dev/null)" ]] || return 0
+  local file="$WORK/logs/builder-backend.$(date -u +%Y%m%dT%H%M%SZ).log.gz" marker="$WORK/logs/.builder-log-saved" since=""
+  [[ -s "$marker" ]] && since="$(cat "$marker")"
+  compose logs --no-color ${since:+--since "$since"} builder-backend 2>/dev/null | redact | gzip > "$file" || true
+  date -u +%FT%TZ > "$marker"
+  if [[ -z "$(gzip -dc "$file" 2>/dev/null | head -c 1)" ]]; then rm -f "$file"; return 0; fi
+  "$VENV/bin/python" "$ROOT/baselines/deploy/builder_log_summary.py" "$file" || true
+  ls -1t "$WORK"/logs/builder-backend.*.log.gz 2>/dev/null | tail -n +6 | xargs -r rm -f   # keep the last 5
 }
 
 builder_smoke() {   # one small PDF through /upload and /extract: exactly the path every PDF takes

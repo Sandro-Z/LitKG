@@ -9,7 +9,10 @@ LOG="$WORK/logs/run.log"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+# ps, not kill -0: a worker started by another user (e.g. via sudo) must count as running too.
+running() { [[ -f "$PIDFILE" ]] && ps -p "$(cat "$PIDFILE")" >/dev/null 2>&1; }
+# "kgb run" processes on this work directory, including one left behind by an earlier worker.
+kgb_runs() { { pgrep -f "kgb[.]cli --config $WORK/config[.]toml run" 2>/dev/null || true; } | tr '\n' ' ' | sed 's/ $//'; }
 
 pick_python() {   # first interpreter >= 3.11 that can create a venv with pip
   local candidate
@@ -140,6 +143,7 @@ follow() {   # show progress until the worker exits; Ctrl-C only stops watching
 
 launch() {
   running && die "already running (pid $(cat "$PIDFILE")); see: $0 status"
+  [[ -z "$(kgb_runs)" ]] || die "a run from an earlier start is still working (pid $(kgb_runs)) and would collide with a new one; stop it first: $0 stop"
   mkdir -p "$WORK/logs"
   setup_python
   store_key
@@ -154,6 +158,7 @@ launch() {
 
 cmd_status() {
   if running; then echo "status: running (pid $(cat "$PIDFILE"))"; else echo "status: not running"; fi
+  if ! running && [[ -n "$(kgb_runs)" ]]; then echo "warning: a run without its worker is still working (pid $(kgb_runs)); stop it: $0 stop"; fi
   [[ -s "$LOG" ]] && { echo "--- last log lines"; tail -n 6 "$LOG"; }
   ls -1 "$WORK"/out/graph.*.json 2>/dev/null | sed 's/^/graph: /' || true
   ls -1 "$WORK"/out/failed.*.json 2>/dev/null | sed 's/^/INCOMPLETE, failed documents listed in: /' || true
@@ -162,6 +167,12 @@ cmd_status() {
 cmd_stop() {
   if running; then kill -- -"$(cat "$PIDFILE")" 2>/dev/null || kill "$(cat "$PIDFILE")"; rm -f "$PIDFILE"; echo stopped
   else echo "not running"; fi
+  sleep 1
+  local left
+  left="$(kgb_runs)"
+  [[ -z "$left" ]] && return 0
+  # shellcheck disable=SC2086
+  kill $left 2>/dev/null && echo "stopped leftover run (pid $left)" || die "cannot stop pid $left (started by another user?); run: sudo kill $left"
 }
 
 dispatch() {

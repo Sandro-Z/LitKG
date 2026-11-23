@@ -6,6 +6,7 @@ and exports each document's entities/relations with the official neo4j driver.
 Schema notes: ``docs/neo4j_schema_notes.md``.
 """
 import base64
+import contextlib
 import re
 import time
 from collections import Counter
@@ -32,9 +33,13 @@ Q_RELATIONS = ('MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) I
 Q_RESET = 'MATCH (n) DETACH DELETE n'
 
 # Environment the builder container runs with (baselines/deploy/docker-compose.builder.yml; a test keeps
-# the two in sync). Upstream processes only the first MAX_TOKEN_CHUNK_SIZE tokens (10,000) of each
-# document for non-neo4j.com users (src/create_chunks.py); raised so whole papers are extracted.
-BUILDER_ENV = {'MAX_TOKEN_CHUNK_SIZE': '100000000'}
+# the two in sync); part of the checkpoint key. Upstream processes only the first MAX_TOKEN_CHUNK_SIZE
+# tokens (10,000) of each document for non-neo4j.com users (src/create_chunks.py); raised so whole papers
+# are extracted. KGB_LLM_* are the request settings LitKG uses for the same LLM (app/app/llm.py: thinking
+# off, bounded output and time); scripts/baseline_neo4j_builder.sh passes them to the builder's
+# OpenAI-compatible ChatOpenAI, which upstream creates without them.
+BUILDER_ENV = {'MAX_TOKEN_CHUNK_SIZE': '100000000', 'KGB_LLM_MAX_TOKENS': '8192', 'KGB_LLM_TIMEOUT': '300',
+               'KGB_LLM_EXTRA_BODY': '{"chat_template_kwargs": {"enable_thinking": false}}'}
 LOG_HINT = 'the cause is in the builder log: scripts/baseline_neo4j_builder.sh docker-logs'
 # Sent with every /extract, as the builder's own frontend does (EmbeddingConfigUtils.ts defaults). The
 # backend reads them from the request, not from its environment: processing_source() calls
@@ -42,12 +47,47 @@ LOG_HINT = 'the cause is in the builder log: scripts/baseline_neo4j_builder.sh d
 # /extract then answers only "Failed To Process File ... or LLM Unable To Parse Content ".
 BUILDER_EMBEDDING = {'embedding_provider': 'sentence-transformer', 'embedding_model': 'all-MiniLM-L6-v2'}
 SMOKE_FILE = 'kgb-end-to-end-test.pdf'
+LOCK_FILE = 'neo4j-builder.lock'   # in the cache directory; see database_lock()
 SMOKE_TEXT = ('Aspirin irreversibly inhibits cyclooxygenase-1 (COX-1) in human platelets. '
               'Low-dose aspirin reduces the risk of myocardial infarction.')
 
 
 class BuilderError(RuntimeError):
     pass
+
+
+@contextlib.contextmanager
+def database_lock(path):
+    """Only one process may use the builder's Neo4j: every run empties the database before each PDF.
+
+    The lock is held by the Python process itself, so it is released only when the process exits,
+    whichever way it exits; the holder's PID is written into the file for "stop" and the message.
+    """
+    import fcntl
+    import os
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = open(path, 'a+')
+    except PermissionError:   # created by a run under another user (e.g. sudo)
+        handle = open(path)
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            holder = handle.read().strip() or '?'
+            raise BuilderError(f'another run (pid {holder}) is using the builder\'s Neo4j database; every run '
+                               f'empties it before each PDF, so two runs destroy each other\'s work. Stop it first: '
+                               f'scripts/baseline_neo4j_builder.sh stop') from None
+        if handle.writable():
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
+        yield
+    finally:
+        handle.close()
 
 
 def predicate_instructions(policy):
